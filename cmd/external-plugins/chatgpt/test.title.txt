@@ -1,0 +1,1 @@
+add gzip compression for check_leader requests
