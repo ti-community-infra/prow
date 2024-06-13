@@ -29,7 +29,7 @@ type CoAuthor struct {
 
 func NormalizeSignedOffBy(commitMessages []string) []SignedAuthor {
 	combineMessage := strings.Join(commitMessages, "\n\n")
-	authorSet := sets.String{}
+	authorSet := sets.Set[string]{}
 	signedAuthors := make([]SignedAuthor, 0)
 
 	compile := regexp.MustCompile(signOffRegexp)
@@ -64,7 +64,7 @@ func NormalizeSignedOffBy(commitMessages []string) []SignedAuthor {
 }
 
 func NormalizeCoAuthorBy(commitAuthors []CommitAuthor, commitMessages []string, prAuthorLogin string) []CoAuthor {
-	coAuthorSet := sets.String{}
+	coAuthorSet := sets.Set[string]{}
 	coAuthors := make([]CoAuthor, 0)
 
 	// Get co-author information based on commit author information.
