@@ -691,6 +691,7 @@ This pull-request has been approved by:{{range $index, $approval := .ap.ListAppr
 **Once this PR has been reviewed and has the lgtm label**, please ask for approval from {{range $index, $cc := .ap.AssignedCCs}}{{if $index}}, {{end}}{{printf "[%s](https://github.com/%s)" $cc $cc}}{{end}}. For more information see [the Code Review Process]({{ .prProcessLink }}).
 {{- end}}
 {{- end}}
+**Please ensure that each of them provides their approval before proceeding.**
 {{- end}}
 
 {{if not .ap.RequireIssue -}}
