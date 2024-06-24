@@ -1,7 +1,0 @@
----
-token: 2840042a59284069ae67f9ae881ba82e
-base_url: https://zuowuhui.openai.azure.com/
-api_type: AZURE
-api_version: 2023-03-15-preview
-engine: prow-bot
-model: gpt-3.5-turbo
