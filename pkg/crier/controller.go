@@ -132,9 +132,9 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 	}
 
 	// we set omitempty on PrevReportDescriptions, so here we need to init it if is nil
-	if pj.Status.PrevReportDescriptions == nil {
-		pj.Status.PrevReportDescriptions = map[string]string{}
-	}
+	// if pj.Status.PrevReportDescriptions == nil {
+	// 	pj.Status.PrevReportDescriptions = map[string]string{}
+	// }
 
 	if pj.StateReported(r.reporter.GetName()) {
 		log.Trace("Already reported")

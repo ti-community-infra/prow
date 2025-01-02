@@ -1153,6 +1153,10 @@ func (j *ProwJob) ClusterAlias() string {
 
 // StateReported return true if it need to report the new state for the job.
 func (j *ProwJob) StateReported(reporter string) bool {
+	if j.Status.PrevReportStates == nil {
+		return false
+	}
+
 	if j.Status.PrevReportStates[reporter] != j.Status.State {
 		return false
 	}
@@ -1161,9 +1165,9 @@ func (j *ProwJob) StateReported(reporter string) bool {
 	// 	For Jenkins, no url attribute when the build was enqueued, but the prow job state is pending.
 	// 	When the Jenkins build is running, jenkins-operator will only update the descriptioin and url
 	//  in prow job status, without changes to state.
-	if j.Status.PrevReportDescriptions[reporter] != j.Status.Description {
-		return false
-	}
+	// if j.Status.PrevReportDescriptions[reporter] != j.Status.Description {
+	// 	return false
+	// }
 
 	return true
 }

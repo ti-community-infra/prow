@@ -41,10 +41,10 @@ func updateReportState(ctx context.Context, pj *prowv1.ProwJob, log *logrus.Entr
 	}
 	newpj.Status.PrevReportStates[reporterName] = reportedState
 	// we set omitempty on PrevReportDescriptions, so here we need to init it if is nil
-	if newpj.Status.PrevReportDescriptions == nil {
-		newpj.Status.PrevReportDescriptions = map[string]string{}
-	}
-	newpj.Status.PrevReportDescriptions[reporterName] = reportedDescription
+	// if newpj.Status.PrevReportDescriptions == nil {
+	// 	newpj.Status.PrevReportDescriptions = map[string]string{}
+	// }
+	// newpj.Status.PrevReportDescriptions[reporterName] = reportedDescription
 
 	if err := pjclientset.Patch(ctx, newpj, ctrlruntimeclient.MergeFrom(pj)); err != nil {
 		return fmt.Errorf("failed to patch: %w", err)
@@ -58,7 +58,7 @@ func updateReportState(ctx context.Context, pj *prowv1.ProwJob, log *logrus.Entr
 		if err := pjclientset.Get(ctx, name, pj); err != nil {
 			return false, err
 		}
-		return pj.Status.PrevReportStates != nil && pj.StateReported(reporterName), nil
+		return pj.StateReported(reporterName), nil
 	}); err != nil {
 		return fmt.Errorf("failed to wait for updated report status to be in lister: %w", err)
 	}
