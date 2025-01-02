@@ -908,7 +908,7 @@ func TestProwJobSpec_GetPipelineRunSpec(t *testing.T) {
 	}
 }
 
-func TestProwJob_NeedReportState(t *testing.T) {
+func TestProwJob_StateReported(t *testing.T) {
 	tests := []struct {
 		name     string
 		job      *ProwJob
@@ -928,7 +928,7 @@ func TestProwJob_NeedReportState(t *testing.T) {
 				},
 			},
 			reporter: "github",
-			want:     true,
+			want:     false,
 		},
 		{
 			name: "state changed-jenkins agent",
@@ -943,7 +943,7 @@ func TestProwJob_NeedReportState(t *testing.T) {
 				},
 			},
 			reporter: "github",
-			want:     true,
+			want:     false,
 		},
 		{
 			name: "not-jenkins-agent, state not changed",
@@ -974,7 +974,7 @@ func TestProwJob_NeedReportState(t *testing.T) {
 				},
 			},
 			reporter: "github",
-			want:     false,
+			want:     true,
 		},
 		{
 			name: "jenkins-agent-description changed",
@@ -991,13 +991,13 @@ func TestProwJob_NeedReportState(t *testing.T) {
 				},
 			},
 			reporter: "github",
-			want:     true,
+			want:     false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.job.NeedReportState(tt.reporter); got != tt.want {
+			if got := tt.job.StateReported(tt.reporter); got != tt.want {
 				t.Errorf("ProwJob.NeedReportState() = %v, want %v", got, tt.want)
 			}
 		})

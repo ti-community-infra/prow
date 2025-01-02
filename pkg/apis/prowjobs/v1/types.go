@@ -1151,13 +1151,9 @@ func (j *ProwJob) ClusterAlias() string {
 	return j.Spec.Cluster
 }
 
-// NeedReportState return true if it need to report the new state for the job.
-func (j *ProwJob) NeedReportState(reporter string) bool {
+// StateReported return true if it need to report the new state for the job.
+func (j *ProwJob) StateReported(reporter string) bool {
 	if j.Status.PrevReportStates[reporter] != j.Status.State {
-		return true
-	}
-
-	if j.Spec.Agent != JenkinsAgent {
 		return false
 	}
 
@@ -1165,7 +1161,11 @@ func (j *ProwJob) NeedReportState(reporter string) bool {
 	// 	For Jenkins, no url attribute when the build was enqueued, but the prow job state is pending.
 	// 	When the Jenkins build is running, jenkins-operator will only update the descriptioin and url
 	//  in prow job status, without changes to state.
-	return j.Status.PrevReportDescriptions[reporter] != j.Status.Description
+	if j.Status.PrevReportDescriptions[reporter] != j.Status.Description {
+		return false
+	}
+
+	return true
 }
 
 // Pull describes a pull request at a particular point in time.

@@ -136,7 +136,7 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 		pj.Status.PrevReportDescriptions = map[string]string{}
 	}
 
-	if !pj.NeedReportState(r.reporter.GetName()) {
+	if pj.StateReported(r.reporter.GetName()) {
 		log.Trace("Already reported")
 		return nil, nil
 	}
