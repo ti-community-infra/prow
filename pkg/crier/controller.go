@@ -141,7 +141,7 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 	}
 
 	if pj.StateReported(r.reporter.GetName()) {
-		log.Trace("Already reported")
+		log.WithField("preJobDescription", pj.Status.PrevReportDescriptions).Info("Already reported")
 		return nil, nil
 	}
 
