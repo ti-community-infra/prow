@@ -1165,6 +1165,9 @@ func (j *ProwJob) StateReported(reporter string) bool {
 	// 	For Jenkins, no url attribute when the build was enqueued, but the prow job state is pending.
 	// 	When the Jenkins build is running, jenkins-operator will only update the descriptioin and url
 	//  in prow job status, without changes to state.
+	if j.Status.PrevReportDescriptions == nil {
+		return false
+	}
 	if j.Status.PrevReportDescriptions[reporter] != j.Status.Description {
 		return false
 	}
