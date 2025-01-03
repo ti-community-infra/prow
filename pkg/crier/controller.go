@@ -120,9 +120,13 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 		return nil, nil
 	}
 
-	log = log.WithField("jobName", pj.Spec.Job)
+	log = log.WithField("jobName", pj.Spec.Job).
+		WithField("jobStatus", pj.Status.State).
+		WithField("jobDescription", pj.Status.Description).
+		WithField("jobUrl", pj.Status.URL)
 
 	if !r.reporter.ShouldReport(ctx, log, &pj) {
+		log.Info("should not report, skip.")
 		return nil, nil
 	}
 
@@ -131,13 +135,16 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 		pj.Status.PrevReportStates = map[string]prowv1.ProwJobState{}
 	}
 
-	// already reported current state
-	if pj.Status.PrevReportStates[r.reporter.GetName()] == pj.Status.State {
+	// we set omitempty on PrevReportDescriptions, so here we need to init it if is nil
+	if pj.Status.PrevReportDescriptions == nil {
+		pj.Status.PrevReportDescriptions = map[string]string{}
+	}
+
+	if pj.StateReported(r.reporter.GetName()) {
 		log.Trace("Already reported")
 		return nil, nil
 	}
 
-	log = log.WithField("jobStatus", pj.Status.State)
 	log.Info("Will report state")
 	pjs, requeue, err := r.reporter.Report(ctx, log, &pj)
 	if err != nil {

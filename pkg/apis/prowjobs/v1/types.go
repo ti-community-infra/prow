@@ -1125,7 +1125,8 @@ type ProwJobStatus struct {
 
 	// PrevReportStates stores the previous reported prowjob state per reporter
 	// So crier won't make duplicated report attempt
-	PrevReportStates map[string]ProwJobState `json:"prev_report_states,omitempty"`
+	PrevReportStates       map[string]ProwJobState `json:"prev_report_states,omitempty"`
+	PrevReportDescriptions map[string]string       `json:"prev_report_descriptions,omitempty"`
 }
 
 // Complete returns true if the prow job has finished
@@ -1148,6 +1149,27 @@ func (j *ProwJob) ClusterAlias() string {
 		return DefaultClusterAlias
 	}
 	return j.Spec.Cluster
+}
+
+// StateReported return true if it need to report the new state for the job.
+func (j *ProwJob) StateReported(reporter string) bool {
+	if j.Status.PrevReportStates == nil {
+		return false
+	}
+
+	if j.Status.PrevReportStates[reporter] != j.Status.State {
+		return false
+	}
+
+	// Update when jenkins build description changed.
+	// 	For Jenkins, no url attribute when the build was enqueued, but the prow job state is pending.
+	// 	When the Jenkins build is running, jenkins-operator will only update the descriptioin and url
+	//  in prow job status, without changes to state.
+	// if j.Status.PrevReportDescriptions[reporter] != j.Status.Description {
+	// 	return false
+	// }
+
+	return true
 }
 
 // Pull describes a pull request at a particular point in time.
