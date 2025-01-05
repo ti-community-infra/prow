@@ -123,7 +123,9 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 	log = log.WithField("jobName", pj.Spec.Job).
 		WithField("jobStatus", pj.Status.State).
 		WithField("jobDescription", pj.Status.Description).
-		WithField("jobUrl", pj.Status.URL)
+		WithField("jobUrl", pj.Status.URL).
+		WithField("prevReportStates", pj.Status.PrevReportStates).
+		WithField("preReportDescriptions", pj.Status.PrevReportDescriptions)
 
 	if !r.reporter.ShouldReport(ctx, log, &pj) {
 		log.Info("should not report, skip.")
@@ -141,7 +143,7 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 	}
 
 	if pj.StateReported(r.reporter.GetName()) {
-		log.WithField("preJobDescription", pj.Status.PrevReportDescriptions).Info("Already reported")
+		log.Info("Already reported")
 		return nil, nil
 	}
 

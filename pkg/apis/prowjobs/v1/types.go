@@ -1168,9 +1168,9 @@ func (j *ProwJob) StateReported(reporter string) bool {
 	if j.Status.PrevReportDescriptions == nil {
 		return false
 	}
-	if j.Status.PrevReportDescriptions[reporter] != j.Status.Description {
-		return false
-	}
+	// if j.Status.PrevReportDescriptions[reporter] != j.Status.Description {
+	// 	return false
+	// }
 
 	return true
 }
