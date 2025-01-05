@@ -458,6 +458,17 @@ func (c *Controller) syncTriggeredJob(pj prowapi.ProwJob, reports chan<- prowapi
 			}
 			pj.Status.State = prowapi.PendingState
 			pj.Status.Description = "Jenkins job running."
+
+			// Construct the status URL that will be used in reports.
+			pj.Status.PodName = pj.ObjectMeta.Name
+			pj.Status.BuildID = jb.BuildID()
+			pj.Status.JenkinsBuildID = strconv.Itoa(jb.Number)
+			var b bytes.Buffer
+			if err := c.config().JobURLTemplate.Execute(&b, &pj); err != nil {
+				c.log.WithFields(pjutil.ProwJobFields(&pj)).Errorf("error executing URL template: %v", err)
+			} else {
+				pj.Status.URL = b.String()
+			}
 		}
 	}
 	// Report to GitHub.
