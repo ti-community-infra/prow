@@ -432,7 +432,6 @@ Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a commen
 				newTestCommentTime(time.Now(), "k8s-ci-robot", `[APPROVALNOTIFIER] This PR is **NOT APPROVED**
 
 This pull-request has been approved by: *<a href="" title="Approved">ALIcE</a>*, *<a href="#" title="Author self-approved">cjwagner</a>*
-**Please ensure that each of them provides their approval before proceeding.**
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with `+"`/approve no-issue`"+`
 
