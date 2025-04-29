@@ -285,6 +285,13 @@ builds:
       - -s -w
       - -X sigs.k8s.io/prow/pkg/version.Version={{.Env.VERSION}}
       - -X sigs.k8s.io/prow/pkg/version.Name=cherrypicker
+  - id: chatgpt
+    dir: .
+    main: cmd/external-plugins/chatgpt
+    ldflags:
+      - -s -w
+      - -X sigs.k8s.io/prow/version.Version={{.Env.VERSION}}
+      - -X sigs.k8s.io/prow/version.Name=chatgpt      
   - id: refresh
     dir: .
     main: cmd/external-plugins/refresh
