@@ -548,7 +548,6 @@ func (ap Approvers) GetCCs() []string {
 	approversAndAssignees := currentApprovers.Union(ap.assignees)
 	leafReverseMap := ap.owners.GetReverseMap(ap.owners.GetLeafApprovers())
 	suggested := ap.owners.KeepCoveringApprovers(leafReverseMap, approversAndAssignees, randomizedApprovers)
-
 	approversAndSuggested := currentApprovers.Union(suggested)
 	everyone := approversAndSuggested.Union(ap.assignees)
 	fullReverseMap := ap.owners.GetReverseMap(ap.owners.GetApprovers())
