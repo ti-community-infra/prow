@@ -203,6 +203,20 @@ func (o Owners) GetSuggestedApprovers(reverseMap map[string]sets.Set[string], po
 		ap.AddApprover(newApprover, "", false)
 	}
 
+	// Now that we have a minimum set of approvers, but the reverseMap is people to OWNERS
+	// file, that meas people to a folder path.
+	// In full Prow OWNERS format there a different scope defined in same OWNERS, So let's
+	// remove some to make the set more minimal.
+	// We do this by removing one approver at a time and checking if all requirements are still met.
+	for _, approver := range ap.GetCurrentApproversSet().UnsortedList() {
+		ap.RemoveApprover(approver)
+		// If requirements are still met after removing this approver, keep going.
+		// Otherwise, add the approver back because they're needed.
+		if !ap.RequirementsMet() {
+			ap.AddApprover(approver, "", false)
+		}
+	}
+
 	return ap.GetCurrentApproversSet()
 }
 
@@ -528,12 +542,14 @@ func (ap Approvers) GetFiles(baseURL *url.URL, branch string) []File {
 // The goal of this second step is to only keep the assignees that are
 // the most useful.
 func (ap Approvers) GetCCs() []string {
+	// TODO: refactor it to random by scope.
 	randomizedApprovers := ap.owners.GetShuffledApprovers()
 
 	currentApprovers := ap.GetCurrentApproversSet()
 	approversAndAssignees := currentApprovers.Union(ap.assignees)
 	leafReverseMap := ap.owners.GetReverseMap(ap.owners.GetLeafApprovers())
 	suggested := ap.owners.KeepCoveringApprovers(leafReverseMap, approversAndAssignees, randomizedApprovers)
+
 	approversAndSuggested := currentApprovers.Union(suggested)
 	everyone := approversAndSuggested.Union(ap.assignees)
 	fullReverseMap := ap.owners.GetReverseMap(ap.owners.GetApprovers())
