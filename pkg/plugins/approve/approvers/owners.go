@@ -542,7 +542,6 @@ func (ap Approvers) GetFiles(baseURL *url.URL, branch string) []File {
 // The goal of this second step is to only keep the assignees that are
 // the most useful.
 func (ap Approvers) GetCCs() []string {
-	// TODO: refactor it to random by scope.
 	randomizedApprovers := ap.owners.GetShuffledApprovers()
 
 	currentApprovers := ap.GetCurrentApproversSet()
