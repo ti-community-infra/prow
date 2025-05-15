@@ -284,7 +284,7 @@ type Client interface {
 	Used() bool
 	TriggerGitHubWorkflow(org, repo string, id int) error
 	TriggerFailedGitHubWorkflow(org, repo string, id int) error
-	ApproveWorkflowRun(org, repo string, runID int64) error
+	ApproveWorkflowRun(org, repo string, runID int) error
 	GetPendingApproveActionRunsByHeadSHA(org, repo, headSHA string) ([]WorkflowRun, error)
 }
 
@@ -2127,7 +2127,7 @@ func (c *client) TriggerFailedGitHubWorkflow(org, repo string, id int) error {
 // ApproveWorkflowRun approves a workflow run
 //
 // See https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28#approve-a-workflow-run-for-a-fork-pull-request
-func (c *client) ApproveWorkflowRun(org, repo string, runID int64) error {
+func (c *client) ApproveWorkflowRun(org, repo string, runID int) error {
 	durationLogger := c.log("ApproveWorkflowRun", org, repo, runID)
 	defer durationLogger()
 

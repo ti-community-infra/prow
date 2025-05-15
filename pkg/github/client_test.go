@@ -3654,7 +3654,7 @@ func TestApproveWorkflowRun(t *testing.T) {
 		statusCode    int
 		org           string
 		repo          string
-		runID         int64
+		runID         int
 		expectedError bool
 	}{
 		{
