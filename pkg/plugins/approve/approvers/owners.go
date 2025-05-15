@@ -203,6 +203,20 @@ func (o Owners) GetSuggestedApprovers(reverseMap map[string]sets.Set[string], po
 		ap.AddApprover(newApprover, "", false)
 	}
 
+	// Now that we have a minimum set of approvers, but the reverseMap is people to OWNERS
+	// file, that means people to a folder path.
+	// In full Prow OWNERS format there a different scope defined in same OWNERS, So let's
+	// remove some to make the set more minimal.
+	// We do this by removing one approver at a time and checking if all requirements are still met.
+	for _, approver := range ap.GetCurrentApproversSet().UnsortedList() {
+		ap.RemoveApprover(approver)
+		// If requirements are still met after removing this approver, keep going.
+		// Otherwise, add the approver back because they're needed.
+		if !ap.RequirementsMet() {
+			ap.AddApprover(approver, "", false)
+		}
+	}
+
 	return ap.GetCurrentApproversSet()
 }
 
