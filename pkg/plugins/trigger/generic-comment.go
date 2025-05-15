@@ -180,7 +180,7 @@ func handleGenericComment(c Client, trigger plugins.Trigger, gc github.GenericCo
 					// Assumes c.GitHubClient.ListWorkflowRunsBySha exists or similar functionality
 					// to get runs for the specific headSHA.
 					// This method needs to be added to the prow/pkg/github.Client interface and its implementations.
-					pendingApprovalWorkflowRuns, listErr := c.GitHubClient.GetPendingApproveActionRunsByHeadBranch(org, repo, pr.Head.Ref, headSHA)
+					pendingApprovalWorkflowRuns, listErr := c.GitHubClient.GetPendingApproveActionRunsByHeadSHA(org, repo, headSHA)
 					if listErr != nil {
 						prLogger.Errorf("Failed to list pending approval workflow runs to check for pending approvals: %v", listErr)
 					} else {
