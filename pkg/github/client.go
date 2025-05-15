@@ -285,8 +285,7 @@ type Client interface {
 	TriggerGitHubWorkflow(org, repo string, id int) error
 	TriggerFailedGitHubWorkflow(org, repo string, id int) error
 	ApproveWorkflowRun(org, repo string, runID int64) error
-	ListWorkflowRunsBySha(org, repo, sha string) ([]WorkflowRun, error)
-	GetPendingApproveActionRunsByHeadBranch(org, repo, branchName, headSHA string) ([]WorkflowRun, error)
+	GetPendingApproveActionRunsByHeadSHA(org, repo, headSHA string) ([]WorkflowRun, error)
 }
 
 // client interacts with the github api. It is reconstructed whenever
@@ -2063,6 +2062,7 @@ func (c *client) GetFailedActionRunsByHeadBranch(org, repo, branchName, headSHA 
 	// setting the OR condition to get both PR and PR target workflows, as well
 	// as workflows called via another workflow using workflow_call (matrix workflows)
 	query.Add("event", "pull_request OR pull_request_target OR workflow_call")
+	// TODO: check if this is correct, if set branchk, alway get 0 workflow_runs
 	query.Add("branch", branchName)
 	u.RawQuery = query.Encode()
 
@@ -2124,7 +2124,6 @@ func (c *client) TriggerFailedGitHubWorkflow(org, repo string, id int) error {
 	return err
 }
 
-
 // ApproveWorkflowRun approves a workflow run
 //
 // See https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28#approve-a-workflow-run-for-a-fork-pull-request
@@ -2139,23 +2138,13 @@ func (c *client) ApproveWorkflowRun(org, repo string, runID int64) error {
 		exitCodes: []int{204}, // Successful approval returns 204 No Content
 	}, nil)
 	return err
-}if len(approvalErrorMessages) > 0 {
-	prLogger.Warnf("Encountered %d error(s) while attempting to approve pending GitHub Action runs: %s", len(approvalErrorMessages), strings.Join(approvalErrorMessages, "; "))
-	// Consider commenting on PR if errors are persistent or critical.
-}
-if approvedCount > 0 {
-	prLogger.Infof("Successfully approved %d GitHub Action workflow run(s).", approvedCount)
-} else if foundPending && len(approvalErrorMessages) == 0 {
-	prLogger.Info("Found pending GitHub Action runs but none were approved (status may have changed or other issues).")
-} else if !foundPending {
-	prLogger.Info("No GitHub Action workflow runs found in 'action_required' state for approval.")
 }
 
-// GetPendingApproveActionRunsByHeadBranch lists workflow runs for a specific ref that are pending approval
+// GetPendingApproveActionRunsByHeadSHA lists workflow runs for a specific ref 
 //
 // See https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28#list-workflow-runs-for-a-repository
-func (c *client) GetPendingApproveActionRunsByHeadBranch(org, repo, branchName, headSHA string) ([]WorkflowRun, error) {
-	durationLogger := c.log("GetPendingApproveActionRunsByHeadBranch", org, repo)
+func (c *client) GetPendingApproveActionRunsByHeadSHA(org, repo, headSHA string) ([]WorkflowRun, error) {
+	durationLogger := c.log("GetPendingApproveActionRunsByHeadSHA", org, repo)
 	defer durationLogger()
 
 	var runs WorkflowRuns
@@ -2169,7 +2158,6 @@ func (c *client) GetPendingApproveActionRunsByHeadBranch(org, repo, branchName, 
 	// setting the OR condition to get both PR and PR target workflows, as well
 	// as workflows called via another workflow using workflow_call (matrix workflows)
 	query.Add("event", "pull_request OR pull_request_target OR workflow_call")
-	query.Add("branch", branchName)
 	u.RawQuery = query.Encode()
 
 	_, err := c.request(&request{
@@ -2188,11 +2176,10 @@ func (c *client) GetPendingApproveActionRunsByHeadBranch(org, repo, branchName, 
 	// This makes it hard to use directly. Instead, we loop through the runs and check them individually.
 	// A successful workflow will have status "completed" and conclusion "success".
 	// A failed workflow also have status "completed", but the conclusion can be either "failure" or "cancelled".
-	// A pending approval workflow will have status "action_required". 
-	// TODO: check for a pending approval workflow, their status and conclusion ???
+	// A pending approval workflow will have status "completed" and conclusion "action_required". 
 	// We only want completed jobs that are not successful.
 	for _, run := range runs.WorkflowRuns {
-		if run.Status == "action_required" {
+		if run.Status == "completed" && run.Conclusion == "action_required" {
 			prPendingApprovalRuns = append(prPendingApprovalRuns, run)
 		}
 	}
