@@ -3646,3 +3646,181 @@ func TestIsAppInstalled(t *testing.T) {
 		})
 	}
 }
+
+func TestApproveWorkflowRun(t *testing.T) {
+	testCases := []struct {
+		name          string
+		response      string
+		statusCode    int
+		org           string
+		repo          string
+		runID         int64
+		expectedError bool
+	}{
+		{
+			name:          "successful approval",
+			statusCode:    http.StatusNoContent,
+			org:           "org",
+			repo:          "repo",
+			runID:         123,
+			expectedError: false,
+		},
+		{
+			name:          "api error forbidden",
+			response:      `{"message": "Forbidden"}`,
+			statusCode:    http.StatusForbidden,
+			org:           "org",
+			repo:          "repo",
+			runID:         123,
+			expectedError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRT := func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodPost {
+					return nil, fmt.Errorf("expected POST request, got %s", req.Method)
+				}
+				expectedPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/approve", tc.org, tc.repo, tc.runID)
+				if req.URL.Path != expectedPath {
+					return nil, fmt.Errorf("expected path %s, got %s", expectedPath, req.URL.Path)
+				}
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Body:       io.NopCloser(strings.NewReader(tc.response)),
+				}, nil
+			}
+			c := client{
+				logger: logrus.WithField("client", "github"),
+				delegate: &delegate{
+					client:        &http.Client{Transport: testRoundTripper{rt: fakeRT}},
+					bases:         []string{"http://localhost"},
+					time:          &standardTime{},
+					max404Retries: DefaultMax404Retries,
+					maxSleepTime:  DefaultMaxSleepTime,
+					initialDelay:  time.Millisecond, // Speed up retries for tests
+					maxRetries:    1,
+				},
+			}
+			err := c.ApproveWorkflowRun(tc.org, tc.repo, tc.runID)
+			if tc.expectedError && err == nil {
+				t.Errorf("Expected an error, but got none")
+			}
+			if !tc.expectedError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestGetPendingApproveActionRunsByHeadSHA(t *testing.T) {
+	testCases := []struct {
+		name           string
+		responseBody   string
+		responseStatus int
+		org            string
+		repo           string
+		headSHA        string
+		expectedRuns   []WorkflowRun
+	}{
+		{
+			name:           "single run",
+			responseBody:   `{"workflow_runs": [{"id": 1, "status": "completed", "conclusion": "action_required"}]}`,
+			responseStatus: http.StatusOK,
+			org:            "org",
+			repo:           "repo",
+			headSHA:        "sha",
+			expectedRuns: []WorkflowRun{
+				{ID: 1, Status: "completed", Conclusion: "action_required"},
+			},
+		},
+		{
+			name:           "single run without any action required",
+			responseBody:   `{"workflow_runs": [{"id": 1, "status": "completed", "conclusion": "success"}]}`,
+			responseStatus: http.StatusOK,
+			org:            "org",
+			repo:           "repo",
+			headSHA:        "sha",
+			expectedRuns:   []WorkflowRun{},
+		},
+		{
+			name:           "no runs",
+			responseBody:   `{"workflow_runs": []}`,
+			responseStatus: http.StatusOK,
+			org:            "org",
+			repo:           "repo",
+			headSHA:        "sha",
+			expectedRuns:   []WorkflowRun{},
+		},
+		{
+			name: "multiple runs, mixed status and conclusion",
+			responseBody: `{"workflow_runs": [
+				{"id": 1, "status": "completed", "conclusion": "action_required"},
+				{"id": 2, "status": "in_progress", "conclusion": null},
+				{"id": 3, "status": "completed", "conclusion": "success"},
+				{"id": 4, "status": "completed", "conclusion": "failure"},
+				{"id": 5, "status": "completed", "conclusion": "action_required"}
+			]}`,
+			responseStatus: http.StatusOK,
+			org:            "org",
+			repo:           "repo",
+			headSHA:        "sha",
+			expectedRuns: []WorkflowRun{
+				{ID: 1, Status: "completed", Conclusion: "action_required"},
+				{ID: 5, Status: "completed", Conclusion: "action_required"},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRT := func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodGet {
+					return nil, fmt.Errorf("expected GET request, got %s", req.Method)
+				}
+				expectedPath := fmt.Sprintf("/repos/%s/%s/actions/runs", tc.org, tc.repo)
+				if req.URL.Path != expectedPath {
+					return nil, fmt.Errorf("expected path %s, got %s", expectedPath, req.URL.Path)
+				}
+				query := req.URL.Query()
+				if query.Get("head_sha") != tc.headSHA {
+					return nil, fmt.Errorf("expected head_sha query param %s, got %s", tc.headSHA, query.Get("head_sha"))
+				}
+				if query.Get("event") != "pull_request OR pull_request_target OR workflow_call" {
+					return nil, fmt.Errorf("expected event query param '%s', got '%s'", "pull_request OR pull_request_target OR workflow_call", query.Get("event"))
+				}
+				// Ensure other unexpected query params are not present in the initial call if they are not set by the function itself.
+				// Specifically, status and per_page (for the initial call) are not set by GetPendingApproveActionRunsByHeadSHA.
+				if query.Get("status") != "" {
+					return nil, fmt.Errorf("unexpected status query param: got '%s'", query.Get("status"))
+				}
+				// per_page might be added by pagination logic if Link headers are present, but not for the first call from the function itself usually.
+				// For this test, we assume no pagination in the mock or check specifically if it's part of the tc.
+				return &http.Response{
+					StatusCode: tc.responseStatus,
+					Body:       io.NopCloser(strings.NewReader(tc.responseBody)),
+				}, nil
+			}
+			c := client{
+				logger: logrus.WithField("client", "github"),
+				delegate: &delegate{
+					client:        &http.Client{Transport: testRoundTripper{rt: fakeRT}},
+					bases:         []string{"http://localhost"},
+					time:          &standardTime{},
+					max404Retries: DefaultMax404Retries,
+					maxSleepTime:  DefaultMaxSleepTime,
+					initialDelay:  time.Millisecond, // Speed up retries for tests
+					maxRetries:    1,
+				},
+			}
+			actualRuns, err := c.GetPendingApproveActionRunsByHeadSHA(tc.org, tc.repo, tc.headSHA)
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(actualRuns, tc.expectedRuns) {
+				t.Errorf("Expected runs %v, got %v", tc.expectedRuns, actualRuns)
+			}
+		})
+	}
+}
