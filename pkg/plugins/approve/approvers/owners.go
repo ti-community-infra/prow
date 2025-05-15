@@ -204,7 +204,7 @@ func (o Owners) GetSuggestedApprovers(reverseMap map[string]sets.Set[string], po
 	}
 
 	// Now that we have a minimum set of approvers, but the reverseMap is people to OWNERS
-	// file, that meas people to a folder path.
+	// file, that means people to a folder path.
 	// In full Prow OWNERS format there a different scope defined in same OWNERS, So let's
 	// remove some to make the set more minimal.
 	// We do this by removing one approver at a time and checking if all requirements are still met.
