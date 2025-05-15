@@ -18,6 +18,7 @@ package trigger
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/prow/pkg/kube"
@@ -140,35 +141,85 @@ func handleGenericComment(c Client, trigger plugins.Trigger, gc github.GenericCo
 	if pjutil.RetestRe.MatchString(textToCheck) || pjutil.RetestRequiredRe.MatchString(textToCheck) {
 		additionalLabels[kube.RetestLabel] = "true"
 	}
-	// run failed github actions
-	if trigger.TriggerGitHubWorkflows && (pjutil.RetestRe.MatchString(textToCheck) || pjutil.TestAllRe.MatchString(textToCheck)) {
-		headSHA, err := refGetter.HeadSHA()
-		if err != nil {
-			c.Logger.Warnf("headSHA unavailable, failed github actions for pr will not be triggered: %v", pr)
+
+	// Handle GitHub Workflow Triggers/Approvals
+	if trigger.TriggerGitHubWorkflows {
+		headSHA, shaErr := refGetter.HeadSHA()
+		if shaErr != nil {
+			c.Logger.Warnf("headSHA unavailable for PR #%d, GitHub Action interactions will be skipped: %v", number, shaErr)
 		} else {
-			failedRuns, err := c.GitHubClient.GetFailedActionRunsByHeadBranch(org, repo, pr.Head.Ref, headSHA)
-			if err != nil {
-				c.Logger.Errorf("%v: unable to get failed github action runs for branch %v", err, pr.Head.Ref)
-			} else {
-				for _, run := range failedRuns {
-					log := c.Logger.WithFields(logrus.Fields{
-						"runID":   run.ID,
-						"runName": run.Name,
-						"org":     org,
-						"repo":    repo,
-					})
-					runID := run.ID
-					go func() {
-						if err := c.GitHubClient.TriggerFailedGitHubWorkflow(org, repo, runID); err != nil {
-							log.Errorf("attempt to trigger github run failed: %v", err)
-						} else {
-							log.Infof("successfully triggered action run")
+			prLogger := c.Logger.WithFields(logrus.Fields{"org": org, "repo": repo, "pr": number, "sha": headSHA})
+
+			// Logic 1: Re-trigger FAILED GitHub Action runs (for /retest OR /test all)
+			if pjutil.RetestRe.MatchString(textToCheck) || pjutil.TestAllRe.MatchString(textToCheck) {
+				prLogger.Info("Checking for failed GitHub Action runs to re-trigger.")
+				failedRuns, errFailedRuns := c.GitHubClient.GetFailedActionRunsByHeadBranch(org, repo, pr.Head.Ref, headSHA)
+				if errFailedRuns != nil {
+					prLogger.Errorf("Unable to get failed GitHub Action runs for branch %s: %v", pr.Head.Ref, errFailedRuns)
+				} else {
+					if len(failedRuns) > 0 {
+						prLogger.Infof("Found %d failed action runs to re-trigger.", len(failedRuns))
+					}
+					for _, run := range failedRuns {
+						runLogger := prLogger.WithFields(logrus.Fields{"run_id": run.ID, "run_name": run.Name})
+						runID := run.ID // Capture range variable
+						go func() {     // TODO(fejta): run this in a worker pool
+							if errTrigger := c.GitHubClient.TriggerFailedGitHubWorkflow(org, repo, runID); errTrigger != nil {
+								runLogger.Errorf("Attempt to re-trigger GitHub Action run failed: %v", errTrigger)
+							}
+						}()
+					}
+				}
+			}
+
+			// Logic 2: Approve PENDING GitHub Action runs (ONLY for /test all AND if ok-to-test label exists)
+			if pjutil.TestAllRe.MatchString(textToCheck) {
+				if github.HasLabel(labels.OkToTest, l) {
+					prLogger.Info("PR has 'ok-to-test' label. Processing /test all: checking for GitHub Action runs pending approval.")
+
+					// Assumes c.GitHubClient.ListWorkflowRunsBySha exists or similar functionality
+					// to get runs for the specific headSHA.
+					// This method needs to be added to the prow/pkg/github.Client interface and its implementations.
+					pendingApprovalWorkflowRuns, listErr := c.GitHubClient.GetPendingApproveActionRunsByHeadBranch(org, repo, pr.Head.Ref, headSHA)
+					if listErr != nil {
+						prLogger.Errorf("Failed to list pending approval workflow runs to check for pending approvals: %v", listErr)
+					} else {
+						var approvedCount int
+						var approvalErrorMessages []string
+
+						if len(pendingApprovalWorkflowRuns) > 0 {
+							prLogger.Infof("Found %d pending approval workflow runs to check for pending approvals.", len(pendingApprovalWorkflowRuns))
+							for _, run := range pendingApprovalWorkflowRuns {
+								runLogger := prLogger.WithFields(logrus.Fields{"run_id": run.ID, "run_name": run.Name, "run_status": run.Status})
+								approveErr := c.GitHubClient.ApproveWorkflowRun(org, repo, run.ID)
+								if approveErr != nil {
+									errMsg := fmt.Sprintf("failed to approve workflow run ID %d (%s): %v", run.ID, run.Name, approveErr)
+									runLogger.Error(errMsg)
+									approvalErrorMessages = append(approvalErrorMessages, errMsg)
+								} else {
+									approvedCount++
+								}
+							}
+
+							if len(approvalErrorMessages) > 0 {
+								prLogger.Warnf("Encountered %d error(s) while attempting to approve pending GitHub Action runs: %s", len(approvalErrorMessages), strings.Join(approvalErrorMessages, "; "))
+								// TODO: consider commenting on PR if errors are persistent or critical.
+							}
+							// Need to check if all pending approval workflow runs were approved.
+							if approvedCount == len(pendingApprovalWorkflowRuns) {
+								prLogger.Infof("Successfully approved total all %d GitHub Action workflow run(s).", approvedCount)
+							} else if approvedCount > 0 {
+								prLogger.Infof("Successfully approved %d of %d GitHub Action workflow run(s).", approvedCount, len(pendingApprovalWorkflowRuns))
+							}
 						}
-					}()
+					}
+				} else {
+					prLogger.Debug("PR does not have 'ok-to-test' label. Skipping approval of pending GitHub Action runs for /test all command.")
 				}
 			}
 		}
-	}
+	} // End of GitHub Workflow Triggers/Approvals
+
 	return RunRequestedWithLabels(c, pr, baseSHA, toTest, gc.GUID, additionalLabels)
 }
 
