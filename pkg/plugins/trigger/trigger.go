@@ -152,6 +152,9 @@ type githubClient interface {
 	IsMember(org, user string) (bool, error)
 	GetPullRequest(org, repo string, number int) (*github.PullRequest, error)
 	GetFailedActionRunsByHeadBranch(org, repo, branchName, headSHA string) ([]github.WorkflowRun, error)
+	ListWorkflowRunsBySha(org, repo, sha string) ([]github.WorkflowRun, error)
+	GetPendingApproveActionRunsByHeadBranch(org, repo, branchName, headSHA string) ([]github.WorkflowRun, error)
+	ApproveWorkflowRun(org, repo string, runID int) error
 	GetRef(org, repo, ref string) (string, error)
 	CreateComment(owner, repo string, number int, comment string) error
 	ListIssueComments(owner, repo string, issue int) ([]github.IssueComment, error)
