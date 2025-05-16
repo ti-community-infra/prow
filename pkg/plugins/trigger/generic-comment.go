@@ -215,7 +215,7 @@ func handleGenericComment(c Client, trigger plugins.Trigger, gc github.GenericCo
 				}
 			}
 		}
-	} // End of GitHub Workflow Triggers/Approvals
+	}
 
 	return RunRequestedWithLabels(c, pr, baseSHA, toTest, gc.GUID, additionalLabels)
 }
