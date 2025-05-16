@@ -1189,6 +1189,14 @@ func (f *FakeClient) GetFailedActionRunsByHeadBranch(org, repo, branchName, head
 	return []github.WorkflowRun{}, nil
 }
 
+func (f *FakeClient) GetPendingApproveActionRunsByHeadSHA(org, repo, headSHA string) ([]github.WorkflowRun, error) {
+	return []github.WorkflowRun{}, nil
+}
+
+func (f *FakeClient) ApproveWorkflowRun(org, repo string, runID int) error {
+	return nil
+}
+
 func (f *FakeClient) TriggerGitHubWorkflow(org, repo string, id int) error {
 	return nil
 }
