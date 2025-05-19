@@ -4914,4 +4914,3 @@ func (c *client) CreatePullRequestReviewComment(org, repo string, number int, rc
 	}, nil)
 	return err
 }
-
