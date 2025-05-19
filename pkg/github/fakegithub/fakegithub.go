@@ -1193,7 +1193,7 @@ func (f *FakeClient) GetPendingApproveActionRunsByHeadSHA(org, repo, headSHA str
 	return []github.WorkflowRun{}, nil
 }
 
-func (f *FakeClient) ApproveWorkflowRun(org, repo string, runID int) error {
+func (f *FakeClient) ApproveWorkflowRun(org, repo string, id int) error {
 	return nil
 }
 
