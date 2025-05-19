@@ -3646,3 +3646,79 @@ func TestIsAppInstalled(t *testing.T) {
 		})
 	}
 }
+
+func TestApproveWorkflowRun(t *testing.T) {
+	testCases := []struct {
+		name          string
+		response      string
+		statusCode    int
+		org           string
+		repo          string
+		id            int
+		expectedError bool
+	}{
+		{
+			name:          "successful approval",
+			statusCode:    http.StatusCreated,
+			org:           "org",
+			repo:          "repo",
+			id:            123,
+			expectedError: false,
+		},
+		{
+			name:          "api error forbidden",
+			response:      `{"message": "Forbidden"}`,
+			statusCode:    http.StatusForbidden,
+			org:           "org",
+			repo:          "repo",
+			id:            123,
+			expectedError: true,
+		},
+		{
+			name:          "api error not found",
+			response:      `{"message": "Not Found"}`,
+			statusCode:    http.StatusNotFound,
+			org:           "org",
+			repo:          "repo",
+			id:            123,
+			expectedError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRT := func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodPost {
+					return nil, fmt.Errorf("expected POST request, got %s", req.Method)
+				}
+				expectedPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/approve", tc.org, tc.repo, tc.id)
+				if req.URL.Path != expectedPath {
+					return nil, fmt.Errorf("expected path %s, got %s", expectedPath, req.URL.Path)
+				}
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Body:       io.NopCloser(strings.NewReader(tc.response)),
+				}, nil
+			}
+			c := client{
+				logger: logrus.WithField("client", "github"),
+				delegate: &delegate{
+					client:        &http.Client{Transport: testRoundTripper{rt: fakeRT}},
+					bases:         []string{"http://localhost"},
+					time:          &standardTime{},
+					max404Retries: DefaultMax404Retries,
+					maxSleepTime:  DefaultMaxSleepTime,
+					initialDelay:  time.Millisecond, // Speed up retries for tests
+					maxRetries:    1,
+				},
+			}
+			err := c.ApproveWorkflowRun(tc.org, tc.repo, tc.id)
+			if tc.expectedError && err == nil {
+				t.Errorf("Expected an error, but got none")
+			}
+			if !tc.expectedError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+		})
+	}
+}

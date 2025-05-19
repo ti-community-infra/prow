@@ -284,6 +284,7 @@ type Client interface {
 	Used() bool
 	TriggerGitHubWorkflow(org, repo string, id int) error
 	TriggerFailedGitHubWorkflow(org, repo string, id int) error
+	ApproveWorkflowRun(org, repo string, id int) error
 }
 
 // client interacts with the github api. It is reconstructed whenever
@@ -2060,6 +2061,7 @@ func (c *client) GetFailedActionRunsByHeadBranch(org, repo, branchName, headSHA 
 	// setting the OR condition to get both PR and PR target workflows, as well
 	// as workflows called via another workflow using workflow_call (matrix workflows)
 	query.Add("event", "pull_request OR pull_request_target OR workflow_call")
+	// TODO: check if this is correct, if set branchk, alway get 0 workflow_runs
 	query.Add("branch", branchName)
 	u.RawQuery = query.Encode()
 
@@ -2117,6 +2119,22 @@ func (c *client) TriggerFailedGitHubWorkflow(org, repo string, id int) error {
 		path:      fmt.Sprintf("/repos/%s/%s/actions/runs/%d/rerun-failed-jobs", org, repo, id),
 		org:       org,
 		exitCodes: []int{201},
+	}, nil)
+	return err
+}
+
+// ApproveWorkflowRun approves a workflow run
+//
+// See https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28#approve-a-workflow-run-for-a-fork-pull-request
+func (c *client) ApproveWorkflowRun(org, repo string, id int) error {
+	durationLogger := c.log("ApproveWorkflowRun", org, repo, id)
+	defer durationLogger()
+
+	_, err := c.request(&request{
+		method:    http.MethodPost,
+		path:      fmt.Sprintf("/repos/%s/%s/actions/runs/%d/approve", org, repo, id),
+		org:       org,
+		exitCodes: []int{201}, // Successful approval returns 201 Created
 	}, nil)
 	return err
 }
