@@ -60,6 +60,7 @@ type githubClient interface {
 	CreateComment(org, repo string, number int, comment string) error
 	CreateFork(org, repo string) (string, error)
 	CreatePullRequest(org, repo, title, body, head, base string, canModify bool) (int, error)
+	CreatePullRequestReviewComment(org, repo string, number int, rc github.ReviewComment) error
 	CreateIssue(org, repo, title, body string, milestone int, labels, assignees []string) (int, error)
 	EnsureFork(forkingUser, org, repo string) (string, error)
 	GetPullRequest(org, repo string, number int) (*github.PullRequest, error)
@@ -325,7 +326,10 @@ func (s *Server) taskRun(logger *logrus.Entry, task *Task, pr *github.PullReques
 	if task.OutputStaticHeadNote != "" {
 		resp = fmt.Sprintf("%s\n%s", task.OutputStaticHeadNote, resp)
 	}
-	return s.createComment(logger, pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, comment, resp)
+
+	return s.ghc.CreatePullRequestReviewComment(pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, github.ReviewComment{
+		Body: resp,
+	})
 }
 
 func (s *Server) chatWithAIServer(logger *logrus.Entry, systemMessage string, message string, maxResponseTokens int) (string, error) {
