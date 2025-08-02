@@ -534,7 +534,7 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	titleTargetBranchIndicator := fmt.Sprintf(titleTargetBranchIndicatorTemplate, targetBranch)
 	title = fmt.Sprintf("%s%s", titleTargetBranchIndicator, omitBaseBranchFromTitle(title, baseBranch))
 
-	if err := s.applyToBranch(r, org, repo, targetBranch, localPath, num); err != nil {
+	if err := s.applyToBranch(r, org, repo, localPath, num); err != nil {
 		errs := []error{fmt.Errorf("failed to cherry-pick: %w", err)}
 		logger.WithError(err).Warn("failed to apply PR on top of target branch")
 		resp := fmt.Sprintf("#%d failed to apply on top of branch %q:\n```\n%v\n```", num, targetBranch, err)
@@ -610,9 +610,8 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	return nil
 }
 
-func (s *Server) applyToBranch(r git.RepoClient, org, repo, targetBranch, localPath string, num int) error {
+func (s *Server) applyToBranch(r git.RepoClient, org, repo, localPath string, num int) error {
 	var errs []error
-	var errResponses []string
 
 	// try to apply the patch using git am.
 	{
@@ -621,7 +620,6 @@ func (s *Server) applyToBranch(r git.RepoClient, org, repo, targetBranch, localP
 			return nil
 		}
 		errs = append(errs, fmt.Errorf("[try 1] failed to `git am`: %w", err))
-		errResponses = append(errResponses, fmt.Sprintf("#%d failed to apply on top of branch %q:\n```\n%v\n```", num, targetBranch, err))
 	}
 	// try to cherry-pick the merge commit
 	{
