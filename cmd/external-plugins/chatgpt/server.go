@@ -55,22 +55,10 @@ And when I tell you "ALL PARTS SENT", then you can continue processing the data 
 )
 
 type githubClient interface {
-	AddLabel(org, repo string, number int, label string) error
-	AssignIssue(org, repo string, number int, logins []string) error
 	CreateComment(org, repo string, number int, comment string) error
-	CreateFork(org, repo string) (string, error)
-	CreatePullRequest(org, repo, title, body, head, base string, canModify bool) (int, error)
-	CreatePullRequestReviewComment(org, repo string, number int, rc github.ReviewComment) error
-	CreateIssue(org, repo, title, body string, milestone int, labels, assignees []string) (int, error)
-	EnsureFork(forkingUser, org, repo string) (string, error)
+	CreateReview(org, repo string, number int, r github.DraftReview) error
 	GetPullRequest(org, repo string, number int) (*github.PullRequest, error)
 	GetPullRequestDiff(org, repo string, number int) ([]byte, error)
-	GetPullRequests(org, repo string) ([]github.PullRequest, error)
-	GetRepo(owner, name string) (github.FullRepo, error)
-	IsMember(org, user string) (bool, error)
-	ListIssueComments(org, repo string, number int) ([]github.IssueComment, error)
-	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
-	ListOrgMembers(org, role string) ([]github.TeamMember, error)
 }
 
 // HelpProvider construct the pluginhelp.PluginHelp for this plugin.
@@ -327,8 +315,9 @@ func (s *Server) taskRun(logger *logrus.Entry, task *Task, pr *github.PullReques
 		resp = fmt.Sprintf("%s\n%s", task.OutputStaticHeadNote, resp)
 	}
 
-	return s.ghc.CreatePullRequestReviewComment(pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, github.ReviewComment{
-		Body: resp,
+	return s.ghc.CreateReview(pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, github.DraftReview{
+		Body:   resp,
+		Action: github.Comment,
 	})
 }
 
