@@ -1,0 +1,33 @@
+name: Publish images
+
+on:
+  push:
+    branches:
+      - release
+    paths:
+      - "**/*.go"
+      - go.mod
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  push-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Log in to the Container registry
+        uses: ko-build/setup-ko@v0.8
+      - name: Build & Push images
+        env:
+          REGISTRY: ghcr.io/ti-community-infra/prow
+        run: |
+          make push-images REGISTRY=${REGISTRY}
