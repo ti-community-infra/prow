@@ -31,6 +31,7 @@ import (
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/utils/exec"
 	cherrypicker "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/lib"
 	"sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/git/v2"
@@ -52,7 +53,6 @@ type githubClient interface {
 	AddLabel(org, repo string, number int, label string) error
 	AssignIssue(org, repo string, number int, logins []string) error
 	CreateComment(org, repo string, number int, comment string) error
-	CreateFork(org, repo string) (string, error)
 	CreatePullRequest(org, repo, title, body, head, base string, canModify bool) (int, error)
 	CreateIssue(org, repo, title, body string, milestone int, labels, assignees []string) (int, error)
 	EnsureFork(forkingUser, org, repo string) (string, error)
@@ -88,6 +88,9 @@ type Server struct {
 	tokenGenerator func() []byte
 	botUser        *github.UserData
 	email          string
+
+	// skip to fork the repo
+	skipFork bool
 
 	gc git.ClientFactory
 	// Used for unit testing
@@ -471,7 +474,7 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	startClone := time.Now()
 	r, err := s.gc.ClientFor(org, repo)
 	if err != nil {
-		return fmt.Errorf("failed to get git client for %s/%s: %w", org, forkName, err)
+		return fmt.Errorf("failed to get git client for %s/%s: %w", org, repo, err)
 	}
 	defer func() {
 		if err := r.Clean(); err != nil {
@@ -531,9 +534,8 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	titleTargetBranchIndicator := fmt.Sprintf(titleTargetBranchIndicatorTemplate, targetBranch)
 	title = fmt.Sprintf("%s%s", titleTargetBranchIndicator, omitBaseBranchFromTitle(title, baseBranch))
 
-	// Apply the patch.
-	if err := r.Am(localPath); err != nil {
-		errs := []error{fmt.Errorf("failed to `git am`: %w", err)}
+	if err := s.applyToBranch(r, org, repo, targetBranch, localPath, num); err != nil {
+		errs := []error{fmt.Errorf("failed to cherry-pick: %w", err)}
 		logger.WithError(err).Warn("failed to apply PR on top of target branch")
 		resp := fmt.Sprintf("#%d failed to apply on top of branch %q:\n```\n%v\n```", num, targetBranch, err)
 		if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
@@ -551,6 +553,11 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	}
 
 	push := r.PushToNamedFork
+	if s.skipFork {
+		push = func(_ string, branch string, force bool) error {
+			return r.PushToCentral(branch, force)
+		}
+	}
 	if s.push != nil {
 		push = s.push
 	}
@@ -581,6 +588,11 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
 		return fmt.Errorf("failed to create comment: %w", err)
 	}
+
+	// TODO:
+	// - Copying original pull request labels.
+	// - Add picked label.
+
 	for _, label := range s.labels {
 		if err := s.ghc.AddLabel(org, repo, createdNum, label); err != nil {
 			return fmt.Errorf("failed to add label %s: %w", label, err)
@@ -596,6 +608,37 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		}
 	}
 	return nil
+}
+
+func (s *Server) applyToBranch(r git.RepoClient, org, repo, targetBranch, localPath string, num int) error {
+	var errs []error
+	var errResponses []string
+
+	// try to apply the patch using git am.
+	{
+		err := r.Am(localPath)
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, fmt.Errorf("[try 1] failed to `git am`: %w", err))
+		errResponses = append(errResponses, fmt.Sprintf("#%d failed to apply on top of branch %q:\n```\n%v\n```", num, targetBranch, err))
+	}
+	// try to cherry-pick the merge commit
+	{
+		pr, err := s.ghc.GetPullRequest(org, repo, num)
+		if err != nil {
+			return fmt.Errorf("[try 2] failed to get pull request %s/%s#%d: %w", org, repo, num, err)
+		}
+		cherrypickCmd := exec.New().Command("git", "cherry-pick", "-m", "1", "--cleanup=verbatim", *pr.MergeSHA)
+		cherrypickCmd.SetDir(r.Directory())
+		out, err := cherrypickCmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, fmt.Errorf("[try 2] Failed to cherry-pick: %v\n```\n%v\n```", err, string(out)))
+	}
+
+	return utilerrors.NewAggregate(errs)
 }
 
 // omitBaseBranchFromTitle returns the title without the base branch's
@@ -646,6 +689,10 @@ func (s *Server) createIssue(l logrus.FieldLogger, org, repo, title, body string
 
 // ensureForkExists ensures a fork of org/repo exists for the bot.
 func (s *Server) ensureForkExists(org, repo string) (string, error) {
+	if s.skipFork {
+		return repo, nil
+	}
+
 	fork := s.botUser.Login + "/" + repo
 
 	// fork repo if it doesn't exist
