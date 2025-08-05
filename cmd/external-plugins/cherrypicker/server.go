@@ -575,9 +575,11 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	// Open a PR in GitHub.
 	var cherryPickBody string
 	if s.prowAssignments {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
+		// cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, body, chainBranches)
 	} else {
 		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", body, chainBranches)
 	}
 	createdNum, err := s.ghc.CreatePullRequest(org, repo, title, cherryPickBody, head, targetBranch, true)
 	if err != nil {
