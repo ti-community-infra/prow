@@ -512,11 +512,26 @@ func (ps Presubmit) ShouldRun(baseRef string, changes ChangedFilesProvider, forc
 	if ps.AlwaysRun {
 		return true, nil
 	}
+	
+	// Check RegexpChangeMatcher conditions if they exist, even when forced=true
+	// This allows RunBeforeMerge to work cooperatively with run_if_changed/skip_if_only_changed
+	if ps.RegexpChangeMatcher.CouldRun() {
+		determined, shouldRun, err := ps.RegexpChangeMatcher.ShouldRun(changes)
+		if err != nil {
+			return false, err
+		}
+		if determined {
+			// Preserve original behavior: honor defaults when shouldRun=false
+			return shouldRun || defaults, nil
+		}
+	}
+	
+	// If no RegexpChangeMatcher conditions or they're indeterminate,
+	// fall back to forced/defaults logic
 	if forced {
 		return true, nil
 	}
-	determined, shouldRun, err := ps.RegexpChangeMatcher.ShouldRun(changes)
-	return (determined && shouldRun) || defaults, err
+	return defaults, nil
 }
 
 // TriggersConditionally determines if the presubmit triggers conditionally (if it may or may not trigger).
