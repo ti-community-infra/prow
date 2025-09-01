@@ -800,6 +800,67 @@ func TestPresubmitShouldRun(t *testing.T) {
 			fileChanges: []string{"onefile", "two-file", "pkg/controller/three_file.go"},
 			expectedRun: true,
 		},
+		{
+			name: "job with RunBeforeMerge=true and run_if_changed matching should run",
+			job: Presubmit{
+				RunBeforeMerge: true,
+				RegexpChangeMatcher: RegexpChangeMatcher{
+					RunIfChanged: "^file$",
+				},
+			},
+			ref:         "master",
+			fileChanges: []string{"file"},
+			forced:      true, // simulating how tide sets this when RunBeforeMerge=true
+			expectedRun: true,
+		},
+		{
+			name: "job with RunBeforeMerge=true and run_if_changed not matching should not run",
+			job: Presubmit{
+				RunBeforeMerge: true,
+				RegexpChangeMatcher: RegexpChangeMatcher{
+					RunIfChanged: "^file$",
+				},
+			},
+			ref:         "master",
+			fileChanges: []string{"different-file"},
+			forced:      true, // simulating how tide sets this when RunBeforeMerge=true
+			expectedRun: false, // this will fail with current implementation, should pass after fix
+		},
+		{
+			name: "job with RunBeforeMerge=true and skip_if_only_changed matching should not run",
+			job: Presubmit{
+				RunBeforeMerge: true,
+				RegexpChangeMatcher: RegexpChangeMatcher{
+					SkipIfOnlyChanged: "file$",
+				},
+			},
+			ref:         "master",
+			fileChanges: []string{"file"},
+			forced:      true, // simulating how tide sets this when RunBeforeMerge=true
+			expectedRun: false, // this will fail with current implementation, should pass after fix
+		},
+		{
+			name: "job with RunBeforeMerge=true and skip_if_only_changed not matching should run",
+			job: Presubmit{
+				RunBeforeMerge: true,
+				RegexpChangeMatcher: RegexpChangeMatcher{
+					SkipIfOnlyChanged: "file$",
+				},
+			},
+			ref:         "master",
+			fileChanges: []string{"something-else"},
+			forced:      true, // simulating how tide sets this when RunBeforeMerge=true
+			expectedRun: true,
+		},
+		{
+			name: "job with RunBeforeMerge=true but no RegexpChangeMatcher should run (fallback to forced behavior)",
+			job: Presubmit{
+				RunBeforeMerge: true,
+			},
+			ref:         "master",
+			forced:      true, // simulating how tide sets this when RunBeforeMerge=true
+			expectedRun: true,
+		},
 	}
 
 	for _, testCase := range testCases {
