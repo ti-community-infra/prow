@@ -30,4 +30,22 @@ jobs:
         env:
           REGISTRY: ghcr.io/ti-community-infra/prow
         run: |
-          make push-images REGISTRY=${REGISTRY}
+          images=(
+            cmd/checkconfig
+            cmd/crier
+            cmd/deck
+            cmd/external-plugins/chatgpt
+            cmd/external-plugins/cherrypicker
+            cmd/external-plugins/refresh
+            cmd/hook
+            cmd/horologium
+            cmd/jenkins-operator
+            cmd/peribolos
+            cmd/prow-controller-manager
+            cmd/sinker
+            cmd/status-reconciler
+            cmd/tide
+          )
+          for image in "${images[@]}"; do
+            make push-single-image PROW_IMAGE=$image REGISTRY=${REGISTRY}
+          done
