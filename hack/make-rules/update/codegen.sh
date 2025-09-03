@@ -214,6 +214,7 @@ gen-all-proto-stubs() {
     gen-proto-stubs "$proto"
   done < <(find "${REPO_ROOT}" \
     -not '(' -path "${REPO_ROOT}/vendor" -prune ')' \
+    -not '(' -path "${REPO_ROOT}/hack/tools/vendor" -prune ')' \
     -not '(' -path "${REPO_ROOT}/node_modules" -prune ')' \
     -not '(' -path "${REPO_ROOT}/_bin" -prune ')' \
     -name '*.proto' \

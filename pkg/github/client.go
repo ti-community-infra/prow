@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -376,6 +377,8 @@ func (c *client) WithFields(fields logrus.Fields) Client {
 
 var (
 	teamRe = regexp.MustCompile(`^(.*)/(.*)$`)
+
+	passedWorkflowRunConclusions = []string{"success", "skipped"}
 )
 
 const (
@@ -871,6 +874,27 @@ func IsNotFound(err error) bool {
 	return false
 }
 
+// NewForbidden returns a forbiddenError which may be useful for tests
+func NewForbidden() error {
+	return forbiddenError{}
+}
+
+type forbiddenError struct {
+	body []byte
+}
+
+func (e forbiddenError) Error() string {
+	return fmt.Sprintf("the GitHub API request returns a 403 error: %s", e.body)
+}
+
+func IsForbidden(err error) bool {
+	if err == nil {
+		return false
+	}
+	var forbiddenErr forbiddenError
+	return errors.As(err, &forbiddenErr)
+}
+
 // Make a request with retries. If ret is not nil, unmarshal the response body
 // into it. Returns an error if the exit code is not one of the provided codes.
 func (c *client) request(r *request, ret interface{}) (int, error) {
@@ -1017,7 +1041,7 @@ func (c *client) requestRetryWithContext(ctx context.Context, method, path, acce
 						err = fmt.Errorf("the account is using %s oauth scopes, please make sure you are using at least one of the following oauth scopes: %s", authorizedScopes, acceptedScopes)
 					} else {
 						body, _ := io.ReadAll(resp.Body)
-						err = fmt.Errorf("the GitHub API request returns a 403 error: %s", string(body))
+						err = forbiddenError{body: body}
 					}
 					resp.Body.Close()
 					break
@@ -2080,10 +2104,11 @@ func (c *client) GetFailedActionRunsByHeadBranch(org, repo, branchName, headSHA 
 	// See https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28#list-workflow-runs-for-a-workflow
 	// This makes it hard to use directly. Instead, we loop through the runs and check them individually.
 	// A successful workflow will have status "completed" and conclusion "success".
+	// A skipped workflow will have status "completed" and conclusion "skipped".
 	// A failed workflow also have status "completed", but the conclusion can be either "failure" or "cancelled".
-	// We only want completed jobs that are not successful.
+	// We only want completed jobs that are not skipped and not successful.
 	for _, run := range runs.WorkflowRuns {
-		if run.Status == "completed" && run.Conclusion != "success" {
+		if run.Status == "completed" && !slices.Contains(passedWorkflowRunConclusions, run.Conclusion) {
 			prRuns = append(prRuns, run)
 		}
 	}

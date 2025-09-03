@@ -242,9 +242,9 @@ func (c *Controller) triggerNewPresubmits(addedPresubmits map[string][]config.Pr
 				continue
 			}
 			// we want to appropriately trigger and skip from the set of identified presubmits that were
-			// added. if a run_if_changed job has its regexp changed we should check PRs against the new regexp and
-			// trigger if needed instead of forcing the job to run on all PRs. so the default behavior of the filter need to be false.
-			// This pr https://github.com/kubernetes/test-infra/pull/12696#discussion_r284934476 led to this issue.
+			// added. If a job has its `run_if_changed` regexp changed we should check PRs against the new
+			// regexp and trigger if needed instead of forcing the job to run on all PRs. So the default
+			// behavior of the filter need to be false.
 			filter := pjutil.NewArbitraryFilter(func(p config.Presubmit) (shouldRun bool, forcedToRun bool, defaultBehavior bool) {
 				return true, false, false
 			}, "inline-filter")
