@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -28,7 +29,6 @@ import (
 
 	"sigs.k8s.io/prow/pkg/config/secret"
 	"sigs.k8s.io/prow/pkg/flagutil"
-	prowflagutil "sigs.k8s.io/prow/pkg/flagutil"
 	"sigs.k8s.io/prow/pkg/interrupts"
 	"sigs.k8s.io/prow/pkg/logrusutil"
 	"sigs.k8s.io/prow/pkg/pjutil"
@@ -38,18 +38,22 @@ import (
 type options struct {
 	port int
 
+	openaiConfigFile           string
+	openaiConfigFileLarge      string
+	openaiTasksFile            string
+	openaiConfigReloadInterval time.Duration
+	openaiTasksReloadInterval  time.Duration
+
+	largeDownThreshold  int
+	maxAcceptDiffSize   int
+	issueCommentCommand string
+
 	dryRun                 bool
-	github                 prowflagutil.GitHubOptions
-	labels                 prowflagutil.Strings
-	instrumentationOptions prowflagutil.InstrumentationOptions
+	github                 flagutil.GitHubOptions
+	instrumentationOptions flagutil.InstrumentationOptions
 	logLevel               string
 
 	webhookSecretFile string
-	prowAssignments   bool
-	allowAll          bool
-	issueOnConflict   bool
-	skipFork          bool
-	labelPrefix       string
 }
 
 func (o *options) Validate() error {
@@ -67,14 +71,16 @@ func gatherOptions() options {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.IntVar(&o.port, "port", 8888, "Port to listen on.")
 	fs.BoolVar(&o.dryRun, "dry-run", true, "Dry run for testing. Uses API tokens but does not mutate.")
-	fs.Var(&o.labels, "labels", "Labels to apply to the cherrypicked PR.")
 	fs.StringVar(&o.webhookSecretFile, "hmac-secret-file", "/etc/webhook/hmac", "Path to the file containing the GitHub HMAC secret.")
+	fs.StringVar(&o.openaiConfigFile, "openai-config-file", "/etc/openai/config.yaml", "Path to the file containing the access credential.")
+	fs.StringVar(&o.openaiConfigFileLarge, "openai-config-file-large", "", "Path to the file containing the access credential route for large pull requests.")
+	fs.DurationVar(&o.openaiConfigReloadInterval, "openai-config-reload-interval", time.Minute, "Interval to reload the openai access credential file.")
+	fs.StringVar(&o.openaiTasksFile, "openai-tasks-file", "/etc/openai/tasks.yaml", "Path to the file containing the default openai tasks.")
+	fs.DurationVar(&o.openaiTasksReloadInterval, "openai-tasks-reload-interval", time.Minute, "Interval to reload the openai tasks file.")
+	fs.IntVar(&o.largeDownThreshold, "large-down-threshold", 3*4096, "down threshold bytes of message will route to client given by `openai-config-file-large` option.")
+	fs.IntVar(&o.maxAcceptDiffSize, "max-accept-diff-size", 80000, "maximum bytes of PR diff")
+	fs.StringVar(&o.issueCommentCommand, "issue-comment-command", "review", "comment command to match for, such as `command1` (you should send comment with `/command1 ...`)")
 	fs.StringVar(&o.logLevel, "log-level", "debug", fmt.Sprintf("Log level is one of %v.", logrus.AllLevels))
-	fs.BoolVar(&o.prowAssignments, "use-prow-assignments", true, "Use prow commands to assign cherrypicked PRs.")
-	fs.BoolVar(&o.allowAll, "allow-all", false, "Allow anybody to use automated cherrypicks by skipping GitHub organization membership checks.")
-	fs.BoolVar(&o.issueOnConflict, "create-issue-on-conflict", false, "Create a GitHub issue and assign it to the requestor on cherrypick conflict.")
-	fs.BoolVar(&o.skipFork, "skip-fork", false, "Skip to create fork repository for cherrypicks.")
-	fs.StringVar(&o.labelPrefix, "label-prefix", defaultLabelPrefix, "Set a custom label prefix.")
 	for _, group := range []flagutil.OptionGroup{&o.github, &o.instrumentationOptions} {
 		group.AddFlags(fs)
 	}
@@ -104,44 +110,26 @@ func main() {
 	if err != nil {
 		logrus.WithError(err).Fatal("Error getting GitHub client.")
 	}
-	gitClient, err := o.github.GitClientFactory("", nil, o.dryRun, false)
-	if err != nil {
-		logrus.WithError(err).Fatal("Error getting Git client.")
-	}
-	interrupts.OnInterrupt(func() {
-		if err := gitClient.Clean(); err != nil {
-			logrus.WithError(err).Error("Could not clean up git client cache.")
-		}
-	})
 
-	email, err := githubClient.Email()
+	openaiAgent, err := NewWrapOpenaiAgent(o.openaiConfigFile, o.openaiConfigFileLarge, o.largeDownThreshold, o.openaiConfigReloadInterval)
 	if err != nil {
-		log.WithError(err).Fatal("Error getting bot e-mail.")
+		logrus.WithError(err).Fatal("Error load OpenAI config.")
 	}
 
-	botUser, err := githubClient.BotUser()
+	taskAgent, err := NewTaskAgent(o.openaiTasksFile, o.openaiTasksReloadInterval)
 	if err != nil {
-		logrus.WithError(err).Fatal("Error getting bot name.")
+		logrus.WithError(err).Fatal("Failed to start task agent")
 	}
 
+	issueCommentMatchRegex := regexp.MustCompile(fmt.Sprintf(`(?m)^/%s\s+(.+)$`, o.issueCommentCommand))
 	server := &Server{
-		tokenGenerator: secret.GetTokenGenerator(o.webhookSecretFile),
-		botUser:        botUser,
-		email:          email,
-
-		gc:  gitClient,
-		ghc: githubClient,
-		log: log,
-
-		labels:          o.labels.Strings(),
-		prowAssignments: o.prowAssignments,
-		allowAll:        o.allowAll,
-		issueOnConflict: o.issueOnConflict,
-		labelPrefix:     o.labelPrefix,
-		skipFork:        o.skipFork,
-
-		bare:     &http.Client{},
-		patchURL: "https://patch-diff.githubusercontent.com",
+		ghc:                    githubClient,
+		issueCommentMatchRegex: issueCommentMatchRegex,
+		log:                    log,
+		openaiClientAgent:      openaiAgent,
+		openaiTaskAgent:        taskAgent,
+		maxDiffSize:            o.maxAcceptDiffSize,
+		tokenGenerator:         secret.GetTokenGenerator(o.webhookSecretFile),
 	}
 
 	health := pjutil.NewHealthOnPort(o.instrumentationOptions.HealthPort)
@@ -149,7 +137,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", server)
-	externalplugins.ServeExternalPluginHelp(mux, log, HelpProvider)
+	externalplugins.ServeExternalPluginHelp(mux, log, HelpProviderFactory(o.issueCommentCommand))
 	httpServer := &http.Server{Addr: ":" + strconv.Itoa(o.port), Handler: mux}
 	defer interrupts.WaitForGracefulShutdown()
 	interrupts.ListenAndServe(httpServer, 5*time.Second)

@@ -59,6 +59,11 @@ func handleGenericComment(c Client, trigger plugins.Trigger, gc github.GenericCo
 
 	// Skip comments not germane to this plugin
 	textToCheck := markdown.DropCodeBlock(gc.Body)
+
+	// Check if this comment could trigger GitHub Actions
+	couldTriggerGitHubActions := trigger.TriggerGitHubWorkflows &&
+		(pjutil.RetestRe.MatchString(textToCheck) || pjutil.TestAllRe.MatchString(textToCheck))
+
 	if !pjutil.RetestRe.MatchString(textToCheck) &&
 		!pjutil.RetestRequiredRe.MatchString(textToCheck) &&
 		!pjutil.OkToTestRe.MatchString(textToCheck) &&
@@ -71,7 +76,7 @@ func handleGenericComment(c Client, trigger plugins.Trigger, gc github.GenericCo
 				break
 			}
 		}
-		if !matched {
+		if !matched && !couldTriggerGitHubActions {
 			c.Logger.Debug("Comment doesn't match any triggering regex, skipping.")
 			return nil
 		}
@@ -163,13 +168,24 @@ func handleGenericComment(c Client, trigger plugins.Trigger, gc github.GenericCo
 						"repo":    repo,
 					})
 					runID := run.ID
-					go func() {
-						if err := c.GitHubClient.TriggerFailedGitHubWorkflow(org, repo, runID); err != nil {
-							log.Errorf("attempt to trigger github run failed: %v", err)
-						} else {
-							log.Infof("successfully triggered action run")
-						}
-					}()
+					// For action workflows awaiting approval, status is "completed" and conclusion is "action_required"
+					if run.Conclusion == "action_required" {
+						go func() {
+							if err := c.GitHubClient.ApproveWorkflowRun(org, repo, runID); err != nil {
+								log.Errorf("attempt to approve github run failed: %v", err)
+							} else {
+								log.Infof("successfully approved action run")
+							}
+						}()
+					} else {
+						go func() {
+							if err := c.GitHubClient.TriggerFailedGitHubWorkflow(org, repo, runID); err != nil {
+								log.Errorf("attempt to trigger github run failed: %v", err)
+							} else {
+								log.Infof("successfully triggered action run")
+							}
+						}()
+					}
 				}
 			}
 		}

@@ -39,4 +39,5 @@ images:
   - dir: cmd/external-plugins/needs-rebase
   - dir: cmd/external-plugins/cherrypicker
   - dir: cmd/external-plugins/refresh
+  - dir: cmd/external-plugins/chatgpt
   - dir: cmd/ghproxy

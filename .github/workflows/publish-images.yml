@@ -1,0 +1,51 @@
+name: Publish images
+
+on:
+  push:
+    branches:
+      - release
+    paths:
+      - "**/*.go"
+      - go.mod
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  push-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Log in to the Container registry
+        uses: ko-build/setup-ko@v0.8
+      - name: Build & Push images
+        env:
+          REGISTRY: ghcr.io/ti-community-infra/prow
+        run: |
+          images=(
+            cmd/checkconfig
+            cmd/crier
+            cmd/deck
+            cmd/external-plugins/chatgpt
+            cmd/external-plugins/cherrypicker
+            cmd/external-plugins/refresh
+            cmd/hook
+            cmd/horologium
+            cmd/jenkins-operator
+            cmd/peribolos
+            cmd/prow-controller-manager
+            cmd/sinker
+            cmd/status-reconciler
+            cmd/tide
+          )
+          for image in "${images[@]}"; do
+            make push-single-image PROW_IMAGE=$image REGISTRY=${REGISTRY}
+          done

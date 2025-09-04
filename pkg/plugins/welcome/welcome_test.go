@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -43,6 +44,9 @@ type fakeClient struct {
 
 	// collaborators is a list of collaborators names.
 	collaborators []string
+
+	// labelsAdded tracks labels added to PRs/issues: map[number][]label
+	labelsAdded map[int][]string
 }
 
 func newFakeClient() *fakeClient {
@@ -50,7 +54,19 @@ func newFakeClient() *fakeClient {
 		commentsAdded: make(map[int][]string),
 		prs:           make(map[string]sets.Set[int]),
 		orgMembers:    make(map[string][]string),
+		labelsAdded:   make(map[int][]string),
 	}
+}
+
+// AddLabel adds and tracks a label in the client
+func (fc *fakeClient) AddLabel(org, repo string, number int, label string) error {
+	fc.labelsAdded[number] = append(fc.labelsAdded[number], label)
+	return nil
+}
+
+// ClearLabels removes all labels in the client
+func (fc *fakeClient) clearLabels() {
+	fc.labelsAdded = make(map[int][]string)
 }
 
 func (fc *fakeClient) BotUserChecker() (func(candidate string) bool, error) {
@@ -151,6 +167,7 @@ func makeFakePullRequestEvent(owner, repo string, user github.User, number int, 
 		Action: action,
 		Number: number,
 		PullRequest: github.PullRequest{
+			Number: number,
 			Base: github.PullRequestBranch{
 				Repo: github.Repo{
 					Owner: github.User{
@@ -208,83 +225,94 @@ func TestHandlePR(t *testing.T) {
 	fc.addCollaborator(collaborator.Login)
 
 	testCases := []struct {
-		name           string
-		repoOwner      string
-		repoName       string
-		author         github.User
-		prNumber       int
-		prAction       github.PullRequestEventAction
-		addPR          bool
-		alwaysPost     bool
-		onlyOrgMembers bool
-		expectComment  bool
+		name                     string
+		repoOwner                string
+		repoName                 string
+		author                   github.User
+		prNumber                 int
+		prAction                 github.PullRequestEventAction
+		addPR                    bool
+		alwaysPost               bool
+		onlyOrgMembers           bool
+		expectComment            bool
+		expectLabelContribution  bool
+		expectlabelFTContributor bool
 	}{
 		{
-			name:           "existing contributorA",
-			repoOwner:      "kubernetes",
-			repoName:       "test-infra",
-			author:         contributorA,
-			prNumber:       20,
-			prAction:       github.PullRequestActionOpened,
-			alwaysPost:     false,
-			onlyOrgMembers: false,
-			expectComment:  false,
+			name:                    "existing contributorA",
+			repoOwner:               "kubernetes",
+			repoName:                "test-infra",
+			author:                  contributorA,
+			prNumber:                20,
+			prAction:                github.PullRequestActionOpened,
+			alwaysPost:              false,
+			onlyOrgMembers:          false,
+			expectComment:           false,
+			expectLabelContribution: true,
 		},
 		{
-			name:           "existing contributorB",
-			repoOwner:      "kubernetes",
-			repoName:       "test-infra",
-			author:         contributorB,
-			prNumber:       40,
-			prAction:       github.PullRequestActionOpened,
-			alwaysPost:     false,
-			onlyOrgMembers: false,
-			expectComment:  false,
+			name:                    "existing contributorB",
+			repoOwner:               "kubernetes",
+			repoName:                "test-infra",
+			author:                  contributorB,
+			prNumber:                40,
+			prAction:                github.PullRequestActionOpened,
+			alwaysPost:              false,
+			onlyOrgMembers:          false,
+			expectComment:           false,
+			expectLabelContribution: true,
 		},
 		{
-			name:           "existing contributor when it should greet everyone",
-			repoOwner:      "kubernetes",
-			repoName:       "test-infra",
-			author:         contributorB,
-			prNumber:       40,
-			prAction:       github.PullRequestActionOpened,
-			alwaysPost:     true,
-			onlyOrgMembers: false,
-			expectComment:  true,
+			name:                    "existing contributor when it should greet everyone",
+			repoOwner:               "kubernetes",
+			repoName:                "test-infra",
+			author:                  contributorB,
+			prNumber:                40,
+			prAction:                github.PullRequestActionOpened,
+			alwaysPost:              true,
+			onlyOrgMembers:          false,
+			expectComment:           true,
+			expectLabelContribution: true,
 		},
 		{
-			name:           "new contributor",
-			repoOwner:      "kubernetes",
-			repoName:       "test-infra",
-			author:         newContributor,
-			prAction:       github.PullRequestActionOpened,
-			prNumber:       50,
-			alwaysPost:     false,
-			onlyOrgMembers: false,
-			expectComment:  true,
+			name:                     "new contributor",
+			repoOwner:                "kubernetes",
+			repoName:                 "test-infra",
+			author:                   newContributor,
+			prAction:                 github.PullRequestActionOpened,
+			prNumber:                 50,
+			alwaysPost:               false,
+			onlyOrgMembers:           false,
+			expectComment:            true,
+			expectLabelContribution:  true,
+			expectlabelFTContributor: true,
 		},
 		{
-			name:           "new contributor when it should greet everyone",
-			repoOwner:      "kubernetes",
-			repoName:       "test-infra",
-			author:         newContributor,
-			prAction:       github.PullRequestActionOpened,
-			prNumber:       50,
-			alwaysPost:     true,
-			onlyOrgMembers: false,
-			expectComment:  true,
+			name:                     "new contributor when it should greet everyone",
+			repoOwner:                "kubernetes",
+			repoName:                 "test-infra",
+			author:                   newContributor,
+			prAction:                 github.PullRequestActionOpened,
+			prNumber:                 50,
+			alwaysPost:               true,
+			onlyOrgMembers:           false,
+			expectComment:            true,
+			expectLabelContribution:  true,
+			expectlabelFTContributor: true,
 		},
 		{
-			name:           "new contributor and API recorded PR already",
-			repoOwner:      "kubernetes",
-			repoName:       "test-infra",
-			author:         newContributor,
-			prAction:       github.PullRequestActionOpened,
-			prNumber:       50,
-			expectComment:  true,
-			alwaysPost:     false,
-			onlyOrgMembers: false,
-			addPR:          true,
+			name:                     "new contributor and API recorded PR already",
+			repoOwner:                "kubernetes",
+			repoName:                 "test-infra",
+			author:                   newContributor,
+			prAction:                 github.PullRequestActionOpened,
+			prNumber:                 50,
+			expectComment:            true,
+			alwaysPost:               false,
+			onlyOrgMembers:           false,
+			addPR:                    true,
+			expectLabelContribution:  true,
+			expectlabelFTContributor: true,
 		},
 		{
 			name:           "new contributor, not PR open event",
@@ -331,15 +359,17 @@ func TestHandlePR(t *testing.T) {
 			expectComment:  false,
 		},
 		{
-			name:           "contribution from org member when it should greet everyone",
-			repoOwner:      "kubernetes",
-			repoName:       "test-infra",
-			author:         member,
-			prNumber:       40,
-			prAction:       github.PullRequestActionOpened,
-			alwaysPost:     true,
-			onlyOrgMembers: true,
-			expectComment:  true,
+			name:                     "contribution from org member when it should greet everyone",
+			repoOwner:                "kubernetes",
+			repoName:                 "test-infra",
+			author:                   member,
+			prNumber:                 40,
+			prAction:                 github.PullRequestActionOpened,
+			alwaysPost:               true,
+			onlyOrgMembers:           true,
+			expectComment:            true,
+			expectLabelContribution:  false,
+			expectlabelFTContributor: false,
 		},
 	}
 
@@ -351,6 +381,8 @@ func TestHandlePR(t *testing.T) {
 
 		// clear out comments from the last test case
 		fc.ClearComments()
+		// clear out labels from the last test case
+		fc.clearLabels()
 
 		event := makeFakePullRequestEvent(tc.repoOwner, tc.repoName, tc.author, tc.prNumber, tc.prAction)
 		if tc.addPR {
@@ -377,6 +409,13 @@ func TestHandlePR(t *testing.T) {
 			t.Fatalf("expected a comment for case '%s' and got none", tc.name)
 		} else if numComments > 0 && !tc.expectComment {
 			t.Fatalf("did not expect comments for case '%s' and got %d comments", tc.name, numComments)
+		}
+
+		if slices.Contains(fc.labelsAdded[tc.prNumber], contributionLabel) != tc.expectLabelContribution {
+			t.Fatalf("did not expect label for case '%s' and got %v", tc.name, fc.labelsAdded[tc.prNumber])
+		}
+		if slices.Contains(fc.labelsAdded[tc.prNumber], firstTimeContributorLabel) != tc.expectlabelFTContributor {
+			t.Fatalf("did not expect label for case '%s' and got %v", tc.name, fc.labelsAdded[tc.prNumber])
 		}
 	}
 }

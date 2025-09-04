@@ -31,6 +31,7 @@ import (
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/utils/exec"
 	cherrypicker "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/lib"
 	"sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/git/v2"
@@ -52,7 +53,6 @@ type githubClient interface {
 	AddLabel(org, repo string, number int, label string) error
 	AssignIssue(org, repo string, number int, logins []string) error
 	CreateComment(org, repo string, number int, comment string) error
-	CreateFork(org, repo string) (string, error)
 	CreatePullRequest(org, repo, title, body, head, base string, canModify bool) (int, error)
 	CreateIssue(org, repo, title, body string, milestone int, labels, assignees []string) (int, error)
 	EnsureFork(forkingUser, org, repo string) (string, error)
@@ -88,6 +88,9 @@ type Server struct {
 	tokenGenerator func() []byte
 	botUser        *github.UserData
 	email          string
+
+	// skip to fork the repo
+	skipFork bool
 
 	gc git.ClientFactory
 	// Used for unit testing
@@ -551,9 +554,8 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	titleTargetBranchIndicator := fmt.Sprintf(titleTargetBranchIndicatorTemplate, targetBranch)
 	title = fmt.Sprintf("%s%s", titleTargetBranchIndicator, omitBaseBranchFromTitle(title, baseBranch))
 
-	// Apply the patch.
-	if err := r.Am(localPath); err != nil {
-		errs := []error{fmt.Errorf("failed to `git am`: %w", err)}
+	if err := s.applyToBranch(r, org, repo, localPath, num); err != nil {
+		errs := []error{fmt.Errorf("failed to cherry-pick: %w", err)}
 		logger.WithError(err).Warn("failed to apply PR on top of target branch")
 		resp := fmt.Sprintf("#%d failed to apply on top of branch %q:\n```\n%v\n```", num, targetBranch, err)
 		if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
@@ -576,18 +578,19 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		resp := fmt.Sprintf("failed to push cherry-picked changes in GitHub: %v", err)
 		return utilerrors.NewAggregate([]error{err, s.createComment(logger, org, repo, num, comment, resp)})
 	}
+	head := fmt.Sprintf("%s:%s", s.botUser.Login, newBranch)
+	if s.skipFork {
+		head = newBranch
+	}
 
 	// Open a PR in GitHub.
 	var cherryPickBody string
 	if s.prowAssignments {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
+		// cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, body, chainBranches)
 	} else {
 		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches)
-	}
-
-	head := fmt.Sprintf("%s:%s", pushOrg, newBranch)
-	if pushOrg == org {
-		head = newBranch
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", body, chainBranches)
 	}
 
 	createdNum, err := s.ghc.CreatePullRequest(org, repo, title, cherryPickBody, head, targetBranch, true)
@@ -602,6 +605,11 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
 		return fmt.Errorf("failed to create comment: %w", err)
 	}
+
+	// TODO:
+	// - Copying original pull request labels.
+	// - Add picked label.
+
 	for _, label := range s.labels {
 		if err := s.ghc.AddLabel(org, repo, createdNum, label); err != nil {
 			return fmt.Errorf("failed to add label %s: %w", label, err)
@@ -617,6 +625,35 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		}
 	}
 	return nil
+}
+
+func (s *Server) applyToBranch(r git.RepoClient, org, repo, localPath string, num int) error {
+	var errs []error
+
+	// try to apply the patch using git am.
+	{
+		err := r.Am(localPath)
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, fmt.Errorf("[try 1] failed to `git am`: %w", err))
+	}
+	// try to cherry-pick the merge commit
+	{
+		pr, err := s.ghc.GetPullRequest(org, repo, num)
+		if err != nil {
+			return fmt.Errorf("[try 2] failed to get pull request %s/%s#%d: %w", org, repo, num, err)
+		}
+		cherrypickCmd := exec.New().Command("git", "cherry-pick", "-m", "1", "--cleanup=verbatim", *pr.MergeSHA)
+		cherrypickCmd.SetDir(r.Directory())
+		out, err := cherrypickCmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, fmt.Errorf("[try 2] Failed to cherry-pick: %v\n```\n%v\n```", err, string(out)))
+	}
+
+	return utilerrors.NewAggregate(errs)
 }
 
 // omitBaseBranchFromTitle returns the title without the base branch's
