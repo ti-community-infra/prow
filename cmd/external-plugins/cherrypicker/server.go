@@ -578,10 +578,6 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		resp := fmt.Sprintf("failed to push cherry-picked changes in GitHub: %v", err)
 		return utilerrors.NewAggregate([]error{err, s.createComment(logger, org, repo, num, comment, resp)})
 	}
-	head := fmt.Sprintf("%s:%s", s.botUser.Login, newBranch)
-	if s.skipFork {
-		head = newBranch
-	}
 
 	// Open a PR in GitHub.
 	var cherryPickBody string
@@ -589,8 +585,12 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		// cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
 		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, body, chainBranches)
 	} else {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches)
 		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", body, chainBranches)
+	}
+
+	head := fmt.Sprintf("%s:%s", pushOrg, newBranch)
+	if pushOrg == org {
+		head = newBranch
 	}
 
 	createdNum, err := s.ghc.CreatePullRequest(org, repo, title, cherryPickBody, head, targetBranch, true)
