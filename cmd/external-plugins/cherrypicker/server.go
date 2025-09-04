@@ -582,10 +582,9 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	// Open a PR in GitHub.
 	var cherryPickBody string
 	if s.prowAssignments {
-		// cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, body, chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
 	} else {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", body, chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches)
 	}
 
 	head := fmt.Sprintf("%s:%s", pushOrg, newBranch)
