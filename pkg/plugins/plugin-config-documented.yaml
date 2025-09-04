@@ -453,6 +453,9 @@ lgtm:
       # ReviewActsAsLgtm indicates that a GitHub review of "approve" or "request changes"
       # acts as adding or removing the lgtm label
       review_acts_as_lgtm: true
+      # ReviewerCount is the minimum number of approved reviewers.
+      # Defaults 1 reviewers.
+      reviewer_count: 0
       # StoreTreeHash indicates if tree_hash should be stored inside a comment to detect
       # squashed commits before removing lgtm labels
       store_tree_hash: true

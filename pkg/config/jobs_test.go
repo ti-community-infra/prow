@@ -840,7 +840,7 @@ func TestPresubmitShouldRun(t *testing.T) {
 			},
 			ref:         "master",
 			fileChanges: []string{"different-file"},
-			forced:      true, // simulating how tide sets this when RunBeforeMerge=true
+			forced:      true,  // simulating how tide sets this when RunBeforeMerge=true
 			expectedRun: false, // this will fail with current implementation, should pass after fix
 		},
 		{
@@ -853,7 +853,7 @@ func TestPresubmitShouldRun(t *testing.T) {
 			},
 			ref:         "master",
 			fileChanges: []string{"file"},
-			forced:      true, // simulating how tide sets this when RunBeforeMerge=true
+			forced:      true,  // simulating how tide sets this when RunBeforeMerge=true
 			expectedRun: false, // this will fail with current implementation, should pass after fix
 		},
 		{
