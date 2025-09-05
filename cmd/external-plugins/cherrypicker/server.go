@@ -94,9 +94,9 @@ type Server struct {
 
 	gc git.ClientFactory
 	// Used for unit testing
-	push func(forkName, newBranch string, force bool) error
-	ghc  githubClient
-	log  logrus.FieldLogger
+	pusher pusher
+	ghc    githubClient
+	log    logrus.FieldLogger
 
 	// Labels to apply to the cherrypicked PR.
 	labels []string
@@ -112,10 +112,26 @@ type Server struct {
 	bare     *http.Client
 	patchURL string
 
-	repoLock sync.Mutex
-	repos    []github.Repo
-	mapLock  sync.Mutex
-	lockMap  map[cherryPickRequest]*sync.Mutex
+	mapLock sync.Mutex
+	lockMap map[cherryPickRequest]*sync.Mutex
+}
+
+type pusher interface {
+	Push(r git.RepoClient, newBranch string, force bool) error
+}
+
+type forkPusher struct {
+	forkName string
+}
+
+func (p *forkPusher) Push(r git.RepoClient, newBranch string, force bool) error {
+	return r.PushToNamedFork(p.forkName, newBranch, force)
+}
+
+type centralPusher struct{}
+
+func (p *centralPusher) Push(r git.RepoClient, newBranch string, force bool) error {
+	return r.PushToCentral(newBranch, force)
 }
 
 type cherryPickRequest struct {
@@ -463,11 +479,15 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	lock.Lock()
 	defer lock.Unlock()
 
-	forkName, err := s.ensureForkExists(org, repo)
+	p, pushOrg, err := s.getPusherAndOrg(logger, org, repo)
 	if err != nil {
-		logger.WithError(err).Warn("failed to ensure fork exists")
-		resp := fmt.Sprintf("cannot fork %s/%s: %v", org, repo, err)
+		logger.WithError(err).Warn("failed get pusher")
+		resp := fmt.Sprintf("cannot decide how to push into %s/%s: %v", org, repo, err)
 		return s.createComment(logger, org, repo, num, comment, resp)
+	}
+
+	if s.pusher != nil {
+		p = s.pusher
 	}
 
 	// Clone the repo, checkout the target branch.
@@ -552,35 +572,26 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		return utilerrors.NewAggregate(errs)
 	}
 
-	push := r.PushToNamedFork
-	if s.skipFork {
-		push = func(_ string, branch string, force bool) error {
-			return r.PushToCentral(branch, force)
-		}
-	}
-	if s.push != nil {
-		push = s.push
-	}
-	// Push the new branch in the bot's fork.
-	if err := push(forkName, newBranch, true); err != nil {
+	// Push the new branch
+	if err := p.Push(r, newBranch, true); err != nil {
 		logger.WithError(err).Warn("failed to push chery-picked changes to GitHub")
 		resp := fmt.Sprintf("failed to push cherry-picked changes in GitHub: %v", err)
 		return utilerrors.NewAggregate([]error{err, s.createComment(logger, org, repo, num, comment, resp)})
-	}
-	head := fmt.Sprintf("%s:%s", s.botUser.Login, newBranch)
-	if s.skipFork {
-		head = newBranch
 	}
 
 	// Open a PR in GitHub.
 	var cherryPickBody string
 	if s.prowAssignments {
-		// cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, body, chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
 	} else {
 		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches)
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", body, chainBranches)
 	}
+
+	head := fmt.Sprintf("%s:%s", pushOrg, newBranch)
+	if pushOrg == org {
+		head = newBranch
+	}
+
 	createdNum, err := s.ghc.CreatePullRequest(org, repo, title, cherryPickBody, head, targetBranch, true)
 	if err != nil {
 		logger.WithError(err).Warn("failed to create new pull request")
@@ -690,24 +701,22 @@ func (s *Server) createIssue(l logrus.FieldLogger, org, repo, title, body string
 	return s.createComment(l, org, repo, num, comment, fmt.Sprintf("new issue created for failed cherrypick: #%d", issueNum))
 }
 
-// ensureForkExists ensures a fork of org/repo exists for the bot.
-func (s *Server) ensureForkExists(org, repo string) (string, error) {
-	if s.skipFork {
-		return repo, nil
-	}
-
-	fork := s.botUser.Login + "/" + repo
-
+func (s *Server) getPusherAndOrg(l logrus.FieldLogger, org, repo string) (pusher, string, error) {
 	// fork repo if it doesn't exist
-	repo, err := s.ghc.EnsureFork(s.botUser.Login, org, repo)
-	if err != nil {
-		return repo, err
+	forkName, err := s.ghc.EnsureFork(s.botUser.Login, org, repo)
+	if err != nil && !github.IsForbidden(err) {
+		return nil, "", fmt.Errorf("failed to ensure fork exists: %w", err)
 	}
 
-	s.repoLock.Lock()
-	defer s.repoLock.Unlock()
-	s.repos = append(s.repos, github.Repo{FullName: fork, Fork: true})
-	return repo, nil
+	// private repos cannot be forked because by default it's denied on org level.
+	// Push into the same org/repo as used for the cherry pick if it's forbidden
+	if github.IsForbidden(err) {
+		l.Warnf("forking repo %s/%s is forbidden, pushing cherrypick branch into the same repo", org, repo)
+		return &centralPusher{}, org, nil
+	}
+	return &forkPusher{
+		forkName: forkName,
+	}, s.botUser.Login, nil
 }
 
 // getPatch gets the patch for the provided PR and creates a local

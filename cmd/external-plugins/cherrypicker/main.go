@@ -143,14 +143,6 @@ func main() {
 		bare:     &http.Client{},
 		patchURL: "https://patch-diff.githubusercontent.com",
 	}
-	if !server.skipFork {
-		repos, err := githubClient.GetRepos(botUser.Login, true)
-		if err != nil {
-			log.WithError(err).Fatal("Error listing bot repositories.")
-		} else {
-			server.repos = repos
-		}
-	}
 
 	health := pjutil.NewHealthOnPort(o.instrumentationOptions.HealthPort)
 	health.ServeReady()

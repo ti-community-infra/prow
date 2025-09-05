@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 
 	v1 "k8s.io/api/core/v1"
@@ -45,9 +46,13 @@ type Preset struct {
 	Env          []v1.EnvVar       `json:"env"`
 	Volumes      []v1.Volume       `json:"volumes"`
 	VolumeMounts []v1.VolumeMount  `json:"volumeMounts"`
+	Tolerations  []v1.Toleration   `json:"tolerations,omitempty"`
 }
 
-func mergePreset(preset Preset, labels map[string]string, containers []v1.Container, volumes *[]v1.Volume) error {
+func mergePreset(preset Preset, labels map[string]string, podSpec *v1.PodSpec) error {
+	containers := podSpec.Containers
+	volumes := &podSpec.Volumes
+	tolerations := &podSpec.Tolerations
 	for l, v := range preset.Labels {
 		if v2, ok := labels[l]; !ok || v2 != v {
 			return nil
@@ -80,6 +85,15 @@ func mergePreset(preset Preset, labels map[string]string, containers []v1.Contai
 			}
 			containers[i].VolumeMounts = append(containers[i].VolumeMounts, vm1)
 		}
+	}
+
+	for _, t1 := range preset.Tolerations {
+		for _, t2 := range *tolerations {
+			if cmp.Equal(t1, t2) {
+				return fmt.Errorf("toleration duplicated in pod spec: %v", t1)
+			}
+		}
+		*tolerations = append(*tolerations, t1)
 	}
 	return nil
 }
@@ -512,7 +526,7 @@ func (ps Presubmit) ShouldRun(baseRef string, changes ChangedFilesProvider, forc
 	if ps.AlwaysRun {
 		return true, nil
 	}
-	
+
 	// Check RegexpChangeMatcher conditions if they exist, even when forced=true
 	// This allows RunBeforeMerge to work cooperatively with run_if_changed/skip_if_only_changed
 	if ps.RegexpChangeMatcher.CouldRun() {
@@ -525,7 +539,7 @@ func (ps Presubmit) ShouldRun(baseRef string, changes ChangedFilesProvider, forc
 			return shouldRun || defaults, nil
 		}
 	}
-	
+
 	// If no RegexpChangeMatcher conditions or they're indeterminate,
 	// fall back to forced/defaults logic
 	if forced {

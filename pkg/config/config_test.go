@@ -8430,6 +8430,7 @@ moonraker:
   client_timeout: 10m0s
 plank:
   max_goroutines: 20
+  max_revivals: 3
   pod_pending_timeout: 10m0s
   pod_running_timeout: 48h0m0s
   pod_unscheduled_timeout: 5m0s
@@ -8514,6 +8515,7 @@ moonraker:
   client_timeout: 10m0s
 plank:
   max_goroutines: 20
+  max_revivals: 3
   pod_pending_timeout: 10m0s
   pod_running_timeout: 48h0m0s
   pod_unscheduled_timeout: 5m0s
@@ -8591,6 +8593,7 @@ moonraker:
   client_timeout: 10m0s
 plank:
   max_goroutines: 20
+  max_revivals: 3
   pod_pending_timeout: 10m0s
   pod_running_timeout: 48h0m0s
   pod_unscheduled_timeout: 5m0s
@@ -8673,6 +8676,7 @@ moonraker:
   client_timeout: 10m0s
 plank:
   max_goroutines: 20
+  max_revivals: 3
   pod_pending_timeout: 10m0s
   pod_running_timeout: 48h0m0s
   pod_unscheduled_timeout: 5m0s
