@@ -295,6 +295,28 @@ func TestSyncTriggeredJobs(t *testing.T) {
 			expectedEnqueued:    true,
 			expectedPendingTime: nil,
 		},
+		{
+			name: "running job with build number 0, should not report",
+			pj: prowapi.ProwJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "zerobuild",
+					Namespace: "prowjobs",
+				},
+				Spec: prowapi.ProwJobSpec{
+					Type: prowapi.PostsubmitJob,
+				},
+				Status: prowapi.ProwJobStatus{
+					State: prowapi.TriggeredState,
+				},
+			},
+			builds: map[string]Build{
+				"zerobuild": {enqueued: false, Number: 0},
+			},
+			expectedBuild:       false,
+			expectedReport:      false,
+			expectedState:       prowapi.TriggeredState,
+			expectedPendingTime: nil,
+		},
 	}
 	for _, tc := range testcases {
 		totServ := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -525,6 +547,26 @@ func TestSyncPendingJobs(t *testing.T) {
 			expectedState:    prowapi.FailureState,
 			expectedComplete: true,
 			expectedReport:   true,
+		},
+		{
+			name: "building with build number 0, should not report",
+			pj: prowapi.ProwJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "zerobuild",
+					Namespace: "prowjobs",
+				},
+				Spec: prowapi.ProwJobSpec{
+					Job: "test-job",
+				},
+				Status: prowapi.ProwJobStatus{
+					State: prowapi.PendingState,
+				},
+			},
+			builds: map[string]Build{
+				"zerobuild": {enqueued: false, Number: 0},
+			},
+			expectedState:  prowapi.PendingState,
+			expectedReport: false,
 		},
 	}
 	for _, tc := range testcases {
