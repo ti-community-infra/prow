@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	stdio "io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -96,6 +97,7 @@ type Build struct {
 	} `json:"task"`
 	Number   int     `json:"number"`
 	Result   *string `json:"result"`
+	Building bool    `json:"building"`
 	enqueued bool
 }
 
@@ -123,22 +125,26 @@ type JobInfo struct {
 
 // IsRunning means the job started but has not finished.
 func (jb *Build) IsRunning() bool {
-	return jb.Result == nil && !jb.enqueued
+	// Consider builds running when Jenkins reports building=true.
+	// For backward-compatibility (older data/tests or Jenkins instances not populating `building`),
+	// also treat a build as running if it has been assigned a build number (>0),
+	// has not been enqueued anymore and has no terminal result yet.
+	return jb.Result == nil && !jb.enqueued && (jb.Building || jb.Number > 0)
 }
 
 // IsSuccess means the job passed
 func (jb *Build) IsSuccess() bool {
-	return jb.Result != nil && *jb.Result == success
+	return jb.Result != nil && *jb.Result == success && !jb.Building
 }
 
 // IsFailure means the job completed with problems.
 func (jb *Build) IsFailure() bool {
-	return jb.Result != nil && (*jb.Result == failure || *jb.Result == unstable)
+	return jb.Result != nil && (*jb.Result == failure || *jb.Result == unstable) && !jb.Building
 }
 
 // IsAborted means something stopped the job before it could finish.
 func (jb *Build) IsAborted() bool {
-	return jb.Result != nil && *jb.Result == aborted
+	return jb.Result != nil && *jb.Result == aborted && !jb.Building
 }
 
 // IsEnqueued means the job has created but has not started.
@@ -670,9 +676,7 @@ func (c *Client) ListBuilds(jobs []BuildQueryParams) (map[string]Build, error) {
 	}
 
 	for builds := range buildChan {
-		for id, build := range builds {
-			jenkinsBuilds[id] = build
-		}
+		maps.Copy(jenkinsBuilds, builds)
 	}
 
 	return jenkinsBuilds, nil
@@ -722,7 +726,7 @@ func (c *Client) GetEnqueuedBuilds(jobs []BuildQueryParams) (map[string]Build, e
 func (c *Client) GetBuilds(job string) (map[string]Build, error) {
 	c.logger.Debugf("GetBuilds(%v)", job)
 
-	data, err := c.Get(fmt.Sprintf("/job/%s/api/json?tree=builds[number,result,actions[parameters[name,value]]]", job))
+	data, err := c.Get(fmt.Sprintf("/job/%s/api/json?tree=builds[number,building,result,actions[parameters[name,value]]]", job))
 	if err != nil {
 		// Ignore 404s so we will not block processing the rest of the jobs.
 		if _, isNotFound := err.(NotFoundError); isNotFound {

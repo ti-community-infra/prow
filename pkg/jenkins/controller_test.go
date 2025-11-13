@@ -310,7 +310,7 @@ func TestSyncTriggeredJobs(t *testing.T) {
 				},
 			},
 			builds: map[string]Build{
-				"zerobuild": {enqueued: false, Number: 0},
+				"zerobuild": {enqueued: false, Number: 0, Building: true},
 			},
 			expectedBuild:       false,
 			expectedReport:      false,
@@ -424,7 +424,7 @@ func TestSyncPendingJobs(t *testing.T) {
 				},
 			},
 			builds: map[string]Build{
-				"foofoo": {enqueued: true, Number: 10},
+				"foofoo": {enqueued: true, Number: 10, Building: false},
 			},
 			expectedState:    prowapi.TriggeredState,
 			expectedEnqueued: true,
@@ -445,7 +445,7 @@ func TestSyncPendingJobs(t *testing.T) {
 				},
 			},
 			builds: map[string]Build{
-				"boing": {enqueued: false, Number: 10},
+				"boing": {enqueued: false, Number: 10, Building: true},
 			},
 			expectedURL:      "boing/pending",
 			expectedState:    prowapi.PendingState,
@@ -467,7 +467,7 @@ func TestSyncPendingJobs(t *testing.T) {
 				},
 			},
 			builds: map[string]Build{
-				"firstoutthetrenches": {enqueued: false, Number: 10},
+				"firstoutthetrenches": {enqueued: false, Number: 10, Building: true},
 			},
 			expectedURL:    "firstoutthetrenches/pending",
 			expectedState:  prowapi.PendingState,
@@ -563,7 +563,7 @@ func TestSyncPendingJobs(t *testing.T) {
 				},
 			},
 			builds: map[string]Build{
-				"zerobuild": {enqueued: false, Number: 0},
+				"zerobuild": {enqueued: false, Number: 0, Building: true},
 			},
 			expectedState:  prowapi.PendingState,
 			expectedReport: false,
