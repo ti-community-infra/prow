@@ -129,7 +129,7 @@ func (jb *Build) IsRunning() bool {
 	// For backward-compatibility (older data/tests or Jenkins instances not populating `building`),
 	// also treat a build as running if it has been assigned a build number (>0),
 	// has not been enqueued anymore and has no terminal result yet.
-	return jb.Result == nil && !jb.enqueued && (jb.Building || jb.Number > 0)
+	return jb.Result == nil && !jb.enqueued && jb.Building && jb.Number > 0
 }
 
 // IsSuccess means the job passed
@@ -149,7 +149,7 @@ func (jb *Build) IsAborted() bool {
 
 // IsEnqueued means the job has created but has not started.
 func (jb *Build) IsEnqueued() bool {
-	return jb.enqueued
+	return jb.enqueued || (!jb.Building && jb.Result == nil) || (jb.Building && jb.Number <= 0)
 }
 
 // ProwJobID extracts the ProwJob identifier for the

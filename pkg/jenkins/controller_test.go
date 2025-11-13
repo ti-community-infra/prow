@@ -313,7 +313,7 @@ func TestSyncTriggeredJobs(t *testing.T) {
 				"zerobuild": {enqueued: false, Number: 0, Building: true},
 			},
 			expectedBuild:       false,
-			expectedReport:      false,
+			expectedReport:      true, // report description
 			expectedState:       prowapi.TriggeredState,
 			expectedPendingTime: nil,
 		},
@@ -708,7 +708,7 @@ func TestBatch(t *testing.T) {
 	if afterFirstSync.Status.Description != "Jenkins job enqueued." {
 		t.Fatalf("Expected description %q, got %q.", "Jenkins job enqueued.", afterFirstSync.Status.Description)
 	}
-	jc.builds["known_name"] = Build{Number: 42}
+	jc.builds["known_name"] = Build{Number: 42, Building: true}
 	if err := c.Sync(); err != nil {
 		t.Fatalf("Error on second sync: %v", err)
 	}
@@ -722,7 +722,7 @@ func TestBatch(t *testing.T) {
 	if afterSecondSync.Status.PodName != "known_name" {
 		t.Fatalf("Wrong PodName: %s", afterSecondSync.Status.PodName)
 	}
-	jc.builds["known_name"] = Build{Result: pState(success)}
+	jc.builds["known_name"] = Build{Result: pState(success), Number: 42}
 	if err := c.Sync(); err != nil {
 		t.Fatalf("Error on third sync: %v", err)
 	}
