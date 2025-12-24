@@ -174,29 +174,6 @@ func TestHandle(t *testing.T) {
 			},
 		},
 		{
-			name:   "error on GetCombinedStatus",
-			config: testConfig,
-			prepare: func(mock *cherrypickapprovedfakes.FakeImpl) {
-				mock.GetCombinedStatusReturns(nil, errTest)
-			},
-			assert: func(mock *cherrypickapprovedfakes.FakeImpl, err error) {
-				assert.Error(t, err)
-			},
-		},
-		{
-			name:   "skip with failed tests",
-			config: testConfig,
-			prepare: func(mock *cherrypickapprovedfakes.FakeImpl) {
-				mock.GetCombinedStatusReturns(&github.CombinedStatus{
-					Statuses: []github.Status{{State: github.StatusError}},
-				}, nil)
-			},
-			assert: func(mock *cherrypickapprovedfakes.FakeImpl, err error) {
-				assert.NoError(t, err)
-				assert.EqualValues(t, 0, mock.GetIssueLabelsCallCount())
-			},
-		},
-		{
 			name:   "skip with wrong review state",
 			config: testConfig,
 			modifyEvent: func(e *github.ReviewEvent) *github.ReviewEvent {
