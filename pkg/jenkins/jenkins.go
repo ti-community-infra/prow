@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	stdio "io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -670,9 +671,7 @@ func (c *Client) ListBuilds(jobs []BuildQueryParams) (map[string]Build, error) {
 	}
 
 	for builds := range buildChan {
-		for id, build := range builds {
-			jenkinsBuilds[id] = build
-		}
+		maps.Copy(jenkinsBuilds, builds)
 	}
 
 	return jenkinsBuilds, nil
@@ -743,6 +742,9 @@ func (c *Client) GetBuilds(job string) (map[string]Build, error) {
 		// Ignore builds with missing buildID parameters.
 		if prowJobID == "" {
 			continue
+		}
+		if jb.Number == 0 {
+			jb.enqueued = true
 		}
 		jenkinsBuilds[prowJobID] = jb
 	}
