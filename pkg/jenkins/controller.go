@@ -365,12 +365,6 @@ func (c *Controller) syncPendingJob(pj prowapi.ProwJob, reports chan<- prowapi.P
 		case jb.IsRunning():
 			// Build still going.
 			c.incrementNumPendingJobs(pj.Spec.Job)
-			// Do not update the commit status when build number is 0.
-			// Build number 0 indicates the Jenkins job hasn't been properly assigned a build number yet.
-			if jb.Number == 0 {
-				c.log.WithFields(pjutil.ProwJobFields(&pj)).Debug("Skipping status update for build with number 0")
-				return nil
-			}
 			if pj.Status.Description == "Jenkins job running." && pj.Status.URL != "" {
 				return nil
 			}
@@ -458,12 +452,6 @@ func (c *Controller) syncTriggeredJob(pj prowapi.ProwJob, reports chan<- prowapi
 		// Still in queue.
 		pj.Status.Description = "Jenkins job enqueued."
 	} else if jb.IsRunning() {
-		// Do not update the commit status when build number is 0.
-		// Build number 0 indicates the Jenkins job hasn't been properly assigned a build number yet.
-		if jb.Number == 0 {
-			c.log.WithFields(pjutil.ProwJobFields(&pj)).Debug("Skipping status update for build with number 0")
-			return nil
-		}
 		// If a Jenkins build already exists for this job, advance the ProwJob to Pending and
 		// it should be handled by syncPendingJob in the next sync.
 		if pj.Status.PendingTime == nil {
