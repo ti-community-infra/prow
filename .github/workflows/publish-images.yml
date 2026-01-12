@@ -6,6 +6,7 @@ on:
       - release
     paths:
       - "**/*.go"
+      - "**/*.html"
       - go.mod
 
 concurrency:
