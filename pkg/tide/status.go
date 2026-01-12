@@ -146,7 +146,7 @@ func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker) (s
 	// for the correct branch.
 	targetBranchDenied := false
 	for _, excludedBranch := range q.ExcludedBranches {
-		if string(pr.BaseRef.Name) == excludedBranch {
+		if strings.HasPrefix(string(pr.BaseRef.Name), excludedBranch) {
 			targetBranchDenied = true
 			break
 		}
@@ -154,7 +154,7 @@ func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker) (s
 	// if no allowlist is configured, the target is OK by default
 	targetBranchAllowed := len(q.IncludedBranches) == 0
 	for _, includedBranch := range q.IncludedBranches {
-		if string(pr.BaseRef.Name) == includedBranch {
+		if strings.HasPrefix(string(pr.BaseRef.Name), includedBranch) {
 			targetBranchAllowed = true
 			break
 		}
