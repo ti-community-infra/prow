@@ -471,6 +471,39 @@ func (c *Controller) syncTriggeredJob(pj prowapi.ProwJob, reports chan<- prowapi
 		} else {
 			pj.Status.URL = b.String()
 		}
+	} else {
+		// Build has already completed (fast-failing case). Handle the result immediately.
+		pj.SetComplete()
+		if pj.Status.PendingTime == nil {
+			now := metav1.NewTime(c.clock.Now())
+			pj.Status.PendingTime = &now
+		}
+
+		switch {
+		case jb.IsSuccess():
+			pj.Status.State = prowapi.SuccessState
+			pj.Status.Description = "Jenkins job succeeded."
+		case jb.IsFailure():
+			pj.Status.State = prowapi.FailureState
+			pj.Status.Description = "Jenkins job failed."
+		case jb.IsAborted():
+			pj.Status.State = prowapi.AbortedState
+			pj.Status.Description = "Jenkins job aborted."
+		default:
+			pj.Status.State = prowapi.ErrorState
+			pj.Status.Description = "Jenkins job completed with unknown result."
+		}
+
+		// Construct the status URL that will be used in reports.
+		pj.Status.PodName = pj.ObjectMeta.Name
+		pj.Status.BuildID = jb.BuildID()
+		pj.Status.JenkinsBuildID = strconv.Itoa(jb.Number)
+		var b bytes.Buffer
+		if err := c.config().JobURLTemplate.Execute(&b, &pj); err != nil {
+			c.log.WithFields(pjutil.ProwJobFields(&pj)).Errorf("error executing URL template: %v", err)
+		} else {
+			pj.Status.URL = b.String()
+		}
 	}
 	// Report to GitHub.
 	reports <- pj
