@@ -17,6 +17,7 @@ limitations under the License.
 package decorate
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -185,7 +186,33 @@ func LabelsAndAnnotationsForJob(pj prowapi.ProwJob) (map[string]string, map[stri
 	}
 	extraLabels[kube.ProwJobIDLabel] = pj.ObjectMeta.Name
 	extraLabels[kube.ProwBuildIDLabel] = pj.Status.BuildID
-	return LabelsAndAnnotationsForSpec(pj.Spec, extraLabels, extraAnnotations)
+	labels, annotations := LabelsAndAnnotationsForSpec(pj.Spec, extraLabels, extraAnnotations)
+	for k, v := range ciAnnotationsForJob(pj) {
+		if _, exists := annotations[k]; !exists {
+			annotations[k] = v
+		}
+	}
+	return labels, annotations
+}
+
+func ciAnnotationsForJob(pj prowapi.ProwJob) map[string]string {
+	annotations := map[string]string{}
+	if pj.Spec.Job != "" {
+		annotations["ci_job"] = pj.Spec.Job
+	}
+	if pj.Spec.Refs == nil {
+		return annotations
+	}
+	refs, err := json.Marshal(pj.Spec.Refs)
+	if err != nil {
+		logrus.WithError(err).Warn("Failed to marshal ci_refs annotation.")
+	} else {
+		annotations["ci_refs"] = string(refs)
+	}
+	if len(pj.Spec.Refs.Pulls) > 0 && pj.Spec.Refs.Pulls[0].Author != "" {
+		annotations["ci_trigger_user"] = pj.Spec.Refs.Pulls[0].Author
+	}
+	return annotations
 }
 
 // ProwJobToPod converts a ProwJob to a Pod that will run the tests.

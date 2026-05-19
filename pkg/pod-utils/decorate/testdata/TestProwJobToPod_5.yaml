@@ -1,5 +1,6 @@
 metadata:
   annotations:
+    ci_job: job-name
     prow.k8s.io/context: job-context
     prow.k8s.io/job: job-name
   creationTimestamp: null
