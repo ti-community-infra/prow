@@ -141,6 +141,9 @@ func LabelsAndAnnotationsForSpec(spec prowapi.ProwJobSpec, extraLabels, extraAnn
 		labels[kube.BaseRefLabel] = refs.BaseRef
 		if len(refs.Pulls) > 0 {
 			labels[kube.PullLabel] = strconv.Itoa(refs.Pulls[0].Number)
+			if refs.Pulls[0].Author != "" {
+				labels[kube.AuthorLabel] = refs.Pulls[0].Author
+			}
 		}
 	}
 

@@ -596,6 +596,7 @@ func TestLatestRerun(t *testing.T) {
 							"prow.k8s.io/context":             "",
 							"prow.k8s.io/gerrit-report-label": "foo",
 							"prow.k8s.io/job":                 "whoa",
+							"prow.k8s.io/refs.author":         tc.login,
 							"prow.k8s.io/refs.base_ref":       "master",
 							"prow.k8s.io/refs.org":            "org",
 							"prow.k8s.io/refs.pull":           "1",

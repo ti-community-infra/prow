@@ -64,6 +64,9 @@ const (
 	// PullLabel is added in resources created by prow and
 	// carries the PR number associated with the job, eg 321.
 	PullLabel = "prow.k8s.io/refs.pull"
+	// AuthorLabel is added in resources created by prow and
+	// carries the PR author associated with the job, eg octocat.
+	AuthorLabel = "prow.k8s.io/refs.author"
 	// RetestLabel exposes if the job was created by a re-test request.
 	RetestLabel = "prow.k8s.io/retest"
 	// IsOptionalLabel is added in resources created by prow and
