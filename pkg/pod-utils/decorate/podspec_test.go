@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/prow/pkg/gcsupload"
 	"sigs.k8s.io/prow/pkg/github"
 	"sigs.k8s.io/prow/pkg/initupload"
+	"sigs.k8s.io/prow/pkg/kube"
 	"sigs.k8s.io/prow/pkg/pod-utils/wrapper"
 	"sigs.k8s.io/prow/pkg/sidecar"
 	"sigs.k8s.io/prow/pkg/testutil"
@@ -65,101 +66,98 @@ func cookiePathOnly(secret string) string {
 	return vp
 }
 
-func TestCIAnnotationsForJob(t *testing.T) {
+func TestLabelsAndAnnotationsForSpecAddsPullAuthorLabel(t *testing.T) {
 	tests := []struct {
-		name string
-		pj   prowapi.ProwJob
-		want map[string]string
+		name       string
+		spec       prowapi.ProwJobSpec
+		extraLabel map[string]string
+		want       string
+		wantExists bool
 	}{
 		{
 			name: "presubmit with pull author",
-			pj: prowapi.ProwJob{
-				Spec: prowapi.ProwJobSpec{
-					Job: "pull-test",
-					Refs: &prowapi.Refs{
-						Org:     "pingcap",
-						Repo:    "tidb",
-						BaseRef: "master",
-						BaseSHA: "base-sha",
-						Pulls: []prowapi.Pull{{
-							Number:  123,
-							Author:  "pr-author",
-							SHA:     "pull-sha",
-							Title:   "pull title",
-							HeadRef: "feature-branch",
-						}},
-					},
-				},
-			},
-			want: map[string]string{
-				"ci_job":          "pull-test",
-				"ci_refs":         `{"org":"pingcap","repo":"tidb","base_ref":"master","base_sha":"base-sha","pulls":[{"number":123,"author":"pr-author","sha":"pull-sha","title":"pull title","head_ref":"feature-branch"}]}`,
-				"ci_trigger_user": "pr-author",
-			},
-		},
-		{
-			name: "periodic without refs",
-			pj: prowapi.ProwJob{
-				Spec: prowapi.ProwJobSpec{Job: "periodic-test"},
-			},
-			want: map[string]string{
-				"ci_job": "periodic-test",
-			},
-		},
-		{
-			name: "postsubmit with refs but no pulls",
-			pj: prowapi.ProwJob{
-				Spec: prowapi.ProwJobSpec{
-					Job: "postsubmit-test",
-					Refs: &prowapi.Refs{
-						Org:     "pingcap",
-						Repo:    "tidb",
-						BaseRef: "master",
-						BaseSHA: "base-sha",
-					},
-				},
-			},
-			want: map[string]string{
-				"ci_job":  "postsubmit-test",
-				"ci_refs": `{"org":"pingcap","repo":"tidb","base_ref":"master","base_sha":"base-sha"}`,
-			},
-		},
-		{
-			name: "extra refs do not become ci_refs",
-			pj: prowapi.ProwJob{
-				Spec: prowapi.ProwJobSpec{
-					Job: "extra-ref-test",
-					ExtraRefs: []prowapi.Refs{{
-						Org:  "pingcap",
-						Repo: "tidb",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:     "pingcap",
+					Repo:    "tidb",
+					BaseRef: "master",
+					BaseSHA: "base-sha",
+					Pulls: []prowapi.Pull{{
+						Number: 123,
+						Author: "pr-author",
+						SHA:    "pull-sha",
 					}},
 				},
 			},
-			want: map[string]string{
-				"ci_job": "extra-ref-test",
+			want:       "pr-author",
+			wantExists: true,
+		},
+		{
+			name: "postsubmit with refs but no pulls",
+			spec: prowapi.ProwJobSpec{
+				Job: "postsubmit-test",
+				Refs: &prowapi.Refs{
+					Org:     "pingcap",
+					Repo:    "tidb",
+					BaseRef: "master",
+					BaseSHA: "base-sha",
+				},
 			},
+		},
+		{
+			name: "invalid author is removed by label validation",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:  "pingcap",
+					Repo: "tidb",
+					Pulls: []prowapi.Pull{{
+						Number: 123,
+						Author: "bad author",
+					}},
+				},
+			},
+		},
+		{
+			name: "extra labels can override author",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:  "pingcap",
+					Repo: "tidb",
+					Pulls: []prowapi.Pull{{
+						Number: 123,
+						Author: "pr-author",
+					}},
+				},
+			},
+			extraLabel: map[string]string{
+				kube.AuthorLabel: "custom-author",
+			},
+			want:       "custom-author",
+			wantExists: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ciAnnotationsForJob(tc.pj)
-			if !equality.Semantic.DeepEqual(got, tc.want) {
-				t.Fatalf("unexpected ci annotations:\n%s", diff.ObjectReflectDiff(tc.want, got))
+			got, _ := LabelsAndAnnotationsForSpec(tc.spec, tc.extraLabel, nil)
+			value, exists := got[kube.AuthorLabel]
+			if exists != tc.wantExists {
+				t.Fatalf("expected author label existence %t, got %t", tc.wantExists, exists)
+			}
+			if value != tc.want {
+				t.Fatalf("expected author label %q, got %q", tc.want, value)
 			}
 		})
 	}
 }
 
-func TestLabelsAndAnnotationsForJobPreservesExistingCIAnnotations(t *testing.T) {
-	_, got := LabelsAndAnnotationsForJob(prowapi.ProwJob{
+func TestLabelsAndAnnotationsForJobAddsPullAuthorLabel(t *testing.T) {
+	got, _ := LabelsAndAnnotationsForJob(prowapi.ProwJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pj",
-			Annotations: map[string]string{
-				"ci_job":          "custom-job",
-				"ci_refs":         "custom-refs",
-				"ci_trigger_user": "custom-user",
-			},
 		},
 		Spec: prowapi.ProwJobSpec{
 			Job:     "pull-test",
@@ -176,15 +174,8 @@ func TestLabelsAndAnnotationsForJobPreservesExistingCIAnnotations(t *testing.T) 
 		},
 	})
 
-	want := map[string]string{
-		"ci_job":          "custom-job",
-		"ci_refs":         "custom-refs",
-		"ci_trigger_user": "custom-user",
-	}
-	for key, value := range want {
-		if got[key] != value {
-			t.Fatalf("expected %s=%q, got %q", key, value, got[key])
-		}
+	if got[kube.AuthorLabel] != "pr-author" {
+		t.Fatalf("expected author label %q, got %q", "pr-author", got[kube.AuthorLabel])
 	}
 }
 

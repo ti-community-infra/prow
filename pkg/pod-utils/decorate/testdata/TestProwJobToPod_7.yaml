@@ -1,8 +1,5 @@
 metadata:
   annotations:
-    ci_job: job-name
-    ci_refs: '{"org":"org-name","repo":"repo-name","base_ref":"base-ref","base_sha":"base-sha","pulls":[{"number":1,"author":"author-name","sha":"pull-sha","title":"pull-title","head_ref":"pr-head-ref-11"}],"path_alias":"somewhere/else"}'
-    ci_trigger_user: author-name
     prow.k8s.io/context: job-context
     prow.k8s.io/job: job-name
   creationTimestamp: null
@@ -13,6 +10,7 @@ metadata:
     prow.k8s.io/context: job-context
     prow.k8s.io/id: pod
     prow.k8s.io/job: job-name
+    prow.k8s.io/refs.author: author-name
     prow.k8s.io/refs.base_ref: base-ref
     prow.k8s.io/refs.org: org-name
     prow.k8s.io/refs.pull: "1"
