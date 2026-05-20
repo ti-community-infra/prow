@@ -106,6 +106,19 @@ func TestLabelsAndAnnotationsForSpecAddsPullAuthorLabel(t *testing.T) {
 			},
 		},
 		{
+			name: "presubmit with empty pull author",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:  "pingcap",
+					Repo: "tidb",
+					Pulls: []prowapi.Pull{{
+						Number: 123,
+					}},
+				},
+			},
+		},
+		{
 			name: "invalid author is removed by label validation",
 			spec: prowapi.ProwJobSpec{
 				Job: "pull-test",
