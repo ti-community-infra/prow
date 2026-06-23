@@ -622,6 +622,20 @@ func createTestRepoCache(t *testing.T, ca *fca) (*config.InRepoConfigCache, erro
 	return cache, nil
 }
 
+func addExpectedTargetBranchLabels(prowjobs []*prowapi.ProwJob) {
+	for _, prowjob := range prowjobs {
+		if prowjob == nil || prowjob.Spec.Refs == nil || prowjob.Spec.Refs.BaseRef == "" {
+			continue
+		}
+		if prowjob.Labels == nil {
+			prowjob.Labels = map[string]string{}
+		}
+		if targetBranch := kube.SanitizeCIRefLabelValue(prowjob.Spec.Refs.BaseRef); targetBranch != "" {
+			prowjob.Labels[kube.TargetBranchLabel] = targetBranch
+		}
+	}
+}
+
 func TestTriggerJobs(t *testing.T) {
 	testInstance := "https://gerrit"
 	var testcases = []struct {
@@ -3262,6 +3276,8 @@ func TestTriggerJobs(t *testing.T) {
 					}
 				}
 			}
+
+			addExpectedTargetBranchLabels(tc.wantPjs)
 
 			// It seems that the PJs are very deterministic, consider sorting
 			// them if this test becomes flaky.

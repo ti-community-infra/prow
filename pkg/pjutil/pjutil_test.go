@@ -628,6 +628,7 @@ func TestNewProwJob(t *testing.T) {
 				kube.OrgLabel:          "org",
 				kube.RepoLabel:         "repo",
 				kube.BaseRefLabel:      "main",
+				kube.TargetBranchLabel: "main",
 			},
 			expectedAnnotations: map[string]string{
 				kube.ProwJobAnnotation: "job",
@@ -658,6 +659,7 @@ func TestNewProwJob(t *testing.T) {
 				kube.OrgLabel:          "org",
 				kube.RepoLabel:         "repo",
 				kube.BaseRefLabel:      "main",
+				kube.TargetBranchLabel: "main",
 				kube.PullLabel:         "1",
 			},
 			expectedAnnotations: map[string]string{
@@ -689,6 +691,7 @@ func TestNewProwJob(t *testing.T) {
 				kube.OrgLabel:          "some-gerrit-instance.foo.com",
 				kube.RepoLabel:         "repo",
 				kube.BaseRefLabel:      "main",
+				kube.TargetBranchLabel: "main",
 				kube.PullLabel:         "1",
 			},
 			expectedAnnotations: map[string]string{
@@ -719,6 +722,7 @@ func TestNewProwJob(t *testing.T) {
 				kube.OrgLabel:          "org",
 				kube.RepoLabel:         "repo",
 				kube.BaseRefLabel:      "main",
+				kube.TargetBranchLabel: "main",
 				kube.PullLabel:         "1",
 			},
 			expectedAnnotations: map[string]string{
@@ -750,6 +754,7 @@ func TestNewProwJob(t *testing.T) {
 				kube.OrgLabel:          "org",
 				kube.RepoLabel:         "repo",
 				kube.BaseRefLabel:      "main",
+				kube.TargetBranchLabel: "main",
 				kube.PullLabel:         "1",
 			},
 			expectedAnnotations: map[string]string{
@@ -1063,6 +1068,7 @@ func TestNewPresubmitWithModifiers(t *testing.T) {
 						kube.OrgLabel:          "kubernetes",
 						kube.RepoLabel:         "repo-name",
 						kube.BaseRefLabel:      "base-ref",
+						kube.TargetBranchLabel: "base-ref",
 						kube.PullLabel:         "42",
 						kube.AuthorLabel:       "user-login",
 						"extra-label":          "foo",
@@ -1130,6 +1136,7 @@ func TestNewPresubmitWithModifiers(t *testing.T) {
 						kube.OrgLabel:          "kubernetes",
 						kube.RepoLabel:         "repo-name",
 						kube.BaseRefLabel:      "base-ref",
+						kube.TargetBranchLabel: "base-ref",
 						kube.PullLabel:         "42",
 						kube.AuthorLabel:       "user-login",
 						"extra-label":          "foo",

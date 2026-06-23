@@ -139,6 +139,9 @@ func LabelsAndAnnotationsForSpec(spec prowapi.ProwJobSpec, extraLabels, extraAnn
 		labels[kube.OrgLabel] = refs.Org
 		labels[kube.RepoLabel] = refs.Repo
 		labels[kube.BaseRefLabel] = refs.BaseRef
+		if targetBranch := kube.SanitizeCIRefLabelValue(refs.BaseRef); targetBranch != "" {
+			labels[kube.TargetBranchLabel] = targetBranch
+		}
 		if len(refs.Pulls) > 0 {
 			labels[kube.PullLabel] = strconv.Itoa(refs.Pulls[0].Number)
 			if refs.Pulls[0].Author != "" {

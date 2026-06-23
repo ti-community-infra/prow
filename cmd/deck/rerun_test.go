@@ -601,6 +601,7 @@ func TestLatestRerun(t *testing.T) {
 							"prow.k8s.io/refs.org":            "org",
 							"prow.k8s.io/refs.pull":           "1",
 							"prow.k8s.io/refs.repo":           "repo",
+							kube.TargetBranchLabel:            "master",
 							"prow.k8s.io/type":                string(tc.pjType),
 						},
 						Annotations: map[string]string{

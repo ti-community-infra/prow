@@ -192,6 +192,121 @@ func TestLabelsAndAnnotationsForJobAddsPullAuthorLabel(t *testing.T) {
 	}
 }
 
+func TestLabelsAndAnnotationsForSpecAddsTargetBranchLabel(t *testing.T) {
+	tests := []struct {
+		name       string
+		spec       prowapi.ProwJobSpec
+		extraLabel map[string]string
+		want       string
+		wantExists bool
+	}{
+		{
+			name: "master branch",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:     "pingcap",
+					Repo:    "tidb",
+					BaseRef: "master",
+				},
+			},
+			want:       "master",
+			wantExists: true,
+		},
+		{
+			name: "release branch with dot",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:     "pingcap",
+					Repo:    "tidb",
+					BaseRef: "release-8.5",
+				},
+			},
+			want:       "release-8_5",
+			wantExists: true,
+		},
+		{
+			name: "feature branch with slash and dot",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:     "pingcap",
+					Repo:    "tidb",
+					BaseRef: "Feature/foo.bar",
+				},
+			},
+			want:       "feature_foo_bar",
+			wantExists: true,
+		},
+		{
+			name: "empty base ref",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:  "pingcap",
+					Repo: "tidb",
+				},
+			},
+		},
+		{
+			name: "extra labels can override target branch",
+			spec: prowapi.ProwJobSpec{
+				Job: "pull-test",
+				Refs: &prowapi.Refs{
+					Org:     "pingcap",
+					Repo:    "tidb",
+					BaseRef: "master",
+				},
+			},
+			extraLabel: map[string]string{
+				kube.TargetBranchLabel: "custom-branch",
+			},
+			want:       "custom-branch",
+			wantExists: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := LabelsAndAnnotationsForSpec(tc.spec, tc.extraLabel, nil)
+			value, exists := got[kube.TargetBranchLabel]
+			if exists != tc.wantExists {
+				t.Fatalf("expected target branch label existence %t, got %t", tc.wantExists, exists)
+			}
+			if value != tc.want {
+				t.Fatalf("expected target branch label %q, got %q", tc.want, value)
+			}
+		})
+	}
+}
+
+func TestLabelsAndAnnotationsForJobAddsTargetBranchLabel(t *testing.T) {
+	got, _ := LabelsAndAnnotationsForJob(prowapi.ProwJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pj",
+		},
+		Spec: prowapi.ProwJobSpec{
+			Job:     "pull-test",
+			Type:    prowapi.PresubmitJob,
+			Context: "pull-test",
+			Refs: &prowapi.Refs{
+				Org:     "pingcap",
+				Repo:    "tidb",
+				BaseRef: "release-8.5",
+				Pulls: []prowapi.Pull{{
+					Number: 1,
+					Author: "pr-author",
+				}},
+			},
+		},
+	})
+
+	if got[kube.TargetBranchLabel] != "release-8_5" {
+		t.Fatalf("expected target branch label %q, got %q", "release-8_5", got[kube.TargetBranchLabel])
+	}
+}
+
 func TestCloneRefs(t *testing.T) {
 	truth := true
 	logMount := coreapi.VolumeMount{

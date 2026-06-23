@@ -17,7 +17,10 @@ limitations under the License.
 package kube
 
 import (
+	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 )
@@ -89,5 +92,57 @@ func TestRefs(t *testing.T) {
 		if actual != tc.expected {
 			t.Errorf("Ref %+v, got %s, expected, %s", tc.ref, actual, tc.expected)
 		}
+	}
+}
+
+func TestSanitizeCIRefLabelValue(t *testing.T) {
+	longRef := strings.Repeat("a", validation.LabelValueMaxLength) + ".suffix"
+	testcases := []struct {
+		name     string
+		ref      string
+		expected string
+	}{
+		{
+			name:     "simple branch",
+			ref:      "master",
+			expected: "master",
+		},
+		{
+			name:     "dot and slash become underscores",
+			ref:      "release-8.5/hotfix",
+			expected: "release-8_5_hotfix",
+		},
+		{
+			name:     "uppercase is lowercased",
+			ref:      "InRepoConfig",
+			expected: "inrepoconfig",
+		},
+		{
+			name:     "leading and trailing separators are trimmed",
+			ref:      "_-release-8.5-_",
+			expected: "release-8_5",
+		},
+		{
+			name:     "all invalid characters becomes empty",
+			ref:      "!!!",
+			expected: "",
+		},
+		{
+			name:     "long branch is truncated",
+			ref:      longRef,
+			expected: strings.Repeat("a", validation.LabelValueMaxLength),
+		},
+		{
+			name:     "truncated branch trims trailing separator",
+			ref:      strings.Repeat("a", validation.LabelValueMaxLength-1) + "-suffix",
+			expected: strings.Repeat("a", validation.LabelValueMaxLength-1),
+		},
+	}
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			if actual := SanitizeCIRefLabelValue(tc.ref); actual != tc.expected {
+				t.Errorf("expected %q, got %q", tc.expected, actual)
+			}
+		})
 	}
 }

@@ -16,6 +16,12 @@ limitations under the License.
 
 package kube
 
+import (
+	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
+)
+
 const (
 	// CreatedByProw is added on resources created by prow.
 	// Since resources often live in another cluster/namespace,
@@ -59,8 +65,12 @@ const (
 	// carries the repo associated with the job, eg test-infra
 	RepoLabel = "prow.k8s.io/refs.repo"
 	// BaseRefLabel is added in resources created by prow and
-	// carries the base ref associated with the job, eg main
+	// carries the raw base ref associated with the job, eg main.
 	BaseRefLabel = "prow.k8s.io/refs.base_ref"
+	// TargetBranchLabel is added in resources created by prow and
+	// carries the sanitized target branch associated with the job as a
+	// Kubernetes label value, eg release-8_5 for release-8.5.
+	TargetBranchLabel = "prow.k8s.io/refs.target_branch"
 	// PullLabel is added in resources created by prow and
 	// carries the PR number associated with the job, eg 321.
 	PullLabel = "prow.k8s.io/refs.pull"
@@ -89,3 +99,23 @@ const (
 	// GerritReportLabel is the gerrit label prow will cast vote on, fallback to CodeReview label if unset
 	GerritReportLabel = "prow.k8s.io/gerrit-report-label"
 )
+
+// SanitizeCIRefLabelValue sanitizes a CI ref into a Kubernetes label value.
+// It returns an empty string when the ref has no usable label value.
+func SanitizeCIRefLabelValue(value string) string {
+	value = strings.ToLower(value)
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+
+	sanitized := strings.Trim(b.String(), "_-")
+	if len(sanitized) > validation.LabelValueMaxLength {
+		sanitized = strings.TrimRight(sanitized[:validation.LabelValueMaxLength], "_-")
+	}
+	return sanitized
+}
