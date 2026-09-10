@@ -389,11 +389,15 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 		headSHA = "123abc"
 	)
 	var (
-		failedRun       = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "failure"}
-		successfulRun   = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "success"}
-		secondFailedRun = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "failure"}
-		cancelledRun    = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "cancelled"}
-		skippedRun      = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "skipped"}
+		failedRun            = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "failure"}
+		successfulRun        = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "success"}
+		secondFailedRun      = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "failure"}
+		cancelledRun         = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "cancelled"}
+		skippedRun           = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "skipped"}
+		pullRequestTargetRun = WorkflowRun{HeadSha: headSHA, Event: "pull_request_target", Status: "completed", Conclusion: "failure"}
+		workflowCallRun      = WorkflowRun{HeadSha: headSHA, Event: "workflow_call", Status: "completed", Conclusion: "failure"}
+		pushFailedRun        = WorkflowRun{HeadSha: headSHA, Event: "push", Status: "completed", Conclusion: "failure"}
+		workflowDispatchRun  = WorkflowRun{HeadSha: headSHA, Event: "workflow_dispatch", Status: "completed", Conclusion: "failure"}
 	)
 	testCases := []struct {
 		name string
@@ -430,6 +434,27 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 			},
 			expectedRuns: []WorkflowRun{cancelledRun},
 		},
+		{
+			name: "supported non pull_request events are included",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pullRequestTargetRun, workflowCallRun},
+			},
+			expectedRuns: []WorkflowRun{pullRequestTargetRun, workflowCallRun},
+		},
+		{
+			name: "unsupported events are ignored",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pushFailedRun, workflowDispatchRun},
+			},
+			expectedRuns: nil,
+		},
+		{
+			name: "only supported events are returned",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pushFailedRun, failedRun, workflowDispatchRun, pullRequestTargetRun},
+			},
+			expectedRuns: []WorkflowRun{failedRun, pullRequestTargetRun},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -448,9 +473,10 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 				if query.Get("head_sha") != headSHA {
 					t.Errorf("Expected query parameter head_sha=%s, got %s", headSHA, query.Get("head_sha"))
 				}
-				expectedEvent := "pull_request OR pull_request_target OR workflow_call"
-				if query.Get("event") != "pull_request OR pull_request_target OR workflow_call" {
-					t.Errorf("Expected query parameter event=%q, got %q", expectedEvent, query.Get("event"))
+				// The GitHub API does not support filtering by multiple events,
+				// so the event filter must be applied client-side.
+				if query.Get("event") != "" {
+					t.Errorf("Did not expect query parameter event, got %q", query.Get("event"))
 				}
 				if query.Get("branch") != branch {
 					t.Errorf("Expected query parameter branch=%s, got %s", branch, query.Get("branch"))
@@ -479,7 +505,7 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 			for _, run := range runs {
 				found := false
 				for _, expectedRun := range tc.expectedRuns {
-					if run.Status == expectedRun.Status && run.Conclusion == expectedRun.Conclusion && run.HeadSha == expectedRun.HeadSha {
+					if run.Status == expectedRun.Status && run.Conclusion == expectedRun.Conclusion && run.HeadSha == expectedRun.HeadSha && run.Event == expectedRun.Event {
 						found = true
 					}
 				}
