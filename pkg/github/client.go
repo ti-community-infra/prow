@@ -379,6 +379,13 @@ var (
 	teamRe = regexp.MustCompile(`^(.*)/(.*)$`)
 
 	passedWorkflowRunConclusions = []string{"success", "skipped"}
+
+	// failedWorkflowRunEvents are the GitHub Actions event types whose failed
+	// workflow runs should be re-triggered by Prow. GitHub's "list workflow runs
+	// for a repository" API does not support filtering by multiple events (the
+	// documented `event` parameter only accepts a single event), so runs are
+	// filtered by event client-side instead.
+	failedWorkflowRunEvents = []string{"pull_request", "pull_request_target", "workflow_call"}
 )
 
 const (
@@ -2082,9 +2089,6 @@ func (c *client) GetFailedActionRunsByHeadBranch(org, repo, branchName, headSHA 
 	query := u.Query()
 	// Filter for the specific head SHA
 	query.Add("head_sha", headSHA)
-	// setting the OR condition to get both PR and PR target workflows, as well
-	// as workflows called via another workflow using workflow_call (matrix workflows)
-	query.Add("event", "pull_request OR pull_request_target OR workflow_call")
 	// TODO: check if this is correct, if set branchk, alway get 0 workflow_runs
 	query.Add("branch", branchName)
 	u.RawQuery = query.Encode()
@@ -2099,7 +2103,7 @@ func (c *client) GetFailedActionRunsByHeadBranch(org, repo, branchName, headSHA 
 
 	prRuns := []WorkflowRun{}
 
-	// We only want to get failed workflows.
+	// We only want failed workflows triggered by one of the supported events.
 	// Note: The query parameter "status" is overloaded and used for both status and conclusion.
 	// See https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28#list-workflow-runs-for-a-workflow
 	// This makes it hard to use directly. Instead, we loop through the runs and check them individually.
@@ -2108,6 +2112,9 @@ func (c *client) GetFailedActionRunsByHeadBranch(org, repo, branchName, headSHA 
 	// A failed workflow also have status "completed", but the conclusion can be either "failure" or "cancelled".
 	// We only want completed jobs that are not skipped and not successful.
 	for _, run := range runs.WorkflowRuns {
+		if !slices.Contains(failedWorkflowRunEvents, run.Event) {
+			continue
+		}
 		if run.Status == "completed" && !slices.Contains(passedWorkflowRunConclusions, run.Conclusion) {
 			prRuns = append(prRuns, run)
 		}
