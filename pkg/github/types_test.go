@@ -17,8 +17,85 @@ limitations under the License.
 package github
 
 import (
+	"encoding/json"
 	"testing"
 )
+
+func TestPullRequestEventStackUnmarshal(t *testing.T) {
+	t.Parallel()
+	const payload = `{
+		"action": "stacked",
+		"number": 3,
+		"pull_request": {
+			"number": 3,
+			"base": {"ref": "feat/parent", "sha": "abc123"},
+			"head": {"ref": "feat/child", "sha": "def456"},
+			"stack": {
+				"id": 123456,
+				"number": 50,
+				"size": 5,
+				"position": 3,
+				"base": {"ref": "main", "sha": "trunksha"}
+			}
+		}
+	}`
+
+	var event PullRequestEvent
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		t.Fatalf("failed to unmarshal pull_request event: %v", err)
+	}
+
+	if got, want := event.Action, PullRequestActionStacked; got != want {
+		t.Errorf("action: got %q, want %q", got, want)
+	}
+	if event.PullRequest.Stack == nil {
+		t.Fatal("expected Stack to be populated")
+	}
+	stack := event.PullRequest.Stack
+	if got, want := stack.ID, int64(123456); got != want {
+		t.Errorf("stack.id: got %d, want %d", got, want)
+	}
+	if got, want := stack.Number, 50; got != want {
+		t.Errorf("stack.number: got %d, want %d", got, want)
+	}
+	if got, want := stack.Size, 5; got != want {
+		t.Errorf("stack.size: got %d, want %d", got, want)
+	}
+	if got, want := stack.Position, 3; got != want {
+		t.Errorf("stack.position: got %d, want %d", got, want)
+	}
+	if got, want := stack.Base.Ref, "main"; got != want {
+		t.Errorf("stack.base.ref: got %q, want %q", got, want)
+	}
+	if got, want := stack.Base.SHA, "trunksha"; got != want {
+		t.Errorf("stack.base.sha: got %q, want %q", got, want)
+	}
+	// The direct parent branch must remain untouched.
+	if got, want := event.PullRequest.Base.Ref, "feat/parent"; got != want {
+		t.Errorf("base.ref: got %q, want %q", got, want)
+	}
+}
+
+func TestPullRequestEventWithoutStack(t *testing.T) {
+	t.Parallel()
+	const payload = `{
+		"action": "opened",
+		"number": 1,
+		"pull_request": {
+			"number": 1,
+			"base": {"ref": "main", "sha": "abc123"},
+			"head": {"ref": "feat/x", "sha": "def456"}
+		}
+	}`
+
+	var event PullRequestEvent
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		t.Fatalf("failed to unmarshal pull_request event: %v", err)
+	}
+	if event.PullRequest.Stack != nil {
+		t.Errorf("expected Stack to be nil, got %+v", event.PullRequest.Stack)
+	}
+}
 
 func TestIssueCapsLogin(t *testing.T) {
 	// some valid logins that should all normalize to match the first
