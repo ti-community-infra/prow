@@ -320,6 +320,13 @@ type delegate struct {
 	getToken     func() []byte
 	censor       func([]byte) []byte
 
+	// mergeMode selects how Merge talks to GitHub. See MergeMode.
+	mergeMode MergeMode
+	// mergeAsyncPollInterval and mergeAsyncTimeout bound how long Merge waits
+	// for an asynchronous merge to reach a terminal state.
+	mergeAsyncPollInterval time.Duration
+	mergeAsyncTimeout      time.Duration
+
 	mut      sync.Mutex // protects botName and email
 	userData *UserData
 }
@@ -522,6 +529,17 @@ type ClientOptions struct {
 	DryRun bool
 	// BaseRoundTripper is the last RoundTripper to be called. Used for testing, gets defaulted to http.DefaultTransport
 	BaseRoundTripper http.RoundTripper
+
+	// MergeMode controls how the client merges pull requests. See MergeMode for
+	// the supported values. Defaults to MergeModeAuto.
+	MergeMode MergeMode
+	// MergeAsyncPollInterval is how long Merge waits between polls of the
+	// asynchronous merge endpoint. Defaults to 5s.
+	MergeAsyncPollInterval time.Duration
+	// MergeAsyncTimeout bounds the total time Merge waits for an asynchronous
+	// merge to reach a terminal state. It should stay below Tide's sync period.
+	// Defaults to 45s.
+	MergeAsyncTimeout time.Duration
 }
 
 func (o ClientOptions) Default() ClientOptions {
@@ -539,6 +557,15 @@ func (o ClientOptions) Default() ClientOptions {
 	}
 	if o.Max404Retries == 0 {
 		o.Max404Retries = DefaultMax404Retries
+	}
+	if o.MergeMode == "" {
+		o.MergeMode = DefaultMergeMode
+	}
+	if o.MergeAsyncPollInterval == 0 {
+		o.MergeAsyncPollInterval = defaultMergeAsyncPollInterval
+	}
+	if o.MergeAsyncTimeout == 0 {
+		o.MergeAsyncTimeout = defaultMergeAsyncTimeout
 	}
 	return o
 }
@@ -616,18 +643,21 @@ func NewClientFromOptions(fields logrus.Fields, options ClientOptions) (TokenGen
 				},
 			})},
 		delegate: &delegate{
-			time:          &standardTime{},
-			client:        httpClient,
-			bases:         options.Bases,
-			throttle:      ghThrottler{Throttler: &throttle.Throttler{}},
-			getToken:      options.GetToken,
-			censor:        options.Censor,
-			dry:           options.DryRun,
-			usesAppsAuth:  options.AppID != "",
-			maxRetries:    options.MaxRetries,
-			max404Retries: options.Max404Retries,
-			initialDelay:  options.InitialDelay,
-			maxSleepTime:  options.MaxSleepTime,
+			time:                   &standardTime{},
+			client:                 httpClient,
+			bases:                  options.Bases,
+			throttle:               ghThrottler{Throttler: &throttle.Throttler{}},
+			getToken:               options.GetToken,
+			censor:                 options.Censor,
+			dry:                    options.DryRun,
+			usesAppsAuth:           options.AppID != "",
+			maxRetries:             options.MaxRetries,
+			max404Retries:          options.Max404Retries,
+			initialDelay:           options.InitialDelay,
+			maxSleepTime:           options.MaxSleepTime,
+			mergeMode:              options.MergeMode,
+			mergeAsyncPollInterval: options.MergeAsyncPollInterval,
+			mergeAsyncTimeout:      options.MergeAsyncTimeout,
 		},
 	}
 	c.gqlc = c.gqlc.forUserAgent(c.userAgent())
@@ -4000,6 +4030,86 @@ type MergeCommitsForbiddenError string
 
 func (e MergeCommitsForbiddenError) Error() string { return string(e) }
 
+// MergeMode selects how the client merges pull requests.
+type MergeMode string
+
+const (
+	// MergeModeSync only uses the synchronous merge endpoint. This preserves the
+	// historical behavior and works on GitHub Enterprise Server instances that do
+	// not expose the asynchronous merge endpoint.
+	MergeModeSync MergeMode = "sync"
+	// MergeModeAuto uses the synchronous merge endpoint first and only falls back
+	// to the asynchronous merge endpoint when GitHub rejects the request because
+	// the pull request belongs to a stack. The behavior for regular pull requests
+	// is left untouched.
+	MergeModeAuto MergeMode = "auto"
+	// MergeModeAsync always uses the asynchronous merge endpoint.
+	MergeModeAsync MergeMode = "async"
+)
+
+const (
+	// DefaultMergeMode is used when no mode is configured.
+	DefaultMergeMode = MergeModeAuto
+
+	// stackedPRMergeUnsupportedMessage is returned by the synchronous merge
+	// endpoint for stacked pull requests. GitHub requires those to be merged with
+	// the asynchronous merge endpoint.
+	// https://docs.github.com/rest/pulls/pulls#merge-a-pull-request-asynchronously
+	stackedPRMergeUnsupportedMessage = "Merging stacked PRs via this endpoint is not supported"
+
+	// mergeAsyncStatus* are the values of the "status" field returned by the
+	// asynchronous merge endpoint.
+	mergeAsyncStatusPending  = "pending"
+	mergeAsyncStatusMerged   = "merged"
+	mergeAsyncStatusEnqueued = "enqueued"
+	mergeAsyncStatusFailed   = "failed"
+
+	defaultMergeAsyncPollInterval = 5 * time.Second
+	defaultMergeAsyncTimeout      = 45 * time.Second
+)
+
+// ValidMergeModes lists every accepted MergeMode.
+var ValidMergeModes = []MergeMode{MergeModeSync, MergeModeAuto, MergeModeAsync}
+
+// IsValid reports whether the merge mode is one of the supported values.
+func (m MergeMode) IsValid() bool {
+	return slices.Contains(ValidMergeModes, m)
+}
+
+// String implements flag.Value.
+func (m *MergeMode) String() string {
+	if m == nil {
+		return ""
+	}
+	return string(*m)
+}
+
+// Set implements flag.Value and rejects unknown modes.
+func (m *MergeMode) Set(value string) error {
+	mode := MergeMode(value)
+	if !mode.IsValid() {
+		return fmt.Errorf("invalid merge mode %q, must be one of %v", value, ValidMergeModes)
+	}
+	*m = mode
+	return nil
+}
+
+// mergeAsyncResponse is the response of the asynchronous merge endpoint and of
+// its result endpoint.
+//
+// See https://docs.github.com/rest/pulls/pulls#merge-a-pull-request-asynchronously
+type mergeAsyncResponse struct {
+	Status  string `json:"status"`
+	Details struct {
+		Message         string `json:"message"`
+		UUID            string `json:"uuid"`
+		MergeMethod     string `json:"merge_method"`
+		MergeAction     string `json:"merge_action"`
+		ExpectedHeadSHA string `json:"expected_head_sha"`
+		SHA             string `json:"sha"`
+	} `json:"details"`
+}
+
 // Merge merges a PR.
 //
 // See https://developer.github.com/v3/pulls/#merge-a-pull-request-merge-button
@@ -4007,15 +4117,28 @@ func (c *client) Merge(org, repo string, pr int, details MergeDetails) error {
 	durationLogger := c.log("Merge", org, repo, pr, details)
 	defer durationLogger()
 
+	mode := c.resolvedMergeMode()
+	if mode == MergeModeAsync {
+		return c.mergeAsync(org, repo, pr, details)
+	}
+
 	ge := githubError{}
 	ec, err := c.request(&request{
 		method:      http.MethodPut,
 		path:        fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", org, repo, pr),
 		org:         org,
 		requestBody: &details,
-		exitCodes:   []int{200, 405, 409},
+		// The exit codes are intentionally left unchanged so that every failure
+		// other than the stacked-PR rejection keeps its historical error
+		// semantics. MergeModeAuto inspects the returned error below.
+		exitCodes: []int{200, 405, 409},
 	}, &ge)
 	if err != nil {
+		if mode == MergeModeAuto && isStackedPRMergeUnsupported(err) {
+			// Stacked PRs cannot be merged synchronously; fall back to the
+			// asynchronous endpoint, which is the only supported way.
+			return c.mergeAsync(org, repo, pr, details)
+		}
 		return err
 	}
 	if ec == 405 {
@@ -4034,6 +4157,131 @@ func (c *client) Merge(org, repo string, pr int, details MergeDetails) error {
 	}
 
 	return nil
+}
+
+func (c *client) resolvedMergeMode() MergeMode {
+	if c.mergeMode == "" {
+		return DefaultMergeMode
+	}
+	return c.mergeMode
+}
+
+// isStackedPRMergeUnsupported reports whether err is the 403 returned by the
+// synchronous merge endpoint for a pull request that belongs to a stack.
+//
+// Note that the retry layer turns plain 403 responses into a forbiddenError
+// before the exit code handling runs, so both error shapes are inspected.
+func isStackedPRMergeUnsupported(err error) bool {
+	var requestErr requestError
+	if errors.As(err, &requestErr) {
+		if requestErr.StatusCode != http.StatusForbidden {
+			return false
+		}
+		if requestErr.ClientError != nil && strings.Contains(requestErr.ClientError.Error(), stackedPRMergeUnsupportedMessage) {
+			return true
+		}
+		return strings.Contains(requestErr.ErrorString, stackedPRMergeUnsupportedMessage)
+	}
+	var forbiddenErr forbiddenError
+	if errors.As(err, &forbiddenErr) {
+		return strings.Contains(string(forbiddenErr.body), stackedPRMergeUnsupportedMessage)
+	}
+	return false
+}
+
+// mergeAsync merges a pull request using GitHub's asynchronous merge endpoint
+// and, unless the request already reached a terminal state, polls the result
+// endpoint until the merge finishes. This keeps the synchronous contract that
+// Merge callers rely on: it returns nil once the PR is merged and an error
+// otherwise.
+func (c *client) mergeAsync(org, repo string, pr int, details MergeDetails) error {
+	resp := mergeAsyncResponse{}
+	ec, err := c.request(&request{
+		method:      http.MethodPut,
+		path:        fmt.Sprintf("/repos/%s/%s/pulls/%d/merge-async", org, repo, pr),
+		org:         org,
+		requestBody: &details,
+		exitCodes:   []int{200, 202, 409},
+	}, &resp)
+	if err != nil {
+		// 400 and 422 mean the pull request cannot be merged at all, map them to
+		// the same error type the synchronous endpoint produces. Everything else
+		// (403, 404, ...) is returned as a retryable error.
+		var requestErr requestError
+		if errors.As(err, &requestErr) && (requestErr.StatusCode == http.StatusBadRequest || requestErr.StatusCode == http.StatusUnprocessableEntity) {
+			return UnmergablePRError(requestErr.ErrorString)
+		}
+		return err
+	}
+
+	// A 200 response means the merge already finished (or the pull request was
+	// accepted into a merge queue); there is nothing left to poll.
+	if ec == http.StatusOK && (resp.Status == mergeAsyncStatusMerged || resp.Status == mergeAsyncStatusEnqueued) {
+		return nil
+	}
+
+	if resp.Details.UUID == "" {
+		return fmt.Errorf("merge-async request for %s/%s#%d returned no uuid (status code %d, status %q)", org, repo, pr, ec, resp.Status)
+	}
+	return c.waitForMergeAsync(org, repo, pr, resp.Details.UUID)
+}
+
+// waitForMergeAsync polls the result endpoint of an asynchronous merge until it
+// reaches a terminal state or the bounded timeout is exhausted. A timeout is
+// reported as a retryable error; the next attempt reuses the same uuid via the
+// 409 response of the asynchronous merge endpoint.
+func (c *client) waitForMergeAsync(org, repo string, pr int, uuid string) error {
+	interval := c.mergeAsyncPollInterval
+	if interval <= 0 {
+		interval = defaultMergeAsyncPollInterval
+	}
+	timeout := c.mergeAsyncTimeout
+	if timeout <= 0 {
+		timeout = defaultMergeAsyncTimeout
+	}
+	attempts := int(timeout/interval) + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	for attempt := 0; attempt < attempts; attempt++ {
+		resp := mergeAsyncResponse{}
+		ec, err := c.request(&request{
+			method:    http.MethodGet,
+			path:      fmt.Sprintf("/repos/%s/%s/pulls/%d/merge-async/%s", org, repo, pr, uuid),
+			org:       org,
+			exitCodes: []int{200, 404},
+		}, &resp)
+		if err != nil {
+			return err
+		}
+		if ec == http.StatusNotFound {
+			// Results are only retained for a limited time. Report a retryable
+			// error so that the next sync can reuse the uuid.
+			return fmt.Errorf("merge-async result %s for %s/%s#%d not found", uuid, org, repo, pr)
+		}
+
+		switch resp.Status {
+		case mergeAsyncStatusMerged, mergeAsyncStatusEnqueued:
+			return nil
+		case mergeAsyncStatusFailed:
+			msg := resp.Details.Message
+			if msg == "" {
+				msg = "asynchronous merge failed"
+			}
+			return UnmergablePRError(msg)
+		case mergeAsyncStatusPending, "":
+			// Keep polling.
+		default:
+			return fmt.Errorf("unexpected merge-async status %q for %s/%s#%d", resp.Status, org, repo, pr)
+		}
+
+		if attempt+1 < attempts {
+			c.time.Sleep(interval)
+		}
+	}
+
+	return fmt.Errorf("timed out waiting for the asynchronous merge of %s/%s#%d (uuid %s)", org, repo, pr, uuid)
 }
 
 // IsCollaborator returns whether or not the user is a collaborator of the repo.

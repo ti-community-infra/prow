@@ -209,6 +209,10 @@ var (
 		poolErrors   *prometheus.CounterVec
 		queryResults *prometheus.CounterVec
 
+		// mergeFailures counts merge failures that are otherwise only logged at
+		// debug level, so that silently retried merges are visible.
+		mergeFailures *prometheus.CounterVec
+
 		// Singleton
 		syncDuration         prometheus.Gauge
 		statusUpdateDuration prometheus.Gauge
@@ -261,6 +265,16 @@ var (
 			"result",
 		}),
 
+		mergeFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tidemergefailures",
+			Help: "Count of Tide merge failures by pool and reason.",
+		}, []string{
+			"org",
+			"repo",
+			"branch",
+			"reason",
+		}),
+
 		// Use the sync heartbeat counter to monitor for liveness. Use the duration
 		// gauges for precise sync duration graphs since the prometheus scrape
 		// period is likely much larger than the loop periods.
@@ -291,6 +305,7 @@ func init() {
 	prometheus.MustRegister(tideMetrics.syncHeartbeat)
 	prometheus.MustRegister(tideMetrics.poolErrors)
 	prometheus.MustRegister(tideMetrics.queryResults)
+	prometheus.MustRegister(tideMetrics.mergeFailures)
 }
 
 type manager interface {

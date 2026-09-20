@@ -19,6 +19,7 @@ package tide
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -1489,6 +1490,30 @@ func TestDeleteReportIssueComment(t *testing.T) {
 			}
 			if !slices.Equal(ghc.issueComments[1], tc.expectedIssueComments) {
 				t.Errorf("expected issue comments: %+v, got issue comments: %+v", tc.expectedIssueComments, ghc.issueComments)
+			}
+		})
+	}
+}
+
+func TestMergeFailureReason(t *testing.T) {
+	testCases := []struct {
+		name     string
+		err      error
+		expected string
+	}{
+		{name: "nil", err: nil, expected: "other"},
+		{name: "modified head", err: fmt.Errorf("PR was modified: %w", github.ModifiedHeadError("modified")), expected: "modified_head"},
+		{name: "base changed", err: fmt.Errorf("base branch was modified: %w", github.UnmergablePRBaseChangedError("changed")), expected: "base_changed"},
+		{name: "unauthorized to push", err: github.UnauthorizedToPushError("unauthorized"), expected: "unauthorized_to_push"},
+		{name: "merge commits forbidden", err: github.MergeCommitsForbiddenError("forbidden"), expected: "merge_commits_forbidden"},
+		{name: "unmergable", err: github.UnmergablePRError("unmergable"), expected: "unmergable"},
+		{name: "generic", err: errors.New("boom"), expected: "other"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mergeFailureReason(tc.err); got != tc.expected {
+				t.Errorf("expected reason %q, got %q", tc.expected, got)
 			}
 		})
 	}
