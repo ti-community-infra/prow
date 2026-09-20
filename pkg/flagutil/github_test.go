@@ -289,3 +289,56 @@ func TestOrgThottlerOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestMergeModeFlag(t *testing.T) {
+	testCases := []struct {
+		name        string
+		args        []string
+		expected    github.MergeMode
+		expectedErr bool
+	}{
+		{
+			name:     "defaults to auto",
+			expected: github.DefaultMergeMode,
+		},
+		{
+			name:     "sync",
+			args:     []string{"--merge-mode=sync"},
+			expected: github.MergeModeSync,
+		},
+		{
+			name:     "async",
+			args:     []string{"--merge-mode=async"},
+			expected: github.MergeModeAsync,
+		},
+		{
+			name:        "rejects unknown mode",
+			args:        []string{"--merge-mode=bogus"},
+			expectedErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet(tc.name, flag.ContinueOnError)
+			opts := &GitHubOptions{}
+			opts.AddFlags(fs)
+			err := fs.Parse(tc.args)
+			if (err != nil) != tc.expectedErr {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if tc.expectedErr {
+				return
+			}
+			if opts.MergeMode != tc.expected {
+				t.Errorf("expected merge mode %q, got %q", tc.expected, opts.MergeMode)
+			}
+			if err := opts.Validate(false); err != nil {
+				t.Fatalf("unexpected validate error: %v", err)
+			}
+			if got := opts.baseClientOptions().MergeMode; got != tc.expected {
+				t.Errorf("expected client option merge mode %q, got %q", tc.expected, got)
+			}
+		})
+	}
+}

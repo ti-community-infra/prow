@@ -289,6 +289,11 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 		if err != nil {
 			// These are user errors, shouldn't be printed as tide errors
 			log.WithError(err).Debug("Merge failed.")
+			// Keep merge failures visible: without this they would only be
+			// retried silently on every sync.
+			reason := mergeFailureReason(err)
+			tideMetrics.mergeFailures.WithLabelValues(sp.org, sp.repo, sp.branch, reason).Inc()
+			log.WithField("reason", reason).WithError(err).Warn("Merge failed.")
 		} else {
 			log.Info("Merged.")
 			merged = append(merged, pr)
@@ -316,6 +321,31 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 		}
 	}
 	return merged, fmt.Errorf("failed merging %v%s: %w", failed, batch, utilerrors.NewAggregate(errs))
+}
+
+// mergeFailureReason classifies a merge error for the tide merge failure metric.
+func mergeFailureReason(err error) string {
+	var modifiedHead github.ModifiedHeadError
+	if errors.As(err, &modifiedHead) {
+		return "modified_head"
+	}
+	var baseChanged github.UnmergablePRBaseChangedError
+	if errors.As(err, &baseChanged) {
+		return "base_changed"
+	}
+	var unauthorized github.UnauthorizedToPushError
+	if errors.As(err, &unauthorized) {
+		return "unauthorized_to_push"
+	}
+	var forbidden github.MergeCommitsForbiddenError
+	if errors.As(err, &forbidden) {
+		return "merge_commits_forbidden"
+	}
+	var unmergable github.UnmergablePRError
+	if errors.As(err, &unmergable) {
+		return "unmergable"
+	}
+	return "other"
 }
 
 // headContexts gets the status contexts for the commit with OID == pr.HeadRefOID
