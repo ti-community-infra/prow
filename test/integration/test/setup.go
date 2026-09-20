@@ -26,9 +26,14 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
+	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	coreapi "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
@@ -36,6 +41,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
+	prowjobv1 "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 )
 
 const (
@@ -59,7 +65,26 @@ func NewClients(configPath, clusterName string) (ctrlruntimeclient.Client, error
 	if err != nil {
 		return nil, err
 	}
-	return ctrlruntimeclient.New(cfg, ctrlruntimeclient.Options{})
+
+	// Create a scheme with all required types
+	clientScheme := runtime.NewScheme()
+
+	// Add standard Kubernetes types
+	if err := scheme.AddToScheme(clientScheme); err != nil {
+		return nil, fmt.Errorf("failed to add k8s scheme: %w", err)
+	}
+
+	// Add ProwJob types
+	if err := prowjobv1.AddToScheme(clientScheme); err != nil {
+		return nil, fmt.Errorf("failed to add prowjob scheme: %w", err)
+	}
+
+	// Add Tekton Pipeline types
+	if err := pipelinev1.AddToScheme(clientScheme); err != nil {
+		return nil, fmt.Errorf("failed to add tekton pipeline scheme: %w", err)
+	}
+
+	return ctrlruntimeclient.New(cfg, ctrlruntimeclient.Options{Scheme: clientScheme})
 }
 
 func NewRestConfig(configPath, clusterName string) (*rest.Config, error) {
@@ -108,17 +133,46 @@ func refreshProwPods(client ctrlruntimeclient.Client, ctx context.Context, name 
 	prowComponentsMux.Lock()
 	defer prowComponentsMux.Unlock()
 
-	var pods coreapi.PodList
-	labels, _ := labels.Parse("app = " + name)
-	if err := client.List(ctx, &pods, &ctrlruntimeclient.ListOptions{LabelSelector: labels}); err != nil {
+	selector, err := labels.Parse("app = " + name)
+	if err != nil {
 		return err
 	}
+	var pods coreapi.PodList
+	if err := client.List(ctx, &pods, &ctrlruntimeclient.ListOptions{LabelSelector: selector}); err != nil {
+		return err
+	}
+	oldPodUIDs := map[types.UID]bool{}
 	for _, pod := range pods.Items {
+		oldPodUIDs[pod.UID] = true
 		if err := client.Delete(ctx, &pod); err != nil {
 			return err
 		}
 	}
-	return nil
+	// Wait for the replacement pods to become ready before returning, so that
+	// callers (and any test racing with them through the ingress) resume
+	// against a live component instead of the downtime window left behind by
+	// the deletion above.
+	return wait.PollUntilContextTimeout(ctx, 2*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		var current coreapi.PodList
+		if err := client.List(ctx, &current, &ctrlruntimeclient.ListOptions{LabelSelector: selector}); err != nil {
+			return false, nil
+		}
+		newPodReady := false
+		for _, pod := range current.Items {
+			if oldPodUIDs[pod.UID] {
+				return false, nil
+			}
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == coreapi.PodReady && cond.Status == coreapi.ConditionTrue {
+					newPodReady = true
+				}
+			}
+		}
+		return newPodReady, nil
+	})
 }
 
 // RandomString generates random string of 32 characters in length, and fail if it failed

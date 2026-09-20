@@ -49,7 +49,7 @@ func push(job string, grouping map[string]string, pushURL string, g prometheus.G
 	}
 	urlComponents := []string{url.QueryEscape(job)}
 	for ln, lv := range grouping {
-		if !model.LabelName(ln).IsValid() {
+		if !model.UTF8Validation.IsValidLabelName(ln) {
 			return fmt.Errorf("grouping label has invalid name: %s", ln)
 		}
 		if strings.Contains(lv, "/") {
@@ -92,7 +92,7 @@ func push(job string, grouping map[string]string, pushURL string, g prometheus.G
 		return err
 	}
 	defer resp.Body.Close()
-	if !(resp.StatusCode == 200 || resp.StatusCode == 202) {
+	if resp.StatusCode != 200 && resp.StatusCode != 202 {
 		body, _ := io.ReadAll(resp.Body) // Ignore any further error as this is for an error message only.
 		return fmt.Errorf("unexpected status code %d while pushing to %s: %s", resp.StatusCode, pushURL, body)
 	}

@@ -29,6 +29,7 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -57,6 +58,7 @@ import (
 	"sigs.k8s.io/prow/pkg/plugins/blockade"
 	"sigs.k8s.io/prow/pkg/plugins/blunderbuss"
 	"sigs.k8s.io/prow/pkg/plugins/bugzilla"
+	"sigs.k8s.io/prow/pkg/plugins/rifle"
 	"sigs.k8s.io/prow/pkg/plugins/cherrypickunapproved"
 	"sigs.k8s.io/prow/pkg/plugins/hold"
 	labelplugin "sigs.k8s.io/prow/pkg/plugins/label"
@@ -123,6 +125,7 @@ const (
 	validateLabelWarning                           = "validate-label"
 	requiredJobAnnotationsWarning                  = "required-job-annotations"
 	periodicDefaultCloneWarning                    = "periodic-default-clone-config"
+	validateConfigUpdaterACLsWarning               = "validate-config-updater-acls"
 
 	defaultHourlyTokens = 3000
 	defaultAllowedBurst = 100
@@ -148,6 +151,7 @@ var defaultWarnings = []string{
 	validateLabelWarning,
 	requiredJobAnnotationsWarning,
 	periodicDefaultCloneWarning,
+	validateConfigUpdaterACLsWarning,
 }
 
 var expensiveWarnings = []string{
@@ -185,13 +189,7 @@ func (o *options) DefaultAndValidate() error {
 		return errors.New("--prow-yaml-repo-path requires --prow-yaml-repo-name to be set")
 	}
 	for _, warning := range o.warnings.Strings() {
-		found := false
-		for _, registeredWarning := range allWarnings {
-			if warning == registeredWarning {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(allWarnings, warning)
 		if !found {
 			return fmt.Errorf("no such warning %q, valid warnings: %v", warning, allWarnings)
 		}
@@ -443,6 +441,12 @@ func validate(o options) error {
 		}
 	}
 
+	if pcfg != nil && o.warningEnabled(validateConfigUpdaterACLsWarning) {
+		if err := validateConfigUpdaterACLs(pcfg); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	if o.warningEnabled(requiredJobAnnotationsWarning) {
 		if err := validateRequiredJobAnnotations(o.requiredJobAnnotations.Strings(), cfg.JobConfig); err != nil {
 			errs = append(errs, err)
@@ -561,7 +565,7 @@ func validateURLs(c config.ProwConfig) error {
 	return utilerrors.NewAggregate(validationErrs)
 }
 
-func validateUnknownFields(cfg interface{}, cfgBytes []byte, filePath string) error {
+func validateUnknownFields(cfg any, cfgBytes []byte, filePath string) error {
 	err := yaml.Unmarshal(cfgBytes, &cfg, yaml.DisallowUnknownFields)
 	if err != nil {
 		return fmt.Errorf("unknown fields or bad config in %s: %w", filePath, err)
@@ -672,12 +676,22 @@ func validateTideRequirements(cfg *config.Config, pcfg *plugins.Configuration, i
 		// using the matcher
 		config *orgRepoConfig
 	}
-	// configs list relationships between tide config
-	// and plugin enablement that we want to validate
+	// configs list relationships between tide config and plugin enablement
+	// that we want to validate in both directions: the plugin must be
+	// enabled wherever tide honors the label, and tide must honor the label
+	// wherever the plugin is enabled.
 	configs := []plugin{
 		{name: lgtm.PluginName, label: labels.LGTM, matcher: requires},
 		{name: approve.PluginName, label: labels.Approved, matcher: requires},
 	}
+	// needsRebaseConfig is validated in one direction only: a query that
+	// forbids the needs-rebase label must have the plugin enabled. The
+	// reverse is not checked, since enabling the plugin without forbidding
+	// the label in tide is not a misconfiguration -- tide already refuses
+	// to merge any PR with a merge conflict regardless of the query (see
+	// mergeChecker.isAllowedToMerge in pkg/tide/github.go), so requiring
+	// the query to also forbid the label would be redundant.
+	needsRebaseConfig := plugin{name: needsrebase.PluginName, label: labels.NeedsRebase, external: true, matcher: forbids}
 	if includeForbidden {
 		configs = append(configs,
 			plugin{name: hold.PluginName, label: labels.Hold, matcher: forbids},
@@ -687,20 +701,25 @@ func validateTideRequirements(cfg *config.Config, pcfg *plugins.Configuration, i
 			plugin{name: releasenote.PluginName, label: labels.ReleaseNoteLabelNeeded, matcher: forbids},
 			plugin{name: cherrypickunapproved.PluginName, label: labels.CpUnapproved, matcher: forbids},
 			plugin{name: blockade.PluginName, label: labels.BlockedPaths, matcher: forbids},
-			plugin{name: needsrebase.PluginName, label: labels.NeedsRebase, external: true, matcher: forbids},
 		)
 	}
 
-	for i := range configs {
+	populateConfig := func(p *plugin) {
 		// For each plugin determine the subset of tide queries that match and then
 		// the orgs and repos that the subset matches.
 		var matchingQueries config.TideQueries
 		for _, query := range cfg.Tide.Queries {
-			if configs[i].matcher.matches(configs[i].label, query) {
+			if p.matcher.matches(p.label, query) {
 				matchingQueries = append(matchingQueries, query)
 			}
 		}
-		configs[i].config = newOrgRepoConfig(matchingQueries.OrgExceptionsAndRepos())
+		p.config = newOrgRepoConfig(matchingQueries.OrgExceptionsAndRepos())
+	}
+	for i := range configs {
+		populateConfig(&configs[i])
+	}
+	if includeForbidden {
+		populateConfig(&needsRebaseConfig)
 	}
 
 	overallTideConfig := newOrgRepoConfig(cfg.Tide.Queries.OrgExceptionsAndRepos())
@@ -717,6 +736,15 @@ func validateTideRequirements(cfg *config.Config, pcfg *plugins.Configuration, i
 			enabledOrgReposForPlugin(pcfg, pluginConfig.name, pluginConfig.external),
 		)
 		validationErrs = append(validationErrs, err)
+	}
+	if includeForbidden {
+		validationErrs = append(validationErrs, ensureLabelPluginEnabled(
+			needsRebaseConfig.name,
+			needsRebaseConfig.label,
+			needsRebaseConfig.matcher.verb,
+			needsRebaseConfig.config,
+			enabledOrgReposForPlugin(pcfg, needsRebaseConfig.name, needsRebaseConfig.external),
+		))
 	}
 
 	return utilerrors.NewAggregate(validationErrs)
@@ -899,18 +927,28 @@ func enabledOrgReposForPlugin(c *plugins.Configuration, plugin string, external 
 //     plugins as are configured. If the repository has LGTM and approve enabled, the tide query
 //     must require both labels
 func ensureValidConfiguration(plugin, label, verb string, tideSubSet, tideSuperSet, pluginsSubSet *orgRepoConfig) error {
-	notEnabled := tideSubSet.difference(pluginsSubSet).items()
-	notRequired := pluginsSubSet.intersection(tideSuperSet).difference(tideSubSet).items()
-
 	var configErrors []error
-	if len(notEnabled) > 0 {
-		configErrors = append(configErrors, fmt.Errorf("the following orgs or repos %s the %s label for merging but do not enable the %s plugin: %v", verb, label, plugin, notEnabled))
+	if err := ensureLabelPluginEnabled(plugin, label, verb, tideSubSet, pluginsSubSet); err != nil {
+		configErrors = append(configErrors, err)
 	}
+
+	notRequired := pluginsSubSet.intersection(tideSuperSet).difference(tideSubSet).items()
 	if len(notRequired) > 0 {
 		configErrors = append(configErrors, fmt.Errorf("the following orgs or repos enable the %s plugin but do not %s the %s label for merging: %v", plugin, verb, label, notRequired))
 	}
 
 	return utilerrors.NewAggregate(configErrors)
+}
+
+// ensureLabelPluginEnabled checks that every org or repo for which tide
+// honors the label (per tideSubSet) also has the corresponding plugin
+// enabled.
+func ensureLabelPluginEnabled(plugin, label, verb string, tideSubSet, pluginsSubSet *orgRepoConfig) error {
+	notEnabled := tideSubSet.difference(pluginsSubSet).items()
+	if len(notEnabled) > 0 {
+		return fmt.Errorf("the following orgs or repos %s the %s label for merging but do not enable the %s plugin: %v", verb, label, plugin, notEnabled)
+	}
+	return nil
 }
 
 func validateDecoratedJobs(cfg *config.Config) error {
@@ -1002,7 +1040,7 @@ func validateManagedWebhooks(cfg *config.Config) error {
 	}
 	for repo := range mw.OrgRepoConfig {
 		if strings.Contains(repo, "/") {
-			org := strings.SplitN(repo, "/", 2)[0]
+			org, _, _ := strings.Cut(repo, "/")
 			if orgs.Has(org) {
 				errs = append(errs, fmt.Errorf(
 					"org-level and repo-level webhooks are configured together for %q, "+
@@ -1014,18 +1052,19 @@ func validateManagedWebhooks(cfg *config.Config) error {
 }
 
 func pluginsWithOwnersFile() string {
-	return strings.Join([]string{approve.PluginName, blunderbuss.PluginName, ownerslabel.PluginName}, ", ")
+	return strings.Join([]string{approve.PluginName, blunderbuss.PluginName, rifle.PluginName, ownerslabel.PluginName}, ", ")
 }
 
 func orgReposUsingOwnersFile(cfg *plugins.Configuration) *orgRepoConfig {
 	// we do not know the set of repos that use OWNERS, but we
 	// can get a reasonable proxy for this by looking at where
-	// the `approve', `blunderbuss' and `owners-label' plugins
+	// the `approve', `blunderbuss', `rifle', and `owners-label' plugins
 	// are enabled
 	approveConfig := enabledOrgReposForPlugin(cfg, approve.PluginName, false)
 	blunderbussConfig := enabledOrgReposForPlugin(cfg, blunderbuss.PluginName, false)
+	rifleConfig := enabledOrgReposForPlugin(cfg, rifle.PluginName, false)
 	ownersLabelConfig := enabledOrgReposForPlugin(cfg, ownerslabel.PluginName, false)
-	return approveConfig.union(blunderbussConfig).union(ownersLabelConfig)
+	return approveConfig.union(blunderbussConfig).union(rifleConfig).union(ownersLabelConfig)
 }
 
 type FileInRepoExistsChecker interface {
@@ -1189,6 +1228,30 @@ func validateTideContextPolicy(cfg *config.Config) error {
 
 		for _, job := range jobs {
 			allKnownOrgRepoBranches[orgRepo].Insert(job.Branches...)
+		}
+	}
+
+	for orgName, org := range cfg.BranchProtection.Orgs {
+		for repoName, repo := range org.Repos {
+			orgRepo := orgName + "/" + repoName
+			if _, ok := allKnownOrgRepoBranches[orgRepo]; !ok {
+				allKnownOrgRepoBranches[orgRepo] = sets.Set[string]{}
+			}
+			for branchName := range repo.Branches {
+				allKnownOrgRepoBranches[orgRepo].Insert(branchName)
+			}
+		}
+	}
+
+	for orgName, org := range cfg.Tide.ContextOptions.Orgs {
+		for repoName, repo := range org.Repos {
+			orgRepo := orgName + "/" + repoName
+			if _, ok := allKnownOrgRepoBranches[orgRepo]; !ok {
+				allKnownOrgRepoBranches[orgRepo] = sets.Set[string]{}
+			}
+			for branchName := range repo.Branches {
+				allKnownOrgRepoBranches[orgRepo].Insert(branchName)
+			}
 		}
 	}
 
@@ -1359,21 +1422,22 @@ func validateAdditionalConfigIsInOrgRepoDirectoryStructure(root string, filesyst
 			if !isGlobal && len(targetedOrgs) == 1 && targetedOrgs.Has(expectedTargetOrg) && len(targetedRepos) == 0 {
 				return nil
 			}
-			errMsg := fmt.Sprintf("config %s is invalid: Must contain only config for org %s, but", path, expectedTargetOrg)
+			var errMsg strings.Builder
+			errMsg.WriteString(fmt.Sprintf("config %s is invalid: Must contain only config for org %s, but", path, expectedTargetOrg))
 			var needsAnd bool
 			if isGlobal {
-				errMsg += " contains global config"
+				errMsg.WriteString(" contains global config")
 				needsAnd = true
 			}
 			for _, org := range sets.List(targetedOrgs.Delete(expectedTargetOrg)) {
-				errMsg += prefixWithAndIfNeeded(fmt.Sprintf(" contains config for org %s", org), needsAnd)
+				errMsg.WriteString(prefixWithAndIfNeeded(fmt.Sprintf(" contains config for org %s", org), needsAnd))
 				needsAnd = true
 			}
 			for _, repo := range sets.List(targetedRepos) {
-				errMsg += prefixWithAndIfNeeded(fmt.Sprintf(" contains config for repo %s", repo), needsAnd)
+				errMsg.WriteString(prefixWithAndIfNeeded(fmt.Sprintf(" contains config for repo %s", repo), needsAnd))
 				needsAnd = true
 			}
-			errs = append(errs, errors.New(errMsg))
+			errs = append(errs, errors.New(errMsg.String()))
 			return nil
 		}
 
@@ -1383,21 +1447,22 @@ func validateAdditionalConfigIsInOrgRepoDirectoryStructure(root string, filesyst
 				return nil
 			}
 
-			errMsg := fmt.Sprintf("config %s is invalid: Must only contain config for repo %s, but", path, expectedTargetRepo)
+			var errMsg strings.Builder
+			errMsg.WriteString(fmt.Sprintf("config %s is invalid: Must only contain config for repo %s, but", path, expectedTargetRepo))
 			var needsAnd bool
 			if isGlobal {
-				errMsg += " contains global config"
+				errMsg.WriteString(" contains global config")
 				needsAnd = true
 			}
 			for _, org := range sets.List(targetedOrgs) {
-				errMsg += prefixWithAndIfNeeded(fmt.Sprintf(" contains config for org %s", org), needsAnd)
+				errMsg.WriteString(prefixWithAndIfNeeded(fmt.Sprintf(" contains config for org %s", org), needsAnd))
 				needsAnd = true
 			}
 			for _, repo := range sets.List(targetedRepos.Delete(expectedTargetRepo)) {
-				errMsg += prefixWithAndIfNeeded(fmt.Sprintf(" contains config for repo %s", repo), needsAnd)
+				errMsg.WriteString(prefixWithAndIfNeeded(fmt.Sprintf(" contains config for repo %s", repo), needsAnd))
 				needsAnd = true
 			}
-			errs = append(errs, errors.New(errMsg))
+			errs = append(errs, errors.New(errMsg.String()))
 			return nil
 		}
 
@@ -1513,12 +1578,48 @@ func validateGitHubAppIsInstalled(client ghAppListingClient, allRepos sets.Set[s
 
 	var errs []error
 	for _, repo := range sets.List(allRepos) {
-		if org := strings.Split(repo, "/")[0]; !orgsWithInstalledApp.Has(org) {
+		if org, _, _ := strings.Cut(repo, "/"); !orgsWithInstalledApp.Has(org) {
 			errs = append(errs, fmt.Errorf("There is configuration for the GitHub org %q but the GitHub app is not installed there", org))
 		}
 	}
 
 	return utilerrors.NewAggregate(errs)
+}
+
+func validateConfigUpdaterACLs(pcfg *plugins.Configuration) error {
+	if pcfg == nil {
+		return nil
+	}
+	var errs []error
+	for pattern, cm := range pcfg.ConfigUpdater.Maps {
+		for _, entry := range cm.AllowedRepos {
+			if err := validateRepoName(entry); err != nil {
+				errs = append(errs, fmt.Errorf("config_updater.maps[%q].allowed_repos: %w", pattern, err))
+			}
+		}
+		for _, entry := range cm.DeniedRepos {
+			if err := validateRepoName(entry); err != nil {
+				errs = append(errs, fmt.Errorf("config_updater.maps[%q].denied_repos: %w", pattern, err))
+			}
+		}
+	}
+	return utilerrors.NewAggregate(errs)
+}
+
+func validateRepoName(repo string) error {
+	if repo == "" {
+		return errors.New("org/repo cannot be empty")
+	}
+
+	s := strings.SplitN(repo, "/", 3)
+	if len(s) > 2 {
+		return errors.New("org/repo contains too many slashes '/'")
+	}
+	if s[0] == "" {
+		return errors.New("you cannot set a repo without an org")
+	}
+
+	return nil
 }
 
 func validateRequiredJobAnnotations(a []string, c config.JobConfig) error {

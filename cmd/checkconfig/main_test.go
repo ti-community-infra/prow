@@ -33,7 +33,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
@@ -170,6 +169,45 @@ func TestEnsureValidConfiguration(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			err := ensureValidConfiguration("plugin", "label", "verb", testCase.tideSubSet, testCase.tideSuperSet, testCase.pluginsSubSet)
+			if testCase.expectedErr && err == nil {
+				t.Errorf("%s: expected an error but got none", testCase.name)
+			}
+			if !testCase.expectedErr && err != nil {
+				t.Errorf("%s: expected no error but got one: %v", testCase.name, err)
+			}
+		})
+	}
+}
+
+func TestEnsureLabelPluginEnabled(t *testing.T) {
+	var testCases = []struct {
+		name                      string
+		tideSubSet, pluginsSubSet *orgRepoConfig
+		expectedErr               bool
+	}{
+		{
+			name:          "query forbids label, plugin enabled: no error",
+			tideSubSet:    newOrgRepoConfig(nil, sets.New[string]("org/repo")),
+			pluginsSubSet: newOrgRepoConfig(nil, sets.New[string]("org/repo")),
+			expectedErr:   false,
+		},
+		{
+			name:          "query forbids label, plugin not enabled: error",
+			tideSubSet:    newOrgRepoConfig(nil, sets.New[string]("org/repo")),
+			pluginsSubSet: newOrgRepoConfig(nil, nil),
+			expectedErr:   true,
+		},
+		{
+			name:          "plugin enabled without query forbidding label: no error (unlike the two-directional check)",
+			tideSubSet:    newOrgRepoConfig(nil, nil),
+			pluginsSubSet: newOrgRepoConfig(nil, sets.New[string]("org/repo")),
+			expectedErr:   false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := ensureLabelPluginEnabled("plugin", "label", "verb", testCase.tideSubSet, testCase.pluginsSubSet)
 			if testCase.expectedErr && err == nil {
 				t.Errorf("%s: expected an error but got none", testCase.name)
 			}
@@ -384,7 +422,7 @@ func TestOrgRepoUnion(t *testing.T) {
 func TestValidateUnknownFields(t *testing.T) {
 	testCases := []struct {
 		name, filename string
-		cfg            interface{}
+		cfg            any
 		configBytes    []byte
 		expectedErr    string
 	}{
@@ -1260,21 +1298,21 @@ func TestVerifyOwnersPresence(t *testing.T) {
 			cfg:         &plugins.Configuration{Plugins: plugins.OldToNewPlugins(map[string][]string{"org": {"blunderbuss"}})},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with approve enable contains a repo without OWNERS (legacy config)",
 			cfg:         &plugins.Configuration{Plugins: plugins.OldToNewPlugins(map[string][]string{"org": {"approve"}})},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with owners-label enabled contains a repo without OWNERS (legacy config)",
 			cfg:         &plugins.Configuration{Plugins: plugins.OldToNewPlugins(map[string][]string{"org": {"owners-label"}})},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with owners-label enabled contains an *archived* repo without OWNERS (legacy config)",
@@ -1289,7 +1327,7 @@ func TestVerifyOwnersPresence(t *testing.T) {
 			cfg:         &plugins.Configuration{Plugins: plugins.OldToNewPlugins(map[string][]string{"org": {"owners-label"}})},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with owners-label enabled contains only repos with OWNERS (legacy config)",
@@ -1311,14 +1349,14 @@ func TestVerifyOwnersPresence(t *testing.T) {
 			cfg:         &plugins.Configuration{Plugins: plugins.Plugins{"org": {Plugins: []string{"blunderbuss"}}}},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with approve enable contains a repo without OWNERS",
 			cfg:         &plugins.Configuration{Plugins: plugins.Plugins{"org": {Plugins: []string{"approve"}}}},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with approve excluded contains a repo without OWNERS",
@@ -1339,14 +1377,14 @@ func TestVerifyOwnersPresence(t *testing.T) {
 			}},
 			gh: fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with owners-label enabled contains a repo without OWNERS",
 			cfg:         &plugins.Configuration{Plugins: plugins.Plugins{"org": {Plugins: []string{"owners-label"}}}},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with owners-label enabled contains an *archived* repo without OWNERS",
@@ -1361,7 +1399,7 @@ func TestVerifyOwnersPresence(t *testing.T) {
 			cfg:         &plugins.Configuration{Plugins: plugins.Plugins{"org/repo": {Plugins: []string{"owners-label"}}}},
 			gh:          fakeGH{files: fakeGHContent{"org": {"repo": {"NOOWNERS": true}}}},
 			expected: "the following orgs or repos enable at least one" +
-				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" plugin that uses OWNERS files (approve, blunderbuss, rifle, owners-label), but" +
 				" its master branch does not contain a root level OWNERS file: [org/repo]",
 		}, {
 			description: "org with owners-label enabled contains only repos with OWNERS",
@@ -1666,7 +1704,7 @@ func TestValidateTideContextPolicy(t *testing.T) {
 		{
 			name: "overlapping branch config, inrepoconfig enabled, error",
 			cfg: cfg(func(c *config.Config) {
-				c.InRepoConfig.Enabled = map[string]*bool{"*": ptr.To(true)}
+				c.InRepoConfig.Enabled = map[string]*bool{"*": new(true)}
 				c.PresubmitsStatic["a/b"] = []config.Presubmit{
 					{Reporter: config.Reporter{Context: "a"}, Brancher: config.Brancher{Branches: []string{"a"}}},
 					{AlwaysRun: true, Reporter: config.Reporter{Context: "a"}},
@@ -1682,6 +1720,56 @@ func TestValidateTideContextPolicy(t *testing.T) {
 					{AlwaysRun: true, Reporter: config.Reporter{Context: "a"}, Brancher: config.Brancher{Branches: []string{"b"}}},
 				}
 			}),
+		},
+		{
+			name: "bp required context collides with conditionally-triggered job via from-branch-protection",
+			cfg: cfg(func(c *config.Config) {
+				c.PresubmitsStatic["a/b"] = []config.Presubmit{
+					{
+						Reporter:            config.Reporter{Context: "ci/prow/test"},
+						Brancher:            config.Brancher{Branches: []string{`^master$`}},
+						RegexpChangeMatcher: config.RegexpChangeMatcher{SkipIfOnlyChanged: `\.md$`},
+					},
+				}
+				yes := true
+				c.Tide.ContextOptions.FromBranchProtection = &yes
+				c.BranchProtection = config.BranchProtection{
+					Orgs: map[string]config.Org{
+						"a": {Repos: map[string]config.Repo{
+							"b": {Branches: map[string]config.Branch{
+								"master": {Policy: config.Policy{
+									Protect: &yes,
+									RequiredStatusChecks: &config.ContextPolicy{
+										Contexts: []string{"ci/prow/test"},
+									},
+								}},
+							}},
+						}},
+					},
+				}
+			}),
+			expectedError: "context policy for master branch in a/b is invalid: contexts ci/prow/test are defined as required and required if present",
+		},
+		{
+			name: "tide context_options required-if-present collides with optional job",
+			cfg: cfg(func(c *config.Config) {
+				c.PresubmitsStatic["a/b"] = []config.Presubmit{
+					{
+						Optional:            true,
+						Reporter:            config.Reporter{Context: "ci/prow/coverage"},
+						Brancher:            config.Brancher{Branches: []string{`^master$`}},
+						RegexpChangeMatcher: config.RegexpChangeMatcher{SkipIfOnlyChanged: `\.md$`},
+					},
+				}
+				c.Tide.ContextOptions.Orgs = map[string]config.TideOrgContextPolicy{
+					"a": {Repos: map[string]config.TideRepoContextPolicy{
+						"b": {Branches: map[string]config.TideContextPolicy{
+							"master": {RequiredIfPresentContexts: []string{"ci/prow/coverage"}},
+						}},
+					}},
+				}
+			}),
+			expectedError: "context policy for master branch in a/b is invalid: contexts ci/prow/coverage are defined as optional and required if present",
 		},
 		{
 			name: "repo key is not in org/repo format, no error",
@@ -2181,7 +2269,7 @@ func TestValidateUnmanagedBranchprotectionConfigDoesntHaveSubconfig(t *testing.T
 		{
 			name: "Globally disabled, errors for global and org config",
 			config: bpConfigWithSettingsOnAllLayers(func(bp *config.BranchProtection) {
-				bp.Unmanaged = ptr.To(true)
+				bp.Unmanaged = new(true)
 			}),
 
 			expectedErrorMsg: `[branch protection is globally set to unmanaged, but has configuration, branch protection config is globally set to unmanaged but has configuration for org my-org without setting the org to unmanaged: false]`,
@@ -2190,7 +2278,7 @@ func TestValidateUnmanagedBranchprotectionConfigDoesntHaveSubconfig(t *testing.T
 			name: "Org-level disabled, errors for org policy and repos",
 			config: bpConfigWithSettingsOnAllLayers(func(bp *config.BranchProtection) {
 				p := bp.Orgs["my-org"]
-				p.Unmanaged = ptr.To(true)
+				p.Unmanaged = new(true)
 				bp.Orgs["my-org"] = p
 			}),
 
@@ -2201,7 +2289,7 @@ func TestValidateUnmanagedBranchprotectionConfigDoesntHaveSubconfig(t *testing.T
 			name: "Repo-level disabled, errors for repo policy and branches",
 			config: bpConfigWithSettingsOnAllLayers(func(bp *config.BranchProtection) {
 				p := bp.Orgs["my-org"].Repos["my-repo"]
-				p.Unmanaged = ptr.To(true)
+				p.Unmanaged = new(true)
 				bp.Orgs["my-org"].Repos["my-repo"] = p
 			}),
 
@@ -2212,7 +2300,7 @@ func TestValidateUnmanagedBranchprotectionConfigDoesntHaveSubconfig(t *testing.T
 			name: "Branch-level disabled, errors for branch policy",
 			config: bpConfigWithSettingsOnAllLayers(func(bp *config.BranchProtection) {
 				p := bp.Orgs["my-org"].Repos["my-repo"].Branches["my-branch"]
-				p.Unmanaged = ptr.To(true)
+				p.Unmanaged = new(true)
 				bp.Orgs["my-org"].Repos["my-repo"].Branches["my-branch"] = p
 			}),
 
@@ -2222,10 +2310,10 @@ func TestValidateUnmanagedBranchprotectionConfigDoesntHaveSubconfig(t *testing.T
 			name: "unmanaged repo level is overridden by branch level, no errors",
 			config: bpConfigWithSettingsOnAllLayers(func(bp *config.BranchProtection) {
 				repoP := bp.Orgs["my-org"].Repos["my-repo"]
-				repoP.Unmanaged = ptr.To(true)
+				repoP.Unmanaged = new(true)
 				bp.Orgs["my-org"].Repos["my-repo"] = repoP
 				p := bp.Orgs["my-org"].Repos["my-repo"].Branches["my-branch"]
-				p.Unmanaged = ptr.To(false)
+				p.Unmanaged = new(false)
 				bp.Orgs["my-org"].Repos["my-repo"].Branches["my-branch"] = p
 			}),
 		},
@@ -2411,6 +2499,136 @@ func TestVerifyLabelPlugin(t *testing.T) {
 			}
 			if actualErrMsg != tc.expectedErrorMsg {
 				t.Errorf("expected error %q, got error %q", tc.expectedErrorMsg, actualErrMsg)
+			}
+		})
+	}
+}
+
+func TestValidateConfigUpdaterACLs(t *testing.T) {
+	testCases := []struct {
+		name                  string
+		config                *plugins.Configuration
+		expectedErrorMsg      string
+		expectedErrorContains []string // For tests with non-deterministic error order
+	}{
+		{
+			name:   "nil config",
+			config: nil,
+		},
+		{
+			name:   "empty config",
+			config: &plugins.Configuration{},
+		},
+		{
+			name: "valid org-only entries",
+			config: &plugins.Configuration{
+				ConfigUpdater: plugins.ConfigUpdater{
+					Maps: map[string]plugins.ConfigMapSpec{
+						"config.yaml": {
+							Name:         "config",
+							AllowedRepos: []string{"kubernetes", "istio"},
+							DeniedRepos:  []string{"test-org"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid org/repo entries",
+			config: &plugins.Configuration{
+				ConfigUpdater: plugins.ConfigUpdater{
+					Maps: map[string]plugins.ConfigMapSpec{
+						"config.yaml": {
+							Name:         "config",
+							AllowedRepos: []string{"kubernetes/test-infra", "istio/istio"},
+							DeniedRepos:  []string{"test-org/bad-repo"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid mixed entries",
+			config: &plugins.Configuration{
+				ConfigUpdater: plugins.ConfigUpdater{
+					Maps: map[string]plugins.ConfigMapSpec{
+						"config.yaml": {
+							Name:         "config",
+							AllowedRepos: []string{"kubernetes", "istio/istio"},
+							DeniedRepos:  []string{"test-org", "bad-org/bad-repo"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "empty entry in allowed_repos",
+			config: &plugins.Configuration{
+				ConfigUpdater: plugins.ConfigUpdater{
+					Maps: map[string]plugins.ConfigMapSpec{
+						"config.yaml": {
+							Name:         "config",
+							AllowedRepos: []string{"kubernetes", ""},
+						},
+					},
+				},
+			},
+			expectedErrorMsg: `config_updater.maps["config.yaml"].allowed_repos: org/repo cannot be empty`,
+		},
+		{
+			name: "entry with empty org (starts with slash)",
+			config: &plugins.Configuration{
+				ConfigUpdater: plugins.ConfigUpdater{
+					Maps: map[string]plugins.ConfigMapSpec{
+						"config.yaml": {
+							Name:         "config",
+							AllowedRepos: []string{"/repo"},
+						},
+					},
+				},
+			},
+			expectedErrorMsg: `config_updater.maps["config.yaml"].allowed_repos: you cannot set a repo without an org`,
+		},
+		{
+			name: "multiple maps with errors",
+			config: &plugins.Configuration{
+				ConfigUpdater: plugins.ConfigUpdater{
+					Maps: map[string]plugins.ConfigMapSpec{
+						"config.yaml": {
+							Name:         "config",
+							AllowedRepos: []string{""},
+						},
+						"plugins.yaml": {
+							Name:        "plugins",
+							DeniedRepos: []string{"/bad"},
+						},
+					},
+				},
+			},
+			// Use expectedErrorContains instead of expectedErrorMsg because map iteration order is non-deterministic
+			expectedErrorContains: []string{
+				`config_updater.maps["config.yaml"].allowed_repos: org/repo cannot be empty`,
+				`config_updater.maps["plugins.yaml"].denied_repos: you cannot set a repo without an org`,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var errMsg string
+			err := validateConfigUpdaterACLs(tc.config)
+			if err != nil {
+				errMsg = err.Error()
+			}
+			if len(tc.expectedErrorContains) > 0 {
+				// For tests with non-deterministic error order, check that all expected substrings are present
+				for _, expected := range tc.expectedErrorContains {
+					if !strings.Contains(errMsg, expected) {
+						t.Errorf("expected error to contain %q, got error %q", expected, errMsg)
+					}
+				}
+			} else if tc.expectedErrorMsg != errMsg {
+				t.Errorf("expected error %q, got error %q", tc.expectedErrorMsg, errMsg)
 			}
 		})
 	}

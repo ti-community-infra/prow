@@ -18,6 +18,9 @@ package checker
 
 import (
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,12 +66,52 @@ func TestInTestFreeze(t *testing.T) {
 					releaseBranch("1.22"),
 					tag("1.22.0"),
 				}, nil)
+				prowConfig := &ProwConfig{}
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(prowConfig, nil)
 			},
 			assert: func(res *Result, err error) {
+				assert.False(t, res.InCodeFreeze)
 				assert.False(t, res.InTestFreeze)
 				assert.Equal(t, "release-1.23", res.Branch)
 				assert.Equal(t, "v1.23.0", res.Tag)
 				assert.Empty(t, res.LastFastForward)
+				assert.Nil(t, err)
+			},
+		},
+		{
+			name: "success code freeze for next release before branch creation",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				mock.ListRefsReturns([]*plumbing.Reference{
+					releaseBranch("1.35"),
+					tag("1.35.0"),
+					releaseBranch("1.34"),
+					tag("1.34.0"),
+				}, nil)
+				prowConfig := &ProwConfig{}
+				prowConfig.Tide.Queries = []struct {
+					Repos            []string `yaml:"repos"`
+					ExcludedBranches []string `yaml:"excludedBranches"`
+				}{
+					{
+						Repos:            []string{"kubernetes/kubernetes"},
+						ExcludedBranches: []string{"master", "release-1.36"},
+					},
+				}
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(prowConfig, nil)
+			},
+			assert: func(res *Result, err error) {
+				assert.True(t, res.InCodeFreeze)
+				assert.False(t, res.InTestFreeze)
+				assert.Equal(t, "release-1.36", res.Branch)
+				assert.Equal(t, "v1.36.0", res.Tag)
 				assert.Nil(t, err)
 			},
 		},
@@ -157,6 +200,216 @@ func TestInTestFreeze(t *testing.T) {
 			res, err := sut.InTestFreeze()
 
 			tc.assert(res, err)
+		})
+	}
+}
+
+func TestInCodeFreeze(t *testing.T) {
+	t.Parallel()
+
+	errTest := errors.New("test error")
+
+	for _, tc := range []struct {
+		name    string
+		branch  string
+		prepare func(*checkerfakes.FakeChecker)
+		assert  func(bool, error)
+	}{
+		{
+			name:   "success branch is excluded (code freeze active)",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				prowConfig := &ProwConfig{}
+				prowConfig.Tide.Queries = []struct {
+					Repos            []string `yaml:"repos"`
+					ExcludedBranches []string `yaml:"excludedBranches"`
+				}{
+					{
+						Repos:            []string{"kubernetes/kubernetes"},
+						ExcludedBranches: []string{"release-1.34"},
+					},
+				}
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(prowConfig, nil)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.True(t, inCodeFreeze)
+				assert.Nil(t, err)
+			},
+		},
+		{
+			name:   "success branch not excluded (code freeze not active)",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				prowConfig := &ProwConfig{}
+				prowConfig.Tide.Queries = []struct {
+					Repos            []string `yaml:"repos"`
+					ExcludedBranches []string `yaml:"excludedBranches"`
+				}{
+					{
+						Repos:            []string{"kubernetes/kubernetes"},
+						ExcludedBranches: []string{"release-1.33"},
+					},
+				}
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(prowConfig, nil)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.False(t, inCodeFreeze)
+				assert.Nil(t, err)
+			},
+		},
+		{
+			name:   "success multiple queries, branch excluded in one",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				prowConfig := &ProwConfig{}
+				prowConfig.Tide.Queries = []struct {
+					Repos            []string `yaml:"repos"`
+					ExcludedBranches []string `yaml:"excludedBranches"`
+				}{
+					{
+						Repos:            []string{"kubernetes/test-infra"},
+						ExcludedBranches: []string{"release-1.34"},
+					},
+					{
+						Repos:            []string{"kubernetes/kubernetes"},
+						ExcludedBranches: []string{"release-1.34"},
+					},
+				}
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(prowConfig, nil)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.True(t, inCodeFreeze)
+				assert.Nil(t, err)
+			},
+		},
+		{
+			name:   "success branch excluded for different repo only",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				prowConfig := &ProwConfig{}
+				prowConfig.Tide.Queries = []struct {
+					Repos            []string `yaml:"repos"`
+					ExcludedBranches []string `yaml:"excludedBranches"`
+				}{
+					{
+						Repos:            []string{"kubernetes/test-infra"},
+						ExcludedBranches: []string{"release-1.34"},
+					},
+					{
+						Repos:            []string{"kubernetes/kubernetes"},
+						ExcludedBranches: []string{"release-1.33"},
+					},
+				}
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(prowConfig, nil)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.False(t, inCodeFreeze)
+				assert.Nil(t, err)
+			},
+		},
+		{
+			name:   "success empty tide queries",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				prowConfig := &ProwConfig{}
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(prowConfig, nil)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.False(t, inCodeFreeze)
+				assert.Nil(t, err)
+			},
+		},
+		{
+			name:   "error on HttpGet",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				mock.HttpGetReturns(nil, errTest)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.False(t, inCodeFreeze)
+				assert.NotNil(t, err)
+				assert.Contains(t, err.Error(), "get prow config")
+			},
+		},
+		{
+			name:   "error on ReadAllBody",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns(nil, errTest)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.False(t, inCodeFreeze)
+				assert.NotNil(t, err)
+				assert.Contains(t, err.Error(), "read response body")
+			},
+		},
+		{
+			name:   "error on UnmarshalProwConfig",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				mock.UnmarshalProwConfigReturns(nil, errTest)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.False(t, inCodeFreeze)
+				assert.NotNil(t, err)
+				assert.Contains(t, err.Error(), "unmarshal prow config")
+			},
+		},
+		{
+			name:   "error on type assertion",
+			branch: "release-1.34",
+			prepare: func(mock *checkerfakes.FakeChecker) {
+				mock.HttpGetReturns(&http.Response{
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil)
+				mock.ReadAllBodyReturns([]byte{}, nil)
+				// Return a string instead of *ProwConfig
+				mock.UnmarshalProwConfigReturns("wrong type", nil)
+			},
+			assert: func(inCodeFreeze bool, err error) {
+				assert.False(t, inCodeFreeze)
+				assert.NotNil(t, err)
+				assert.Contains(t, err.Error(), "failed to type assert prow config")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &checkerfakes.FakeChecker{}
+			tc.prepare(mock)
+
+			sut := New(logrus.NewEntry(logrus.StandardLogger()))
+			sut.checker = mock
+
+			inCodeFreeze, err := sut.inCodeFreeze(tc.branch)
+
+			tc.assert(inCodeFreeze, err)
 		})
 	}
 }

@@ -20,7 +20,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 
@@ -166,13 +168,17 @@ func TestOptions(t *testing.T) {
 }
 
 type fakeClient struct {
-	orgMembers sets.Set[string]
-	admins     sets.Set[string]
-	invitees   sets.Set[string]
-	members    sets.Set[string]
-	removed    sets.Set[string]
-	newAdmins  sets.Set[string]
-	newMembers sets.Set[string]
+	orgMembers      sets.Set[string]
+	admins          sets.Set[string]
+	invitees        sets.Set[string]
+	failedInvites   map[string][]int // login -> invitation IDs
+	deletedInvites  []int
+	members         sets.Set[string]
+	removed         sets.Set[string]
+	newAdmins       sets.Set[string]
+	newMembers      sets.Set[string]
+	teams           []github.Team
+	enterpriseTeams map[string][]github.TeamMember // slug -> members
 }
 
 func (c *fakeClient) BotUser() (*github.UserData, error) {
@@ -214,6 +220,31 @@ func (c *fakeClient) ListOrgInvitations(org string) ([]github.OrgInvitation, err
 	return ret, nil
 }
 
+func (c *fakeClient) ListFailedOrgInvitations(org string) ([]github.OrgInvitation, error) {
+	var ret []github.OrgInvitation
+	for login, ids := range c.failedInvites {
+		if login == "fail-list" {
+			return nil, errors.New("injected list failed org invitations failure")
+		}
+		for _, id := range ids {
+			ret = append(ret, github.OrgInvitation{
+				TeamMember:   github.TeamMember{Login: login},
+				ID:           id,
+				FailedReason: "2fa_required",
+			})
+		}
+	}
+	return ret, nil
+}
+
+func (c *fakeClient) DeleteOrgInvitation(org string, invitationID int) error {
+	if invitationID == -1 {
+		return errors.New("injected delete org invitation failure")
+	}
+	c.deletedInvites = append(c.deletedInvites, invitationID)
+	return nil
+}
+
 func (c *fakeClient) RemoveOrgMembership(org, user string) error {
 	if user == "fail" {
 		return errors.New("injected remove org membership failure")
@@ -252,7 +283,19 @@ func (c *fakeClient) UpdateOrgMembership(org, user string, admin bool) (*github.
 	}, nil
 }
 
+func (c *fakeClient) ListTeams(org string) ([]github.Team, error) {
+	for _, t := range c.teams {
+		if t.Name == "list-teams-fail" {
+			return nil, fmt.Errorf("injected ListTeams error")
+		}
+	}
+	return c.teams, nil
+}
+
 func (c *fakeClient) ListTeamMembersBySlug(org, teamSlug, role string) ([]github.TeamMember, error) {
+	if members, ok := c.enterpriseTeams[teamSlug]; ok {
+		return members, nil
+	}
 	if teamSlug != configuredTeamSlug {
 		return nil, fmt.Errorf("only team: %s supported, not %s", configuredTeamSlug, teamSlug)
 	}
@@ -476,16 +519,20 @@ func TestConfigureMembers(t *testing.T) {
 
 func TestConfigureOrgMembers(t *testing.T) {
 	cases := []struct {
-		name        string
-		opt         options
-		config      org.Config
-		admins      []string
-		members     []string
-		invitations []string
-		err         bool
-		remove      []string
-		addAdmins   []string
-		addMembers  []string
+		name            string
+		opt             options
+		config          org.Config
+		admins          []string
+		members         []string
+		invitations     []string
+		failedInvites   map[string][]int
+		teams           []github.Team
+		enterpriseTeams map[string][]github.TeamMember
+		err             bool
+		remove          []string
+		addAdmins       []string
+		addMembers      []string
+		deletedInvites  []int
 	}{
 		{
 			name: "too few admins",
@@ -650,19 +697,135 @@ func TestConfigureOrgMembers(t *testing.T) {
 			},
 			invitations: []string{"invited-admin", "invited-member"},
 		},
+		{
+			name: "enterprise team members excluded from removal",
+			config: org.Config{
+				Admins:  []string{"keep-admin"},
+				Members: []string{"keep-member"},
+			},
+			opt: options{
+				maximumDelta:          0.5,
+				ignoreEnterpriseTeams: true,
+			},
+			admins:  []string{"keep-admin", "ent-user"},
+			members: []string{"keep-member", "ent-user2"},
+			teams: []github.Team{
+				{Name: "org-team", Slug: "org-team", Type: "organization"},
+				{Name: "ent-security", Slug: "ent-security", Type: github.TeamTypeEnterprise},
+			},
+			enterpriseTeams: map[string][]github.TeamMember{
+				"ent-security": {{Login: "ent-user"}, {Login: "ent-user2"}},
+			},
+		},
+		{
+			name: "enterprise team members not excluded without flag",
+			config: org.Config{
+				Admins:  []string{"keep-admin"},
+				Members: []string{"keep-member"},
+			},
+			opt: options{
+				maximumDelta: 0.5,
+			},
+			admins:  []string{"keep-admin", "ent-user"},
+			members: []string{"keep-member"},
+			remove:  []string{"ent-user"},
+		},
+		{
+			name: "enterprise member also in config is kept with configured role",
+			config: org.Config{
+				Admins:  []string{"keep-admin"},
+				Members: []string{"keep-member", "ent-user"},
+			},
+			opt: options{
+				maximumDelta:          0.5,
+				ignoreEnterpriseTeams: true,
+			},
+			admins:  []string{"keep-admin", "ent-user"},
+			members: []string{"keep-member"},
+			teams: []github.Team{
+				{Name: "ent-security", Slug: "ent-security", Type: github.TeamTypeEnterprise},
+			},
+			enterpriseTeams: map[string][]github.TeamMember{
+				"ent-security": {{Login: "ent-user"}},
+			},
+			addMembers: []string{"ent-user"},
+		},
+		{
+			name: "ListTeams error fails configureOrgMembers",
+			config: org.Config{
+				Admins:  []string{"keep-admin"},
+				Members: []string{"keep-member"},
+			},
+			opt: options{
+				maximumDelta:          0.5,
+				ignoreEnterpriseTeams: true,
+			},
+			admins:  []string{"keep-admin"},
+			members: []string{"keep-member"},
+			teams: []github.Team{
+				{Name: "list-teams-fail"},
+			},
+			err: true,
+		},
+		{
+			name: "delete failed invite then re-invite",
+			config: org.Config{
+				Members: []string{"reinvite-me"},
+			},
+			failedInvites:  map[string][]int{"reinvite-me": {42}},
+			addMembers:     []string{"reinvite-me"},
+			deletedInvites: []int{42},
+		},
+		{
+			name: "delete all failed invites for same user then re-invite",
+			config: org.Config{
+				Members: []string{"reinvite-me"},
+			},
+			failedInvites:  map[string][]int{"reinvite-me": {42, 43}},
+			addMembers:     []string{"reinvite-me"},
+			deletedInvites: []int{42, 43},
+		},
+		{
+			name: "delete failed invite for admin role",
+			config: org.Config{
+				Admins: []string{"reinvite-admin"},
+			},
+			failedInvites:  map[string][]int{"reinvite-admin": {55}},
+			addAdmins:      []string{"reinvite-admin"},
+			deletedInvites: []int{55},
+		},
+		{
+			name: "delete failed invite failure still re-invites user",
+			config: org.Config{
+				Members: []string{"bad-delete"},
+			},
+			failedInvites: map[string][]int{"bad-delete": {-1}},
+			addMembers:    []string{"bad-delete"},
+		},
+		{
+			name: "pending invite takes precedence over failed invite",
+			config: org.Config{
+				Members: []string{"pending-and-failed"},
+			},
+			invitations:   []string{"pending-and-failed"},
+			failedInvites: map[string][]int{"pending-and-failed": {99}},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := &fakeClient{
-				admins:     sets.New[string](tc.admins...),
-				members:    sets.New[string](tc.members...),
-				removed:    sets.Set[string]{},
-				newAdmins:  sets.Set[string]{},
-				newMembers: sets.Set[string]{},
+				admins:          sets.New[string](tc.admins...),
+				members:         sets.New[string](tc.members...),
+				removed:         sets.Set[string]{},
+				newAdmins:       sets.Set[string]{},
+				newMembers:      sets.Set[string]{},
+				teams:           tc.teams,
+				enterpriseTeams: tc.enterpriseTeams,
+				failedInvites:   tc.failedInvites,
 			}
 
-			err := configureOrgMembers(tc.opt, fc, fakeOrg, tc.config, sets.New[string](tc.invitations...))
+			err := configureOrgMembers(tc.opt, fc, fakeOrg, tc.config, sets.New[string](tc.invitations...), tc.failedInvites)
 			switch {
 			case err != nil:
 				if !tc.err {
@@ -677,10 +840,21 @@ func TestConfigureOrgMembers(t *testing.T) {
 					t.Errorf("Wrong members added: %v", err)
 				} else if err := cmpLists(tc.addAdmins, sets.List(fc.newAdmins)); err != nil {
 					t.Errorf("Wrong admins added: %v", err)
+				} else if err := cmpLists(intSliceToString(tc.deletedInvites), intSliceToString(fc.deletedInvites)); err != nil {
+					t.Errorf("Wrong invitations deleted: %v", err)
 				}
 			}
 		})
 	}
+}
+
+func intSliceToString(ints []int) []string {
+	var out []string
+	for _, i := range ints {
+		out = append(out, fmt.Sprintf("%d", i))
+	}
+	sort.Strings(out)
+	return out
 }
 
 type fakeTeamClient struct {
@@ -838,15 +1012,16 @@ func TestConfigureTeams(t *testing.T) {
 	desc := "so interesting"
 	priv := org.Secret
 	cases := []struct {
-		name              string
-		err               bool
-		orgNameOverride   string
-		ignoreSecretTeams bool
-		config            org.Config
-		teams             []github.Team
-		expected          map[string]github.Team
-		deleted           []string
-		delta             float64
+		name                  string
+		err                   bool
+		orgNameOverride       string
+		ignoreSecretTeams     bool
+		ignoreEnterpriseTeams bool
+		config                org.Config
+		teams                 []github.Team
+		expected              map[string]github.Team
+		deleted               []string
+		delta                 float64
 	}{
 		{
 			name: "do nothing without error",
@@ -1034,6 +1209,42 @@ func TestConfigureTeams(t *testing.T) {
 			deleted:  []string{"closed"},
 			delta:    1,
 		},
+		{
+			name:                  "skip enterprise teams when flag is set",
+			ignoreEnterpriseTeams: true,
+			teams: []github.Team{
+				{
+					Name: "org-team",
+					Slug: "org-team",
+					ID:   1,
+				},
+				{
+					Name: "ent-security",
+					Slug: "ent-security",
+					ID:   2,
+					Type: github.TeamTypeEnterprise,
+				},
+			},
+			config:   org.Config{Teams: map[string]org.Team{}},
+			expected: map[string]github.Team{},
+			deleted:  []string{"org-team"},
+			delta:    1,
+		},
+		{
+			name: "enterprise teams treated as normal without flag",
+			teams: []github.Team{
+				{
+					Name: "ent-security",
+					Slug: "ent-security",
+					ID:   2,
+					Type: github.TeamTypeEnterprise,
+				},
+			},
+			config:   org.Config{Teams: map[string]org.Team{}},
+			expected: map[string]github.Team{},
+			deleted:  []string{"ent-security"},
+			delta:    1,
+		},
 	}
 
 	for _, tc := range cases {
@@ -1049,7 +1260,7 @@ func TestConfigureTeams(t *testing.T) {
 			if tc.delta == 0 {
 				tc.delta = 1
 			}
-			actual, err := configureTeams(fc, orgName, tc.config, tc.delta, tc.ignoreSecretTeams)
+			actual, err := configureTeams(fc, orgName, tc.config, tc.delta, tc.ignoreSecretTeams, tc.ignoreEnterpriseTeams)
 			switch {
 			case err != nil:
 				if !tc.err {
@@ -1727,19 +1938,20 @@ func TestDumpOrgConfig(t *testing.T) {
 	repoHomepage := "https://www.somewhe.re/something/"
 	master := "master-branch"
 	cases := []struct {
-		name              string
-		orgOverride       string
-		ignoreSecretTeams bool
-		meta              github.Organization
-		members           []string
-		admins            []string
-		teams             []github.Team
-		teamMembers       map[string][]string
-		maintainers       map[string][]string
-		repoPermissions   map[string][]github.Repo
-		repos             []github.FullRepo
-		expected          org.Config
-		err               bool
+		name                  string
+		orgOverride           string
+		ignoreSecretTeams     bool
+		ignoreEnterpriseTeams bool
+		meta                  github.Organization
+		members               []string
+		admins                []string
+		teams                 []github.Team
+		teamMembers           map[string][]string
+		maintainers           map[string][]string
+		repoPermissions       map[string][]github.Repo
+		repos                 []github.FullRepo
+		expected              org.Config
+		err                   bool
 	}{
 		{
 			name:        "fails if GetOrg fails",
@@ -1841,11 +2053,29 @@ func TestDumpOrgConfig(t *testing.T) {
 						Name:          repoName,
 						Description:   repoDescription,
 						Homepage:      repoHomepage,
-						Private:       false,
+						Visibility:    github.RepoVisibilityPublic,
 						HasIssues:     true,
 						HasProjects:   true,
 						HasWiki:       true,
 						Archived:      true,
+						DefaultBranch: master,
+					},
+				},
+				{
+					Repo: github.Repo{
+						Name:          "internal-project",
+						Visibility:    github.RepoVisibilityInternal,
+						HasIssues:     true,
+						HasWiki:       true,
+						DefaultBranch: master,
+					},
+				},
+				{
+					Repo: github.Repo{
+						Name:          "private-project",
+						Visibility:    github.RepoVisibilityPrivate,
+						HasIssues:     true,
+						HasWiki:       true,
 						DefaultBranch: master,
 					},
 				},
@@ -1912,6 +2142,24 @@ func TestDumpOrgConfig(t *testing.T) {
 						AllowRebaseMerge: &no,
 						AllowSquashMerge: &no,
 						Archived:         &yes,
+						DefaultBranch:    &master,
+					},
+					// Non-public visibilities survive PruneRepoDefaults, so they
+					// must round-trip into the dumped config.
+					"internal-project": {
+						Visibility:       new(github.RepoVisibilityInternal),
+						HasProjects:      &no,
+						AllowMergeCommit: &no,
+						AllowRebaseMerge: &no,
+						AllowSquashMerge: &no,
+						DefaultBranch:    &master,
+					},
+					"private-project": {
+						Visibility:       new(github.RepoVisibilityPrivate),
+						HasProjects:      &no,
+						AllowMergeCommit: &no,
+						AllowRebaseMerge: &no,
+						AllowSquashMerge: &no,
 						DefaultBranch:    &master,
 					},
 				},
@@ -2024,6 +2272,69 @@ func TestDumpOrgConfig(t *testing.T) {
 				Repos:   map[string]org.Repo{},
 			},
 		},
+		{
+			name:                  "skips enterprise teams when flag is set",
+			ignoreEnterpriseTeams: true,
+			meta: github.Organization{
+				Name:                         hello,
+				MembersCanCreateRepositories: yes,
+				DefaultRepositoryPermission:  string(perm),
+			},
+			members: []string{"george"},
+			admins:  []string{"admin"},
+			teams: []github.Team{
+				{
+					ID:          5,
+					Slug:        "team-5",
+					Name:        "friends",
+					Description: details,
+				},
+				{
+					ID:   9,
+					Slug: "ent-security",
+					Name: "ent-security",
+					Type: github.TeamTypeEnterprise,
+				},
+			},
+			teamMembers: map[string][]string{
+				"team-5": {"george"},
+			},
+			maintainers: map[string][]string{
+				"team-5": {},
+			},
+			repoPermissions: map[string][]github.Repo{
+				"team-5": {},
+			},
+			expected: org.Config{
+				Metadata: org.Metadata{
+					Name:                         &hello,
+					BillingEmail:                 &empty,
+					Company:                      &empty,
+					Email:                        &empty,
+					Description:                  &empty,
+					Location:                     &empty,
+					HasOrganizationProjects:      &no,
+					HasRepositoryProjects:        &no,
+					DefaultRepositoryPermission:  &perm,
+					MembersCanCreateRepositories: &yes,
+				},
+				Teams: map[string]org.Team{
+					"friends": {
+						TeamMetadata: org.TeamMetadata{
+							Description: &details,
+							Privacy:     &pub,
+						},
+						Members:     []string{"george"},
+						Maintainers: []string{},
+						Children:    map[string]org.Team{},
+						Repos:       map[string]github.RepoPermissionLevel{},
+					},
+				},
+				Members: []string{"george"},
+				Admins:  []string{"admin"},
+				Repos:   map[string]org.Repo{},
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -2043,7 +2354,7 @@ func TestDumpOrgConfig(t *testing.T) {
 				repoPermissions: tc.repoPermissions,
 				repos:           tc.repos,
 			}
-			actual, err := dumpOrgConfig(fc, orgName, tc.ignoreSecretTeams, "")
+			actual, err := dumpOrgConfig(fc, orgName, tc.ignoreSecretTeams, tc.ignoreEnterpriseTeams, "")
 			switch {
 			case err != nil:
 				if !tc.err {
@@ -2177,6 +2488,23 @@ func (c fakeDumpClient) BotUser() (*github.UserData, error) {
 	return &github.UserData{Login: "admin"}, nil
 }
 
+func (c fakeDumpClient) ListCollaborators(org, repo string) ([]github.User, error) {
+	return []github.User{}, nil
+}
+
+func (c fakeDumpClient) ListDirectCollaboratorsWithPermissions(org, repo string) (map[string]github.RepoPermissionLevel, error) {
+	// For dump tests, return empty by default
+	return map[string]github.RepoPermissionLevel{}, nil
+}
+
+func (c fakeDumpClient) GetUserPermission(org, repo, user string) (string, error) {
+	return "read", nil
+}
+
+func (c fakeDumpClient) ListRepoInvitations(org, repo string) ([]github.CollaboratorRepoInvitation, error) {
+	return []github.CollaboratorRepoInvitation{}, nil
+}
+
 func fixup(ret *org.Config) {
 	if ret == nil {
 		return
@@ -2246,6 +2574,82 @@ func TestOrgInvitations(t *testing.T) {
 				invitees: tc.invitees,
 			}
 			actual, err := orgInvitations(tc.opt, fc, "random-org")
+			switch {
+			case err != nil:
+				if !tc.err {
+					t.Errorf("unexpected error: %v", err)
+				}
+			case tc.err:
+				t.Errorf("failed to receive an error")
+			case !reflect.DeepEqual(actual, tc.expected):
+				t.Errorf("%#v != expected %#v", actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestOrgFailedInvitations(t *testing.T) {
+	cases := []struct {
+		name          string
+		opt           options
+		failedInvites map[string][]int
+		expected      map[string][]int
+		err           bool
+	}{
+		{
+			name:          "skip when fixOrgMembers is false",
+			failedInvites: map[string][]int{"him": {1}, "her": {2}},
+			expected:      nil,
+		},
+		{
+			name: "skip when ignoreInvitees is set",
+			opt: options{
+				fixOrgMembers:  true,
+				ignoreInvitees: true,
+			},
+			failedInvites: map[string][]int{"him": {1}},
+			expected:      nil,
+		},
+		{
+			name: "returns failed invitations when fixOrgMembers",
+			opt: options{
+				fixOrgMembers: true,
+			},
+			failedInvites: map[string][]int{"him": {1}, "her": {2}},
+			expected:      map[string][]int{"him": {1}, "her": {2}},
+		},
+		{
+			name: "collects multiple failed invitations for same user",
+			opt: options{
+				fixOrgMembers: true,
+			},
+			failedInvites: map[string][]int{"him": {1, 2}},
+			expected:      map[string][]int{"him": {1, 2}},
+		},
+		{
+			name: "normalizes login case",
+			opt: options{
+				fixOrgMembers: true,
+			},
+			failedInvites: map[string][]int{"MiXeD": {3}, "UPPER": {4}},
+			expected:      map[string][]int{"mixed": {3}, "upper": {4}},
+		},
+		{
+			name: "error if list fails",
+			opt: options{
+				fixOrgMembers: true,
+			},
+			failedInvites: map[string][]int{"fail-list": {0}},
+			err:           true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeClient{
+				failedInvites: tc.failedInvites,
+			}
+			actual, err := orgFailedInvitations(tc.opt, fc, "random-org")
 			switch {
 			case err != nil:
 				if !tc.err {
@@ -2577,6 +2981,13 @@ func (f fakeRepoClient) CreateRepo(owner string, isUser bool, repoReq github.Rep
 	return repo, nil
 }
 
+// updateIfSet copies *want into *have when want is non-nil.
+func updateIfSet[T any](have, want *T) {
+	if want != nil {
+		*have = *want
+	}
+}
+
 func (f fakeRepoClient) UpdateRepo(owner, name string, want github.RepoUpdateRequest) (*github.FullRepo, error) {
 	if name == "fail" {
 		return nil, fmt.Errorf("injected UpdateRepo failure")
@@ -2596,32 +3007,20 @@ func (f fakeRepoClient) UpdateRepo(owner, name string, want github.RepoUpdateReq
 		return nil, fmt.Errorf("Repository was archived so is read-only.")
 	}
 
-	updateString := func(have, want *string) {
-		if want != nil {
-			*have = *want
-		}
-	}
-
-	updateBool := func(have, want *bool) {
-		if want != nil {
-			*have = *want
-		}
-	}
-
-	updateString(&have.Name, want.Name)
-	updateString(&have.DefaultBranch, want.DefaultBranch)
-	updateString(&have.Homepage, want.Homepage)
-	updateString(&have.Description, want.Description)
-	updateBool(&have.Archived, want.Archived)
-	updateBool(&have.Private, want.Private)
-	updateBool(&have.HasIssues, want.HasIssues)
-	updateBool(&have.HasProjects, want.HasProjects)
-	updateBool(&have.HasWiki, want.HasWiki)
-	updateBool(&have.AllowSquashMerge, want.AllowSquashMerge)
-	updateBool(&have.AllowMergeCommit, want.AllowMergeCommit)
-	updateBool(&have.AllowRebaseMerge, want.AllowRebaseMerge)
-	updateString(&have.SquashMergeCommitTitle, want.SquashMergeCommitTitle)
-	updateString(&have.SquashMergeCommitMessage, want.SquashMergeCommitMessage)
+	updateIfSet(&have.Name, want.Name)
+	updateIfSet(&have.DefaultBranch, want.DefaultBranch)
+	updateIfSet(&have.Homepage, want.Homepage)
+	updateIfSet(&have.Description, want.Description)
+	updateIfSet(&have.Archived, want.Archived)
+	updateIfSet(&have.Visibility, want.Visibility)
+	updateIfSet(&have.HasIssues, want.HasIssues)
+	updateIfSet(&have.HasProjects, want.HasProjects)
+	updateIfSet(&have.HasWiki, want.HasWiki)
+	updateIfSet(&have.AllowSquashMerge, want.AllowSquashMerge)
+	updateIfSet(&have.AllowMergeCommit, want.AllowMergeCommit)
+	updateIfSet(&have.AllowRebaseMerge, want.AllowRebaseMerge)
+	updateIfSet(&have.SquashMergeCommitTitle, want.SquashMergeCommitTitle)
+	updateIfSet(&have.SquashMergeCommitMessage, want.SquashMergeCommitMessage)
 
 	f.repos[name] = have
 	return &have, nil
@@ -2827,28 +3226,59 @@ func TestConfigureRepos(t *testing.T) {
 			expectedRepos: []github.Repo{{Name: oldName, Archived: true}},
 		},
 		{
-			description: "request to publish a private repo fails when not allowed, but updates other fields",
+			description: "request to make a private repo public fails when not allowed, but updates other fields",
 			orgConfig: org.Config{
 				Repos: map[string]org.Repo{
-					oldName: {Private: &no, Description: &updated},
+					oldName: {Visibility: new(github.RepoVisibilityPublic), Description: &updated},
 				},
 			},
-			repos:         []github.FullRepo{{Repo: github.Repo{Name: oldName, Private: true, Description: "OLD"}}},
+			repos:         []github.FullRepo{{Repo: github.Repo{Name: oldName, Visibility: github.RepoVisibilityPrivate, Description: "OLD"}}},
 			expectError:   true,
-			expectedRepos: []github.Repo{{Name: oldName, Private: true, Description: updated}},
+			expectedRepos: []github.Repo{{Name: oldName, Visibility: github.RepoVisibilityPrivate, Description: updated}},
 		},
 		{
-			description: "request to publish a private repo succeeds when allowed",
+			description: "request to make a private repo public succeeds when allowed",
 			opts: options{
 				allowRepoPublish: true,
 			},
 			orgConfig: org.Config{
 				Repos: map[string]org.Repo{
-					oldName: {Private: &no},
+					oldName: {Visibility: new(github.RepoVisibilityPublic)},
 				},
 			},
-			repos:         []github.FullRepo{{Repo: github.Repo{Name: oldName, Private: true}}},
-			expectedRepos: []github.Repo{{Name: oldName, Private: false}},
+			repos:         []github.FullRepo{{Repo: github.Repo{Name: oldName, Visibility: github.RepoVisibilityPrivate}}},
+			expectedRepos: []github.Repo{{Name: oldName, Visibility: github.RepoVisibilityPublic}},
+		},
+		{
+			description: "request to make an internal repo public fails when not allowed",
+			orgConfig: org.Config{
+				Repos: map[string]org.Repo{
+					oldName: {Visibility: new(github.RepoVisibilityPublic)},
+				},
+			},
+			repos:         []github.FullRepo{{Repo: github.Repo{Name: oldName, Visibility: github.RepoVisibilityInternal}}},
+			expectError:   true,
+			expectedRepos: []github.Repo{{Name: oldName, Visibility: github.RepoVisibilityInternal}},
+		},
+		{
+			description: "transitioning private to internal is allowed without flag",
+			orgConfig: org.Config{
+				Repos: map[string]org.Repo{
+					oldName: {Visibility: new(github.RepoVisibilityInternal)},
+				},
+			},
+			repos:         []github.FullRepo{{Repo: github.Repo{Name: oldName, Visibility: github.RepoVisibilityPrivate}}},
+			expectedRepos: []github.Repo{{Name: oldName, Visibility: github.RepoVisibilityInternal}},
+		},
+		{
+			description: "transitioning internal to private is allowed without flag",
+			orgConfig: org.Config{
+				Repos: map[string]org.Repo{
+					oldName: {Visibility: new(github.RepoVisibilityPrivate)},
+				},
+			},
+			repos:         []github.FullRepo{{Repo: github.Repo{Name: oldName, Visibility: github.RepoVisibilityInternal}}},
+			expectedRepos: []github.Repo{{Name: oldName, Visibility: github.RepoVisibilityPrivate}},
 		},
 		{
 			description: "renaming a repo is successful",
@@ -3129,6 +3559,48 @@ func TestNewRepoUpdateRequest(t *testing.T) {
 				},
 			},
 		},
+		{
+			description: "visibility change produces a delta",
+			current: github.FullRepo{
+				Repo: github.Repo{
+					Name:       repoName,
+					Visibility: github.RepoVisibilityPublic,
+				},
+			},
+			name: repoName,
+			newState: org.Repo{
+				Visibility: new(github.RepoVisibilityPrivate),
+			},
+			expected: github.RepoUpdateRequest{
+				RepoRequest: github.RepoRequest{
+					Visibility: new(github.RepoVisibilityPrivate),
+				},
+			},
+		},
+		{
+			description: "same visibility produces no delta",
+			current: github.FullRepo{
+				Repo: github.Repo{
+					Name:       repoName,
+					Visibility: github.RepoVisibilityPublic,
+				},
+			},
+			name: repoName,
+			newState: org.Repo{
+				Visibility: new(github.RepoVisibilityPublic),
+			},
+		},
+		{
+			description: "nil visibility produces no delta",
+			current: github.FullRepo{
+				Repo: github.Repo{
+					Name:       repoName,
+					Visibility: github.RepoVisibilityPublic,
+				},
+			},
+			name:     repoName,
+			newState: org.Repo{},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -3138,5 +3610,810 @@ func TestNewRepoUpdateRequest(t *testing.T) {
 				t.Errorf("%s: update request differs from expected:%s", tc.description, cmp.Diff(tc.expected, update))
 			}
 		})
+	}
+}
+
+func TestConfigureCollaborators(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		repo                   org.Repo
+		existingCollaborators  map[string]github.RepoPermissionLevel
+		existingMembers        []string
+		failListCollaborators  bool
+		failGetUserPermission  bool
+		failAddCollaborator    bool
+		failRemoveCollaborator bool
+		expectedCollaborators  map[string]github.RepoPermissionLevel
+		expectedErr            bool
+	}{
+		{
+			name: "no collaborators configured",
+			repo: org.Repo{},
+			existingCollaborators: map[string]github.RepoPermissionLevel{
+				"external-user": github.Read,
+			},
+			existingMembers:       []string{},
+			expectedCollaborators: map[string]github.RepoPermissionLevel{},
+		},
+		{
+			name: "add new external collaborator",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"new-user": github.Write,
+				},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{},
+			existingMembers:       []string{},
+			expectedCollaborators: map[string]github.RepoPermissionLevel{
+				"new-user": github.Write,
+			},
+		},
+		{
+			name: "update existing collaborator permission",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"existing-user": github.Admin,
+				},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{
+				"existing-user": github.Read,
+			},
+			existingMembers: []string{},
+			expectedCollaborators: map[string]github.RepoPermissionLevel{
+				"existing-user": github.Admin,
+			},
+		},
+		{
+			name: "remove external collaborator not in config",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"keep-user": github.Write,
+				},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{
+				"keep-user":   github.Write,
+				"remove-user": github.Read,
+			},
+			existingMembers: []string{},
+			expectedCollaborators: map[string]github.RepoPermissionLevel{
+				"keep-user": github.Write,
+			},
+		},
+		{
+			name: "remove direct collaborator not in config (including org members)",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"external-user": github.Write,
+				},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{
+				"external-user": github.Write,
+				"org-member":    github.Read,
+			},
+			existingMembers: []string{"org-member"},
+			expectedCollaborators: map[string]github.RepoPermissionLevel{
+				"external-user": github.Write,
+				// org-member should be removed since it's a direct collaborator not in config
+			},
+		},
+		{
+			name: "org member in collaborators config gets updated",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"org-member": github.Admin,
+				},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{
+				"org-member": github.Read,
+			},
+			existingMembers: []string{"org-member"},
+			expectedCollaborators: map[string]github.RepoPermissionLevel{
+				"org-member": github.Admin,
+			},
+		},
+		{
+			name: "permission already correct - no change",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"user1": github.Write,
+					"user2": github.Read,
+				},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{
+				"user1": github.Write,
+				"user2": github.Read,
+			},
+			existingMembers: []string{},
+			expectedCollaborators: map[string]github.RepoPermissionLevel{
+				"user1": github.Write,
+				"user2": github.Read,
+			},
+		},
+		{
+			name: "ListCollaborators failure propagates",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"user": github.Write,
+				},
+			},
+			failListCollaborators: true,
+			expectedErr:           true,
+		},
+		{
+			name: "AddCollaborator failure propagates",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{
+					"user": github.Write,
+				},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{},
+			existingMembers:       []string{},
+			failAddCollaborator:   true,
+			expectedErr:           true,
+		},
+		{
+			name: "RemoveCollaborator failure propagates",
+			repo: org.Repo{
+				Collaborators: map[string]github.RepoPermissionLevel{},
+			},
+			existingCollaborators: map[string]github.RepoPermissionLevel{
+				"external-user": github.Read,
+			},
+			existingMembers:        []string{},
+			failRemoveCollaborator: true,
+			expectedErr:            true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeCollaboratorClient{
+				collaborators:          make(map[string]github.RepoPermissionLevel),
+				members:                sets.New(tc.existingMembers...),
+				failListCollaborators:  tc.failListCollaborators,
+				failGetUserPermission:  tc.failGetUserPermission,
+				failAddCollaborator:    tc.failAddCollaborator,
+				failRemoveCollaborator: tc.failRemoveCollaborator,
+			}
+
+			// Set up existing collaborators
+			maps.Copy(client.collaborators, tc.existingCollaborators)
+
+			err := configureCollaborators(client, "test-org", "test-repo", tc.repo)
+
+			if tc.expectedErr && err == nil {
+				t.Errorf("Expected error but got none")
+			}
+			if !tc.expectedErr && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if !tc.expectedErr {
+				if diff := cmp.Diff(client.collaborators, tc.expectedCollaborators); diff != "" {
+					t.Errorf("Collaborators mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+type fakeCollaboratorClient struct {
+	collaborators          map[string]github.RepoPermissionLevel
+	members                sets.Set[string]
+	failListCollaborators  bool
+	failGetUserPermission  bool
+	failAddCollaborator    bool
+	failRemoveCollaborator bool
+}
+
+func (f *fakeCollaboratorClient) ListCollaborators(org, repo string) ([]github.User, error) {
+	if f.failListCollaborators {
+		return nil, fmt.Errorf("ListCollaborators failed")
+	}
+
+	var users []github.User
+	for username := range f.collaborators {
+		users = append(users, github.User{Login: username})
+	}
+	return users, nil
+}
+
+func (f *fakeCollaboratorClient) GetUserPermission(org, repo, user string) (string, error) {
+	if f.failGetUserPermission {
+		return "", fmt.Errorf("GetUserPermission failed")
+	}
+
+	if permission, exists := f.collaborators[user]; exists {
+		return string(permission), nil
+	}
+	return "", fmt.Errorf("user not found")
+}
+
+func (f *fakeCollaboratorClient) ListDirectCollaboratorsWithPermissions(org, repo string) (map[string]github.RepoPermissionLevel, error) {
+	if f.failListCollaborators {
+		return nil, fmt.Errorf("ListDirectCollaboratorsWithPermissions failed")
+	}
+
+	// For testing, return the same as the regular collaborators
+	// In real usage, this would only return direct collaborators via GraphQL
+	return f.collaborators, nil
+}
+
+func (f *fakeCollaboratorClient) AddCollaborator(org, repo, user string, permission github.RepoPermissionLevel) error {
+	if f.failAddCollaborator {
+		return fmt.Errorf("AddCollaborator failed")
+	}
+
+	f.collaborators[user] = permission
+	return nil
+}
+
+func (f *fakeCollaboratorClient) UpdateCollaborator(org, repo, user string, permission github.RepoPermissionLevel) error {
+	if f.failAddCollaborator { // Reuse the same failure flag for simplicity
+		return fmt.Errorf("UpdateCollaborator failed")
+	}
+
+	f.collaborators[user] = permission
+	return nil
+}
+
+func (f *fakeCollaboratorClient) UpdateCollaboratorRepoInvitation(org, repo string, invitationID int, permission github.RepoPermissionLevel) error {
+	if f.failAddCollaborator { // Reuse the same failure flag for simplicity
+		return fmt.Errorf("UpdateCollaboratorRepoInvitation failed")
+	}
+
+	// For testing, we need to find the user by invitation ID
+	// This is a simplified implementation for testing
+	f.collaborators[fmt.Sprintf("invitation-%d", invitationID)] = permission
+	return nil
+}
+
+func (f *fakeCollaboratorClient) DeleteCollaboratorRepoInvitation(org, repo string, invitationID int) error {
+	if f.failRemoveCollaborator { // Reuse the same failure flag for simplicity
+		return fmt.Errorf("DeleteCollaboratorRepoInvitation failed")
+	}
+
+	// For testing, remove the invitation by ID
+	delete(f.collaborators, fmt.Sprintf("invitation-%d", invitationID))
+	return nil
+}
+
+func (f *fakeCollaboratorClient) RemoveCollaborator(org, repo, user string) error {
+	if f.failRemoveCollaborator {
+		return fmt.Errorf("RemoveCollaborator failed")
+	}
+
+	delete(f.collaborators, user)
+	return nil
+}
+
+func (f *fakeCollaboratorClient) UpdateCollaboratorPermission(org, repo, user string, permission github.RepoPermissionLevel) error {
+	// For testing, this is the same as AddCollaborator
+	return f.AddCollaborator(org, repo, user, permission)
+}
+
+func (f *fakeCollaboratorClient) ListOrgMembers(org, role string) ([]github.TeamMember, error) {
+	var members []github.TeamMember
+	for member := range f.members {
+		members = append(members, github.TeamMember{Login: member})
+	}
+	return members, nil
+}
+
+func (f *fakeCollaboratorClient) ListRepoInvitations(org, repo string) ([]github.CollaboratorRepoInvitation, error) {
+	// For testing, return empty list
+	return []github.CollaboratorRepoInvitation{}, nil
+}
+
+func TestConfigureCollaboratorsRemovePendingInvitations(t *testing.T) {
+	// Test that pending invitations are removed when users are not in config
+	// This matches the behavior of organization membership invitations
+	client := &fakeCollaboratorClientWithInvitations{
+		fakeCollaboratorClient: &fakeCollaboratorClient{
+			collaborators: make(map[string]github.RepoPermissionLevel),
+			members:       sets.Set[string]{},
+		},
+		pendingInvitations: []github.CollaboratorRepoInvitation{
+			{
+				InvitationID: 1001,
+				Invitee:      &github.User{Login: "remove-pending"},
+				Permission:   github.Read, // Has pending invitation but not in config - should be removed
+			},
+			{
+				InvitationID: 1002,
+				Invitee:      &github.User{Login: "keep-pending"},
+				Permission:   github.Write, // Has pending invitation and is in config - should be kept
+			},
+		},
+	}
+
+	repo := org.Repo{
+		Collaborators: map[string]github.RepoPermissionLevel{
+			"keep-pending": github.Write, // This user has pending invitation and should be kept
+			"new-user":     github.Admin, // This user has no invitation and should get one
+		},
+		// Note: "remove-pending" is NOT in the config, so their invitation should be removed
+	}
+
+	err := configureCollaborators(client, "test-org", "test-repo", repo)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Verify that remove-pending invitation was deleted (DeleteRepoInvitation called)
+	// Since remove-pending is a pending invitation, it should use DeleteRepoInvitation, not RemoveCollaborator
+	expectedDeletedInvitations := []int{1001} // remove-pending has invitation ID 1001
+	actualDeletedInvitations := client.deleteInvitationCalls
+
+	if len(actualDeletedInvitations) != len(expectedDeletedInvitations) {
+		t.Errorf("Expected invitation deletion calls for %v, got deletion calls for %v", expectedDeletedInvitations, actualDeletedInvitations)
+	}
+
+	for _, expectedID := range expectedDeletedInvitations {
+		found := slices.Contains(actualDeletedInvitations, expectedID)
+		if !found {
+			t.Errorf("Expected invitation ID %d to be deleted, but was not", expectedID)
+		}
+	}
+
+	// Verify that no actual collaborators were removed (removedUsers should be empty since remove-pending is an invitation)
+	if len(client.removedUsers) != 0 {
+		t.Errorf("Expected no RemoveCollaborator calls, got %v", client.removedUsers)
+	}
+
+	// Verify keep-pending was NOT deleted (should not be in deleteInvitationCalls)
+	for _, deletedID := range actualDeletedInvitations {
+		if deletedID == 1002 { // keep-pending has invitation ID 1002
+			t.Errorf("Invitation ID %d (keep-pending) should not have been deleted", deletedID)
+		}
+	}
+}
+
+func TestConfigureCollaboratorsInvitationManagement(t *testing.T) {
+	// Comprehensive test for all invitation scenarios:
+	// 1. Pending invitation with correct permission -> wait
+	// 2. Pending invitation with wrong permission -> update
+	// 3. Pending invitation not in config -> remove
+	// 4. No invitation, user in config -> create
+	// 5. Current collaborator with wrong permission -> update
+	client := &fakeCollaboratorClientWithInvitations{
+		fakeCollaboratorClient: &fakeCollaboratorClient{
+			collaborators: map[string]github.RepoPermissionLevel{
+				"current-user": github.Read, // Current collaborator with wrong permission
+			},
+			members: sets.Set[string]{},
+		},
+		pendingInvitations: []github.CollaboratorRepoInvitation{
+			{
+				InvitationID: 2001,
+				Invitee:      &github.User{Login: "pending-correct"},
+				Permission:   github.Write, // Correct permission - should wait
+			},
+			{
+				InvitationID: 2002,
+				Invitee:      &github.User{Login: "pending-wrong"},
+				Permission:   github.Read, // Wrong permission - should update
+			},
+			{
+				InvitationID: 2003,
+				Invitee:      &github.User{Login: "pending-remove"},
+				Permission:   github.Admin, // Not in config - should remove
+			},
+		},
+	}
+
+	repo := org.Repo{
+		Collaborators: map[string]github.RepoPermissionLevel{
+			"pending-correct": github.Write, // Matches pending - should wait
+			"pending-wrong":   github.Admin, // Different from pending - should update invitation
+			"new-user":        github.Read,  // No invitation - should create
+			"current-user":    github.Admin, // Current user - should update
+			// Note: "pending-remove" not in config - should remove invitation
+		},
+	}
+
+	err := configureCollaborators(client, "test-org", "test-repo", repo)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Verify API calls were made for the right users
+	expectedAPICallUsers := []string{"pending-wrong", "new-user", "current-user"}
+	actualAPICallUsers := client.apiCallsUsers
+
+	if len(actualAPICallUsers) != len(expectedAPICallUsers) {
+		t.Errorf("Expected API calls for %v, got API calls for %v", expectedAPICallUsers, actualAPICallUsers)
+	}
+
+	// Verify removals - since pending-remove is a pending invitation, it should use DeleteRepoInvitation
+	expectedDeletedInvitations := []int{2003} // pending-remove has invitation ID 2003
+	actualDeletedInvitations := client.deleteInvitationCalls
+
+	if len(actualDeletedInvitations) != len(expectedDeletedInvitations) {
+		t.Errorf("Expected invitation deletions for %v, got deletions for %v", expectedDeletedInvitations, actualDeletedInvitations)
+	}
+
+	// Verify pending-correct was NOT touched (should not be in API calls or deletions)
+	for _, user := range actualAPICallUsers {
+		if user == "pending-correct" {
+			t.Errorf("pending-correct should not have API call (has correct pending invitation)")
+		}
+	}
+	for _, deletedID := range actualDeletedInvitations {
+		if deletedID == 2001 { // pending-correct has invitation ID 2001
+			t.Errorf("Invitation ID %d (pending-correct) should not have been deleted", deletedID)
+		}
+	}
+}
+
+func TestConfigureCollaboratorsInvitationPermissionChecking(t *testing.T) {
+	// Test that invitation checking compares permissions, not just existence
+	client := &fakeCollaboratorClientWithInvitations{
+		fakeCollaboratorClient: &fakeCollaboratorClient{
+			collaborators: make(map[string]github.RepoPermissionLevel),
+			members:       sets.Set[string]{},
+		},
+		pendingInvitations: []github.CollaboratorRepoInvitation{
+			{
+				InvitationID: 3001,
+				Invitee:      &github.User{Login: "pending-user"},
+				Permission:   github.Read, // Has pending invitation with READ permission
+			},
+			{
+				InvitationID: 3002,
+				Invitee:      &github.User{Login: "Another-Pending"},
+				Permission:   github.Write, // Has pending invitation with WRITE permission
+			},
+		},
+	}
+
+	repo := org.Repo{
+		Collaborators: map[string]github.RepoPermissionLevel{
+			"pending-user":    github.Read,  // Matches pending permission - should skip API call
+			"another-pending": github.Admin, // Different from pending permission - should update invitation
+			"new-user":        github.Write, // No pending invitation - should create invitation
+		},
+	}
+
+	err := configureCollaborators(client, "test-org", "test-repo", repo)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Verify correct behavior:
+	// - pending-user should be skipped (correct pending permission)
+	// - another-pending should be updated (wrong pending permission)
+	// - new-user should be added (no pending invitation)
+
+	// Check which users had API calls made
+	expectedAPICallUsers := []string{"another-pending", "new-user"}
+	actualAPICallUsers := client.apiCallsUsers
+
+	if len(actualAPICallUsers) != len(expectedAPICallUsers) {
+		t.Errorf("Expected API calls for %v, got API calls for %v", expectedAPICallUsers, actualAPICallUsers)
+	}
+
+	// pending-user should NOT have had an API call
+	for _, user := range actualAPICallUsers {
+		if user == "pending-user" {
+			t.Errorf("pending-user should not have API call (has correct pending invitation)")
+		}
+	}
+}
+
+// fakeCollaboratorClientWithInvitations extends the fake client to track API calls
+type fakeCollaboratorClientWithInvitations struct {
+	*fakeCollaboratorClient
+	pendingInvitations      []github.CollaboratorRepoInvitation
+	apiCallsUsers           []string // Track which users had API calls made
+	removedUsers            []string // Track which users were removed
+	updateInvitationCalls   []int    // Track invitation IDs that were updated
+	deleteInvitationCalls   []int    // Track invitation IDs that were deleted
+	addCollaboratorCalls    []string // Track users that were added via AddCollaborator
+	updateCollaboratorCalls []string // Track users that were updated via UpdateCollaborator
+}
+
+func (c *fakeCollaboratorClientWithInvitations) ListRepoInvitations(org, repo string) ([]github.CollaboratorRepoInvitation, error) {
+	return c.pendingInvitations, nil
+}
+
+func (c *fakeCollaboratorClientWithInvitations) ListDirectCollaboratorsWithPermissions(org, repo string) (map[string]github.RepoPermissionLevel, error) {
+	return c.fakeCollaboratorClient.ListDirectCollaboratorsWithPermissions(org, repo)
+}
+
+func (c *fakeCollaboratorClientWithInvitations) AddCollaborator(org, repo, user string, permission github.RepoPermissionLevel) error {
+	c.apiCallsUsers = append(c.apiCallsUsers, user)
+	c.addCollaboratorCalls = append(c.addCollaboratorCalls, user)
+	return c.fakeCollaboratorClient.AddCollaborator(org, repo, user, permission)
+}
+
+func (c *fakeCollaboratorClientWithInvitations) UpdateCollaborator(org, repo, user string, permission github.RepoPermissionLevel) error {
+	c.apiCallsUsers = append(c.apiCallsUsers, user)
+	c.updateCollaboratorCalls = append(c.updateCollaboratorCalls, user)
+	return c.fakeCollaboratorClient.UpdateCollaborator(org, repo, user, permission)
+}
+
+func (c *fakeCollaboratorClientWithInvitations) UpdateCollaboratorRepoInvitation(org, repo string, invitationID int, permission github.RepoPermissionLevel) error {
+	c.apiCallsUsers = append(c.apiCallsUsers, fmt.Sprintf("invitation-%d", invitationID))
+	c.updateInvitationCalls = append(c.updateInvitationCalls, invitationID)
+	return c.fakeCollaboratorClient.UpdateCollaboratorRepoInvitation(org, repo, invitationID, permission)
+}
+
+func (c *fakeCollaboratorClientWithInvitations) DeleteCollaboratorRepoInvitation(org, repo string, invitationID int) error {
+	c.deleteInvitationCalls = append(c.deleteInvitationCalls, invitationID)
+	return c.fakeCollaboratorClient.DeleteCollaboratorRepoInvitation(org, repo, invitationID)
+}
+
+func (c *fakeCollaboratorClientWithInvitations) UpdateCollaboratorPermission(org, repo, user string, permission github.RepoPermissionLevel) error {
+	c.apiCallsUsers = append(c.apiCallsUsers, user)
+	return c.fakeCollaboratorClient.UpdateCollaboratorPermission(org, repo, user, permission)
+}
+
+func (c *fakeCollaboratorClientWithInvitations) RemoveCollaborator(org, repo, user string) error {
+	c.removedUsers = append(c.removedUsers, user)
+	return c.fakeCollaboratorClient.RemoveCollaborator(org, repo, user)
+}
+
+func TestConfigureCollaboratorsLargeSet(t *testing.T) {
+	// Generate a large set of collaborators and invitations to ensure we handle scale and don’t miss actions
+	const numExisting = 500
+	const numInvites = 300
+	const numDesiredAdds = 400
+
+	existing := make(map[string]github.RepoPermissionLevel, numExisting)
+	for i := range numExisting {
+		existing[fmt.Sprintf("existing-%04d", i)] = github.Read
+	}
+
+	var invites []github.CollaboratorRepoInvitation
+	for i := range numInvites {
+		invites = append(invites, github.CollaboratorRepoInvitation{
+			InvitationID: 10000 + i,
+			Invitee:      &github.User{Login: fmt.Sprintf("invite-%04d", i)},
+			Permission:   github.Read,
+		})
+	}
+
+	desired := make(map[string]github.RepoPermissionLevel, numDesiredAdds)
+	// Keep half of existing (should update to write), drop the rest
+	for i := 0; i < numExisting; i += 2 {
+		desired[fmt.Sprintf("existing-%04d", i)] = github.Write
+	}
+	// Keep half of invites (should update to write), drop the rest
+	for i := 0; i < numInvites; i += 2 {
+		desired[fmt.Sprintf("invite-%04d", i)] = github.Write
+	}
+	// Add fresh desired users
+	for i := range numDesiredAdds {
+		desired[fmt.Sprintf("new-%04d", i)] = github.Admin
+	}
+
+	client := &fakeCollaboratorClientWithInvitations{
+		fakeCollaboratorClient: &fakeCollaboratorClient{
+			collaborators: existing,
+			members:       sets.Set[string]{},
+		},
+		pendingInvitations: invites,
+	}
+
+	repo := org.Repo{Collaborators: desired}
+	if err := configureCollaborators(client, "org", "repo", repo); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Sanity: we should have removals for dropped existing and dropped invites
+	expectedRemovals := (numExisting / 2) + (numInvites / 2)
+	if len(client.removedUsers)+len(client.deleteInvitationCalls) < expectedRemovals {
+		t.Errorf("expected at least %d removals/cancellations, got %d removals and %d cancellations", expectedRemovals, len(client.removedUsers), len(client.deleteInvitationCalls))
+	}
+
+	// Sanity: we should have adds for fresh desired users
+	if len(client.addCollaboratorCalls) < numDesiredAdds {
+		t.Errorf("expected at least %d add calls, got %d", numDesiredAdds, len(client.addCollaboratorCalls))
+	}
+
+	// No panics and deterministic behavior implied by sorted order; basic coverage for large sets
+}
+
+func TestConfigureCollaboratorsCorrectAPIEndpoints(t *testing.T) {
+	// Test that the correct API endpoints are called with invitation IDs
+	client := &fakeCollaboratorClientWithInvitations{
+		fakeCollaboratorClient: &fakeCollaboratorClient{
+			collaborators: map[string]github.RepoPermissionLevel{
+				"existing-user": github.Read, // Current collaborator
+			},
+			members: sets.Set[string]{},
+		},
+		pendingInvitations: []github.CollaboratorRepoInvitation{
+			{
+				InvitationID: 4001,
+				Invitee:      &github.User{Login: "pending-update"},
+				Permission:   github.Read, // Will be updated to Write
+			},
+		},
+	}
+
+	repo := org.Repo{
+		Collaborators: map[string]github.RepoPermissionLevel{
+			"existing-user":  github.Write, // Update existing collaborator
+			"pending-update": github.Write, // Update pending invitation
+			"new-user":       github.Admin, // New invitation
+		},
+	}
+
+	err := configureCollaborators(client, "test-org", "test-repo", repo)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Verify that UpdateRepoInvitation was called with the correct invitation ID
+	expectedInvitationIDs := []int{4001}
+	if len(client.updateInvitationCalls) != len(expectedInvitationIDs) {
+		t.Errorf("Expected UpdateRepoInvitation calls for %v, got %v", expectedInvitationIDs, client.updateInvitationCalls)
+	}
+	for i, expectedID := range expectedInvitationIDs {
+		if i < len(client.updateInvitationCalls) && client.updateInvitationCalls[i] != expectedID {
+			t.Errorf("Expected invitation ID %d, got %d", expectedID, client.updateInvitationCalls[i])
+		}
+	}
+
+	// Verify that AddCollaborator was called for existing user and new user
+	expectedAddCalls := []string{"existing-user", "new-user"}
+	if len(client.addCollaboratorCalls) != len(expectedAddCalls) {
+		t.Errorf("Expected AddCollaborator calls for %v, got %v", expectedAddCalls, client.addCollaboratorCalls)
+	}
+
+	// Verify that UpdateCollaborator was NOT called (we should use UpdateRepoInvitation for pending invitations)
+	if len(client.updateCollaboratorCalls) != 0 {
+		t.Errorf("Expected no UpdateCollaborator calls, got %v", client.updateCollaboratorCalls)
+	}
+}
+
+func TestConfigureCollaboratorsInvitationVsCollaboratorRemoval(t *testing.T) {
+	// Test that the correct removal method is used: DeleteRepoInvitation for invitations, RemoveCollaborator for actual collaborators
+	client := &fakeCollaboratorClientWithInvitations{
+		fakeCollaboratorClient: &fakeCollaboratorClient{
+			collaborators: map[string]github.RepoPermissionLevel{
+				"actual-collaborator": github.Read, // This is an actual collaborator, should use RemoveCollaborator
+			},
+			members: sets.Set[string]{},
+		},
+		pendingInvitations: []github.CollaboratorRepoInvitation{
+			{
+				InvitationID: 5001,
+				Invitee:      &github.User{Login: "pending-invitation"},
+				Permission:   github.Write, // This is a pending invitation, should use DeleteRepoInvitation
+			},
+		},
+	}
+
+	repo := org.Repo{
+		Collaborators: map[string]github.RepoPermissionLevel{
+			// Both actual-collaborator and pending-invitation are NOT in config, so both should be removed
+			// but using different methods
+		},
+	}
+
+	err := configureCollaborators(client, "test-org", "test-repo", repo)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Verify that DeleteRepoInvitation was called for the pending invitation
+	expectedDeletedInvitations := []int{5001}
+	if len(client.deleteInvitationCalls) != len(expectedDeletedInvitations) {
+		t.Errorf("Expected DeleteRepoInvitation calls for %v, got %v", expectedDeletedInvitations, client.deleteInvitationCalls)
+	}
+
+	// Verify that RemoveCollaborator was called for the actual collaborator
+	expectedRemovedUsers := []string{"actual-collaborator"}
+	if len(client.removedUsers) != len(expectedRemovedUsers) {
+		t.Errorf("Expected RemoveCollaborator calls for %v, got %v", expectedRemovedUsers, client.removedUsers)
+	}
+}
+
+func TestConfigureCollaborators_Idempotent_NoChangeForDirectCollaborator(t *testing.T) {
+	client := &fakeCollaboratorClientWithInvitations{
+		fakeCollaboratorClient: &fakeCollaboratorClient{
+			collaborators: map[string]github.RepoPermissionLevel{
+				"user": github.Write,
+			},
+			members: sets.Set[string]{},
+		},
+		pendingInvitations: []github.CollaboratorRepoInvitation{},
+	}
+
+	repo := org.Repo{
+		Collaborators: map[string]github.RepoPermissionLevel{
+			"user": github.Write,
+		},
+	}
+
+	err := configureCollaborators(client, "test-org", "test-repo", repo)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if len(client.apiCallsUsers) != 0 || len(client.updateInvitationCalls) != 0 || len(client.deleteInvitationCalls) != 0 || len(client.removedUsers) != 0 {
+		t.Errorf("expected no API calls for idempotent state; got apiCalls=%v updateInv=%v deleteInv=%v removed=%v", client.apiCallsUsers, client.updateInvitationCalls, client.deleteInvitationCalls, client.removedUsers)
+	}
+}
+
+func TestConfigureCollaborators_PermissionMatrix_TransitionsExistingCollaborator(t *testing.T) {
+	levels := []github.RepoPermissionLevel{github.Admin, github.Maintain, github.Write, github.Triage, github.Read}
+
+	for _, from := range levels {
+		for _, to := range levels {
+			if from == to {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s_to_%s", from, to), func(t *testing.T) {
+				client := &fakeCollaboratorClientWithInvitations{
+					fakeCollaboratorClient: &fakeCollaboratorClient{
+						collaborators: map[string]github.RepoPermissionLevel{
+							"user": from,
+						},
+						members: sets.Set[string]{},
+					},
+					pendingInvitations: []github.CollaboratorRepoInvitation{},
+				}
+
+				repo := org.Repo{Collaborators: map[string]github.RepoPermissionLevel{"user": to}}
+
+				err := configureCollaborators(client, "org", "repo", repo)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				if got := client.collaborators["user"]; got != to {
+					t.Errorf("permission not updated: want %s, got %s", to, got)
+				}
+
+				if len(client.updateInvitationCalls) != 0 || len(client.deleteInvitationCalls) != 0 {
+					t.Errorf("unexpected invitation operations: update=%v delete=%v", client.updateInvitationCalls, client.deleteInvitationCalls)
+				}
+
+				if len(client.addCollaboratorCalls) != 1 || client.addCollaboratorCalls[0] != "user" {
+					t.Errorf("expected exactly one AddCollaborator call for 'user', got %v", client.addCollaboratorCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestConfigureCollaborators_PermissionMatrix_PendingInvitationUpdates(t *testing.T) {
+	levels := []github.RepoPermissionLevel{github.Admin, github.Maintain, github.Write, github.Triage, github.Read}
+
+	for _, from := range levels {
+		for _, to := range levels {
+			if from == to {
+				continue
+			}
+			t.Run(fmt.Sprintf("pending_%s_to_%s", from, to), func(t *testing.T) {
+				client := &fakeCollaboratorClientWithInvitations{
+					fakeCollaboratorClient: &fakeCollaboratorClient{
+						collaborators: map[string]github.RepoPermissionLevel{},
+						members:       sets.Set[string]{},
+					},
+					pendingInvitations: []github.CollaboratorRepoInvitation{
+						{InvitationID: 9001, Invitee: &github.User{Login: "user"}, Permission: from},
+					},
+				}
+
+				repo := org.Repo{Collaborators: map[string]github.RepoPermissionLevel{"user": to}}
+
+				err := configureCollaborators(client, "org", "repo", repo)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				if len(client.updateInvitationCalls) != 1 || client.updateInvitationCalls[0] != 9001 {
+					t.Errorf("expected one UpdateRepoInvitation call for invitation 9001, got %v", client.updateInvitationCalls)
+				}
+
+				if len(client.addCollaboratorCalls) != 0 {
+					t.Errorf("expected no AddCollaborator calls when updating pending invitation, got %v", client.addCollaboratorCalls)
+				}
+			})
+		}
 	}
 }

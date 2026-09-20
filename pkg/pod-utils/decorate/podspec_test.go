@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
@@ -44,13 +43,6 @@ import (
 	"sigs.k8s.io/prow/pkg/sidecar"
 	"sigs.k8s.io/prow/pkg/testutil"
 )
-
-func pStr(str string) *string {
-	return &str
-}
-func pInt64(i int64) *int64 {
-	return &i
-}
 
 func cookieVolumeOnly(secret string) coreapi.Volume {
 	v, _, _ := cookiefileVolume(secret)
@@ -458,7 +450,7 @@ func TestCloneRefs(t *testing.T) {
 					ExtraRefs: []prowapi.Refs{{}},
 					DecorationConfig: &prowapi.DecorationConfig{
 						UtilityImages:    &prowapi.UtilityImages{},
-						CookiefileSecret: pStr("oatmeal"),
+						CookiefileSecret: new("oatmeal"),
 					},
 				},
 			},
@@ -485,7 +477,7 @@ func TestCloneRefs(t *testing.T) {
 					ExtraRefs: []prowapi.Refs{{}},
 					DecorationConfig: &prowapi.DecorationConfig{
 						UtilityImages:    &prowapi.UtilityImages{},
-						CookiefileSecret: pStr(""),
+						CookiefileSecret: new(""),
 					},
 				},
 			},
@@ -678,9 +670,9 @@ func TestCloneRefs(t *testing.T) {
 			case tc.err:
 				t.Error("failed to receive expected exception")
 			case !equality.Semantic.DeepEqual(tc.expected, actual):
-				t.Errorf("unexpected container:\n%s", diff.ObjectReflectDiff(tc.expected, actual))
+				t.Errorf("unexpected container:\n%s", diff.Diff(tc.expected, actual))
 			case !equality.Semantic.DeepEqual(tc.volumes, volumes):
-				t.Errorf("unexpected volume:\n%s", diff.ObjectReflectDiff(tc.volumes, volumes))
+				t.Errorf("unexpected volume:\n%s", diff.Diff(tc.volumes, volumes))
 			case actual != nil:
 				var er []prowapi.Refs
 				if tc.pj.Spec.Refs != nil {
@@ -688,7 +680,7 @@ func TestCloneRefs(t *testing.T) {
 				}
 				er = append(er, tc.pj.Spec.ExtraRefs...)
 				if !equality.Semantic.DeepEqual(refs, er) {
-					t.Errorf("unexpected refs:\n%s", diff.ObjectReflectDiff(er, refs))
+					t.Errorf("unexpected refs:\n%s", diff.Diff(er, refs))
 				}
 			}
 		})
@@ -765,8 +757,8 @@ func TestProwJobToPod(t *testing.T) {
 						DefaultRepo:  "kubernetes",
 						MediaTypes:   map[string]string{"log": "text/plain"},
 					},
-					GCSCredentialsSecret: pStr("secret-name"),
-					CookiefileSecret:     pStr("yummy/.gitcookies"),
+					GCSCredentialsSecret: new("secret-name"),
+					CookiefileSecret:     new("yummy/.gitcookies"),
 				},
 				Agent: prowapi.KubernetesAgent,
 				Refs: &prowapi.Refs{
@@ -821,8 +813,8 @@ func TestProwJobToPod(t *testing.T) {
 						DefaultOrg:   "kubernetes",
 						DefaultRepo:  "kubernetes",
 					},
-					GCSCredentialsSecret: pStr("secret-name"),
-					CookiefileSecret:     pStr("yummy"),
+					GCSCredentialsSecret: new("secret-name"),
+					CookiefileSecret:     new("yummy"),
 				},
 				Agent: prowapi.KubernetesAgent,
 				Refs: &prowapi.Refs{
@@ -877,7 +869,7 @@ func TestProwJobToPod(t *testing.T) {
 						DefaultOrg:   "kubernetes",
 						DefaultRepo:  "kubernetes",
 					},
-					GCSCredentialsSecret: pStr("secret-name"),
+					GCSCredentialsSecret: new("secret-name"),
 					SSHKeySecrets:        []string{"ssh-1", "ssh-2"},
 					SSHHostFingerprints:  []string{"hello", "world"},
 				},
@@ -935,7 +927,7 @@ func TestProwJobToPod(t *testing.T) {
 						DefaultOrg:   "kubernetes",
 						DefaultRepo:  "kubernetes",
 					},
-					GCSCredentialsSecret: pStr("secret-name"),
+					GCSCredentialsSecret: new("secret-name"),
 					SSHKeySecrets:        []string{"ssh-1", "ssh-2"},
 				},
 				Agent: prowapi.KubernetesAgent,
@@ -991,7 +983,7 @@ func TestProwJobToPod(t *testing.T) {
 						DefaultOrg:   "kubernetes",
 						DefaultRepo:  "kubernetes",
 					},
-					GCSCredentialsSecret: pStr("secret-name"),
+					GCSCredentialsSecret: new("secret-name"),
 					SSHKeySecrets:        []string{"ssh-1", "ssh-2"},
 				},
 				Agent: prowapi.KubernetesAgent,
@@ -1032,7 +1024,7 @@ func TestProwJobToPod(t *testing.T) {
 						DefaultOrg:   "kubernetes",
 						DefaultRepo:  "kubernetes",
 					},
-					GCSCredentialsSecret: pStr("secret-name"),
+					GCSCredentialsSecret: new("secret-name"),
 					SSHKeySecrets:        []string{"ssh-1", "ssh-2"},
 					SkipCloning:          &truth,
 				},
@@ -1094,9 +1086,9 @@ func TestProwJobToPod(t *testing.T) {
 						DefaultOrg:   "kubernetes",
 						DefaultRepo:  "kubernetes",
 					},
-					GCSCredentialsSecret: pStr("secret-name"),
+					GCSCredentialsSecret: new("secret-name"),
 					SSHKeySecrets:        []string{"ssh-1", "ssh-2"},
-					CookiefileSecret:     pStr("yummy"),
+					CookiefileSecret:     new("yummy"),
 				},
 				Agent: prowapi.KubernetesAgent,
 				Refs: &prowapi.Refs{
@@ -1168,8 +1160,8 @@ func TestProwJobToPod(t *testing.T) {
 						MediaTypes:   map[string]string{"log": "text/plain"},
 					},
 					// Specify K8s SA rather than cloud storage secret key.
-					DefaultServiceAccountName: pStr("default-SA"),
-					CookiefileSecret:          pStr("yummy/.gitcookies"),
+					DefaultServiceAccountName: new("default-SA"),
+					CookiefileSecret:          new("yummy/.gitcookies"),
 				},
 				Agent: prowapi.KubernetesAgent,
 				Refs: &prowapi.Refs{
@@ -1226,11 +1218,11 @@ func TestProwJobToPod(t *testing.T) {
 						MediaTypes:   map[string]string{"log": "text/plain"},
 					},
 					// Specify K8s SA rather than cloud storage secret key.
-					DefaultServiceAccountName: pStr("default-SA"),
-					CookiefileSecret:          pStr("yummy/.gitcookies"),
-					RunAsGroup:                pInt64(1000),
-					RunAsUser:                 pInt64(1000),
-					FsGroup:                   pInt64(2000),
+					DefaultServiceAccountName: new("default-SA"),
+					CookiefileSecret:          new("yummy/.gitcookies"),
+					RunAsGroup:                new(int64(1000)),
+					RunAsUser:                 new(int64(1000)),
+					FsGroup:                   new(int64(2000)),
 				},
 				Agent: prowapi.KubernetesAgent,
 				Refs: &prowapi.Refs{
@@ -1287,11 +1279,11 @@ func TestProwJobToPod(t *testing.T) {
 						MediaTypes:   map[string]string{"log": "text/plain"},
 					},
 					// Specify K8s SA rather than cloud storage secret key.
-					DefaultServiceAccountName: pStr("default-SA"),
-					CookiefileSecret:          pStr("yummy/.gitcookies"),
-					RunAsGroup:                pInt64(1000),
-					RunAsUser:                 pInt64(1000),
-					FsGroup:                   pInt64(2000),
+					DefaultServiceAccountName: new("default-SA"),
+					CookiefileSecret:          new("yummy/.gitcookies"),
+					RunAsGroup:                new(int64(1000)),
+					RunAsUser:                 new(int64(1000)),
+					FsGroup:                   new(int64(2000)),
 					SchedulingOptions: &prowapi.SchedulingOptions{
 						Tolerations: []coreapi.Toleration{
 							{
@@ -1422,7 +1414,7 @@ func TestProwJobToPod(t *testing.T) {
 				t.Fatalf("failed to unmarshal fixture: %v", err)
 			}
 			if !equality.Semantic.DeepEqual(got, expected) {
-				t.Errorf("unexpected pod diff:\n%s. You can update the fixtures by running this test with UPDATE=true if this is expected.", diff.ObjectReflectDiff(expected, got))
+				t.Errorf("unexpected pod diff:\n%s. You can update the fixtures by running this test with UPDATE=true if this is expected.", diff.Diff(expected, got))
 			}
 			if err := checkEnv(*got, "sidecar", sidecar.NewOptions()); err != nil {
 				t.Errorf("bad sidecar env: %v", err)
@@ -1466,7 +1458,7 @@ func TestProwJobToPod_setsTerminationGracePeriodSeconds(t *testing.T) {
 			name: "Existing GracePeriodSeconds is not overwritten",
 			prowjob: &prowapi.ProwJob{
 				Spec: prowapi.ProwJobSpec{
-					PodSpec: &coreapi.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(60)), Containers: []coreapi.Container{{}}},
+					PodSpec: &coreapi.PodSpec{TerminationGracePeriodSeconds: new(int64(60)), Containers: []coreapi.Container{{}}},
 					DecorationConfig: &prowapi.DecorationConfig{
 						UtilityImages: &prowapi.UtilityImages{},
 						Timeout:       &prowapi.Duration{Duration: 10 * time.Second},
@@ -1669,7 +1661,7 @@ func TestDecorate(t *testing.T) {
 						},
 						GCSCredentialsSecret:        &gCSCredentialsSecret,
 						DefaultServiceAccountName:   &defaultServiceAccountName,
-						SetLimitEqualsMemoryRequest: ptr.To(true),
+						SetLimitEqualsMemoryRequest: new(true),
 					},
 					Refs: &prowapi.Refs{
 						Org: "org", Repo: "repo", BaseRef: "main", BaseSHA: "abcd1234",
@@ -1730,7 +1722,7 @@ func TestDecorate(t *testing.T) {
 						},
 						GCSCredentialsSecret:        &gCSCredentialsSecret,
 						DefaultServiceAccountName:   &defaultServiceAccountName,
-						SetLimitEqualsMemoryRequest: ptr.To(true),
+						SetLimitEqualsMemoryRequest: new(true),
 						DefaultMemoryRequest:        resourcePtr("4Gi"),
 					},
 					Refs: &prowapi.Refs{

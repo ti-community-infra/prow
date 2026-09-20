@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dgrijalva/jwt-go/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/sirupsen/logrus"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
@@ -48,6 +48,7 @@ type GitHubOptions struct {
 	AllowDirectAccess bool
 	AppID             string
 	AppPrivateKeyPath string
+	SigningKeyPath    string
 
 	ThrottleHourlyTokens int
 	ThrottleAllowBurst   int
@@ -152,6 +153,7 @@ func (o *GitHubOptions) addFlags(fs *flag.FlagSet, paramFuncs ...FlagParameter) 
 	fs.IntVar(&o.max404Retries, "github-client.max-404-retries", github.DefaultMax404Retries, "Maximum number of retries that will be used for a 404-ing request to the GitHub API.")
 	fs.DurationVar(&o.maxSleepTime, "github-client.backoff-timeout", github.DefaultMaxSleepTime, "Largest allowable Retry-After time for requests to the GitHub API.")
 	fs.DurationVar(&o.initialDelay, "github-client.initial-delay", github.DefaultInitialDelay, "Initial delay before retries begin for requests to the GitHub API.")
+	fs.StringVar(&o.SigningKeyPath, "git-signing-key-path", "", "Path to an SSH private key for signing git commits. When set, all commits made by the git client are signed using SSH.")
 
 	o.MergeMode = defaults.MergeMode
 	fs.Var(&o.MergeMode, "merge-mode", fmt.Sprintf("How pull requests are merged, one of %v. 'sync' only uses the synchronous merge endpoint, 'async' only uses the asynchronous one and 'auto' falls back to the asynchronous endpoint for stacked pull requests. Only components that merge pull requests (Tide) act on it.", github.ValidMergeModes))
@@ -354,6 +356,7 @@ func (o *GitHubOptions) GitClientFactory(cookieFilePath string, cacheDir *string
 		CookieFilePath: cookieFilePath,
 		Host:           o.Host,
 		Persist:        &persistCache,
+		SigningKeyPath: o.SigningKeyPath,
 	}
 	if cacheDir != nil && *cacheDir != "" {
 		opts.CacheDirBase = cacheDir

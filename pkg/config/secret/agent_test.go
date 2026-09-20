@@ -17,10 +17,10 @@ limitations under the License.
 package secret
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -28,7 +28,152 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/prow/pkg/logrusutil"
+	"sigs.k8s.io/prow/pkg/secretutil"
 )
+
+func TestAddExpiringToken(t *testing.T) {
+	testCases := []struct {
+		name           string
+		initialSecrets map[string]time.Time
+		value          string
+		expiresAt      time.Time
+		want           map[string]time.Time
+	}{
+		{
+			name:           "records non-empty token with non-zero expiry",
+			initialSecrets: map[string]time.Time{},
+			value:          "ghs_abc",
+			expiresAt:      time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC),
+			want:           map[string]time.Time{"ghs_abc": time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)},
+		},
+		{
+			name:           "empty value is a no-op",
+			initialSecrets: map[string]time.Time{},
+			value:          "",
+			expiresAt:      time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC),
+			want:           map[string]time.Time{},
+		},
+		{
+			name:           "zero expiresAt is a no-op",
+			initialSecrets: map[string]time.Time{},
+			value:          "skip-me",
+			expiresAt:      time.Time{},
+			want:           map[string]time.Time{},
+		},
+		{
+			name:           "past expiry is not kept on map after add",
+			initialSecrets: map[string]time.Time{},
+			value:          "dead-token",
+			expiresAt:      time.Date(1980, 6, 15, 12, 0, 0, 0, time.UTC),
+			want:           map[string]time.Time{},
+		},
+		{
+			name: "add drops expired keys already in map; keeps non-expired and new entry",
+			initialSecrets: map[string]time.Time{
+				"keep": time.Date(2099, 5, 1, 0, 0, 0, 0, time.UTC),
+				"gone": time.Date(1980, 6, 15, 12, 0, 0, 0, time.UTC),
+			},
+			value:     "newtok",
+			expiresAt: time.Date(2099, 6, 1, 0, 0, 0, 0, time.UTC),
+			want: map[string]time.Time{
+				"keep":   time.Date(2099, 5, 1, 0, 0, 0, 0, time.UTC),
+				"newtok": time.Date(2099, 6, 1, 0, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &agent{
+				secretsMap:        make(map[string]secretReloader),
+				expiringTokens:    tc.initialSecrets,
+				ReloadingCensorer: secretutil.NewCensorer(),
+			}
+			a.addExpiringToken(tc.value, tc.expiresAt)
+			if !reflect.DeepEqual(a.expiringTokens, tc.want) {
+				t.Fatalf("expiringTokens = %#v, want %#v", a.expiringTokens, tc.want)
+			}
+		})
+	}
+}
+
+func TestStartResetsExpiringTokens(t *testing.T) {
+	a := &agent{
+		secretsMap: make(map[string]secretReloader),
+		expiringTokens: map[string]time.Time{
+			"stale-token": time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		ReloadingCensorer: secretutil.NewCensorer(),
+	}
+
+	if err := a.Start(nil); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if len(a.expiringTokens) != 0 {
+		t.Fatalf("expiringTokens after Start = %v, want empty map", a.expiringTokens)
+	}
+}
+
+func TestExpiringTokenCensoring(t *testing.T) {
+	token := "ghs_secret123"
+	input := []byte("https://x-access-token:" + token + "@github.com/org/repo")
+	censored := "https://x-access-token:" + "XXXXXXXXXXXXX" + "@github.com/org/repo"
+
+	t.Run("active token is censored", func(t *testing.T) {
+		a := &agent{
+			secretsMap:        make(map[string]secretReloader),
+			expiringTokens:    make(map[string]time.Time),
+			ReloadingCensorer: secretutil.NewCensorer(),
+		}
+		a.addExpiringToken(token, time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC))
+
+		got := a.Censor(input)
+		if string(got) != censored {
+			t.Fatalf("Censor() = %q, want %q", string(got), censored)
+		}
+	})
+
+	t.Run("expired token is not censored", func(t *testing.T) {
+		a := &agent{
+			secretsMap:        make(map[string]secretReloader),
+			expiringTokens:    make(map[string]time.Time),
+			ReloadingCensorer: secretutil.NewCensorer(),
+		}
+		a.addExpiringToken(token, time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC))
+
+		got := a.Censor(input)
+		if string(got) != string(input) {
+			t.Fatalf("Censor() = %q, want %q (unchanged)", string(got), string(input))
+		}
+	})
+}
+
+func TestGetSecretsIncludesExpiringTokens(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "secret")
+	if err := os.WriteFile(secretPath, []byte("file-secret"), 0644); err != nil {
+		t.Fatalf("failed to write secret file: %v", err)
+	}
+
+	a := &agent{
+		secretsMap:        make(map[string]secretReloader),
+		expiringTokens:    make(map[string]time.Time),
+		ReloadingCensorer: secretutil.NewCensorer(),
+	}
+	if err := a.Add(secretPath); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	a.addExpiringToken("expiring-token", time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	secrets := a.getSecrets()
+	if !secrets.Has("file-secret") {
+		t.Errorf("getSecrets() missing file-based secret")
+	}
+	if !secrets.Has("expiring-token") {
+		t.Errorf("getSecrets() missing expiring token")
+	}
+}
 
 func TestCensoringFormatter(t *testing.T) {
 	var err error
@@ -115,62 +260,107 @@ func TestAddWithParser(t *testing.T) {
 func testAddWithParser(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	secretPath := filepath.Join(t.TempDir(), "secret")
+	writeSecret(t, secretPath, "1", 1)
 
-	secretPath := filepath.Join(tmpDir, "secret")
-	if err := os.WriteFile(secretPath, []byte("1"), 0644); err != nil {
-		t.Fatalf("failed to write initial content of secret: %v", err)
-	}
-
-	vals := make(chan int, 3)
-	errs := make(chan error, 3)
-	generator, err := AddWithParser(
-		secretPath,
-		func(raw []byte) (int, error) {
+	errs := make(chan error, 8)
+	loader := &parsingSecretReloader[int]{
+		path: secretPath,
+		parsingFN: func(raw []byte) (int, error) {
 			val, err := strconv.Atoi(string(raw))
 			if err != nil {
 				errs <- err
-				return val, err
 			}
-			vals <- val
 			return val, err
 		},
-	)
+	}
+
+	// reloadCensor is invoked after the parsed value is stored (reloader.go:44 and :82), so
+	// receiving from this channel guarantees loader.get() observes the published value. The
+	// parsingFN itself must NOT be used as the signal: it runs at reloader.go:72, before the
+	// store, which is what made this test flaky under -race.
+	published := make(chan int, 8)
+	if err := loader.start(func() { published <- loader.get() }); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	last := 0
+	awaitPublish := func(want int) {
+		t.Helper()
+		for {
+			select {
+			case got := <-published:
+				// The reload loop starts with a zero lastModTime, so its first tick always
+				// re-reads and republishes the current value. Repeats are meaningless; any
+				// other unexpected value is a real regression.
+				if got == last && got != want {
+					continue
+				}
+				if got != want {
+					t.Fatalf("expected published value %d, got %d", want, got)
+				}
+				last = got
+				if actual := loader.get(); actual != want {
+					t.Fatalf("expected value %d from getter after publish, got %d", want, actual)
+				}
+				return
+			case <-time.After(30 * time.Second):
+				t.Fatalf("timed out waiting for value %d to be published", want)
+			}
+		}
+	}
+
+	awaitPublish(1) // initial load, performed synchronously by start()
+
+	writeSecret(t, secretPath, "2", 2)
+	awaitPublish(2)
+
+	// A failed parse must leave the stored value untouched.
+	writeSecret(t, secretPath, "not-a-number", 3)
+	select {
+	case err := <-errs:
+		if want := `strconv.Atoi: parsing "not-a-number": invalid syntax`; err.Error() != want {
+			t.Fatalf("expected error %q, got %q", want, err.Error())
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("timed out waiting for the parse error")
+	}
+
+	// Bracket the negative assertion with a positive one: the reload loop is serialized, so a
+	// publish for the failed parse would necessarily be signalled before this one. Observing 3
+	// as the next published value proves nothing was published for "not-a-number".
+	writeSecret(t, secretPath, "3", 4)
+	awaitPublish(3)
+}
+
+// writeSecret writes content to path and advances its mtime by generation seconds.
+func writeSecret(t *testing.T, path, content string, generation int) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write secret: %v", err)
+	}
+	// Guarantee the mtime strictly advances regardless of filesystem timestamp granularity, so
+	// the reloader always detects the change.
+	mtime := time.Now().Add(time.Duration(generation) * time.Second)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("failed to set secret mtime: %v", err)
+	}
+}
+
+func TestAddWithParserRegistersSecret(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "secret")
+	writeSecret(t, secretPath, "1", 1)
+
+	generator, err := AddWithParser(secretPath, func(raw []byte) (int, error) {
+		return strconv.Atoi(string(raw))
+	})
 	if err != nil {
 		t.Fatalf("AddWithParser failed: %v", err)
 	}
-
-	checkValueAndErr := func(expected int, e error) {
-		t.Helper()
-		select {
-		case v := <-vals:
-			if v != expected {
-				t.Errorf("expected value to get updated to %d but got updated to %d", expected, v)
-			}
-			break
-		case err := <-errs:
-			if e == nil || e.Error() != err.Error() {
-				t.Fatalf("expected error %v, got %v", e, err)
-			}
-		// the agent reloads every second, so ten seconds should be plenty
-		case <-time.After(10 * time.Second):
-			t.Fatalf("timed out waiting for value %d and error %d", expected, e)
-		}
-		if actual := generator(); actual != expected {
-			t.Errorf("expected value %d from generator, got %d", expected, actual)
-		}
+	if got := generator(); got != 1 {
+		t.Errorf("expected 1 from generator, got %d", got)
 	}
-	checkValueAndErr(1, nil)
-
-	if err := os.WriteFile(secretPath, []byte("2"), 0644); err != nil {
-		t.Fatalf("failed to update secret on disk: %v", err)
+	if got := string(GetSecret(secretPath)); got != "1" {
+		t.Errorf("expected raw secret %q to be registered with the agent, got %q", "1", got)
 	}
-	// expect secret to get updated
-	checkValueAndErr(2, nil)
-
-	if err := os.WriteFile(secretPath, []byte("not-a-number"), 0644); err != nil {
-		t.Fatalf("failed to update secret on disk: %v", err)
-	}
-	// expect secret to remain unchanged and an error in the parsing func
-	checkValueAndErr(2, errors.New(`strconv.Atoi: parsing "not-a-number": invalid syntax`))
 }

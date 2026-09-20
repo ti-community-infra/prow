@@ -450,7 +450,7 @@ func TestCreateRefs(t *testing.T) {
 		t.Errorf("unexpected error creating refs: %v", err)
 	}
 	if !equality.Semantic.DeepEqual(expected, actual) {
-		t.Errorf("diff between expected and actual refs:%s", diff.ObjectReflectDiff(expected, actual))
+		t.Errorf("diff between expected and actual refs:%s", diff.Diff(expected, actual))
 	}
 }
 
@@ -588,7 +588,7 @@ func TestFailedJobs(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if actual, expected := failedJobs(me, current, tc.messages...), tc.expected; !equality.Semantic.DeepEqual(expected, actual) {
-				t.Errorf("%s", diff.ObjectReflectDiff(expected, actual))
+				t.Errorf("%s", diff.Diff(expected, actual))
 			}
 		})
 	}
@@ -3206,7 +3206,6 @@ func TestTriggerJobs(t *testing.T) {
 		c: cfg,
 	}
 	for _, tc := range testcases {
-		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

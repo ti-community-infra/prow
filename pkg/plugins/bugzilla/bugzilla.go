@@ -323,7 +323,7 @@ type githubClient interface {
 	AddLabel(owner, repo string, number int, label string) error
 	RemoveLabel(owner, repo string, number int, label string) error
 	WasLabelAddedByHuman(org, repo string, num int, label string) (bool, error)
-	Query(ctx context.Context, q interface{}, vars map[string]interface{}) error
+	Query(ctx context.Context, q any, vars map[string]any) error
 }
 
 func handleGenericComment(pc plugins.Agent, e github.GenericCommentEvent) (err error) {
@@ -571,11 +571,12 @@ func processQuery(query *emailToLoginQuery, email string, log *logrus.Entry) str
 	case 1:
 		return fmt.Sprintf("Requesting review from QA contact:\n/cc @%s", query.Search.Edges[0].Node.User.Login)
 	default:
-		response := fmt.Sprintf("Multiple GitHub users were found matching the public email listed for the QA contact in Bugzilla (%s), skipping review request. List of users with matching email:", email)
+		var response strings.Builder
+		response.WriteString(fmt.Sprintf("Multiple GitHub users were found matching the public email listed for the QA contact in Bugzilla (%s), skipping review request. List of users with matching email:", email))
 		for _, edge := range query.Search.Edges {
-			response += fmt.Sprintf("\n\t- %s", edge.Node.User.Login)
+			response.WriteString(fmt.Sprintf("\n\t- %s", edge.Node.User.Login))
 		}
-		return response
+		return response.String()
 	}
 }
 
@@ -590,16 +591,17 @@ func handle(e event, gc githubClient, bc bugzilla.Client, options plugins.Bugzil
 		if !isBugAllowed(bug, options.AllowedGroups) {
 			// ignore bugs that are in non-allowed groups for this repo
 			if e.opened || refreshCommandMatch.MatchString(e.body) {
-				response := fmt.Sprintf(bugLink+" is in a bug group that is not in the allowed groups for this repo.", e.bugId, bc.Endpoint(), e.bugId)
+				var response strings.Builder
+				response.WriteString(fmt.Sprintf(bugLink+" is in a bug group that is not in the allowed groups for this repo.", e.bugId, bc.Endpoint(), e.bugId))
 				if len(options.AllowedGroups) > 0 {
-					response += "\nAllowed groups for this repo are:"
+					response.WriteString("\nAllowed groups for this repo are:")
 					for _, group := range options.AllowedGroups {
-						response += "\n- " + group
+						response.WriteString("\n- " + group)
 					}
 				} else {
-					response += " There are no allowed bug groups configured for this repo."
+					response.WriteString(" There are no allowed bug groups configured for this repo.")
 				}
-				return comment(response)
+				return comment(response.String())
 			}
 			return nil
 		}
@@ -697,7 +699,7 @@ To reference a bug, add 'Bug XXX:' to the title of this pull request and request
 			} else {
 				query := &emailToLoginQuery{}
 				email := bug.QAContactDetail.Email
-				queryVars := map[string]interface{}{
+				queryVars := map[string]any{
 					"email": githubql.String(email),
 				}
 				err := gc.Query(context.Background(), query, queryVars)
@@ -712,13 +714,13 @@ To reference a bug, add 'Bug XXX:' to the title of this pull request and request
 			}
 		} else {
 			log.Debug("Invalid bug found.")
-			var formattedReasons string
+			var formattedReasons strings.Builder
 			for _, reason := range why {
-				formattedReasons += fmt.Sprintf(" - %s\n", reason)
+				formattedReasons.WriteString(fmt.Sprintf(" - %s\n", reason))
 			}
 			response = fmt.Sprintf(`This pull request references `+bugLink+`, which is invalid:
 %s
-Comment <code>/bugzilla refresh</code> to re-evaluate validity if changes to the Bugzilla bug are made, or edit the title of this pull request to link to a different bug.`, e.bugId, bc.Endpoint(), e.bugId, formattedReasons)
+Comment <code>/bugzilla refresh</code> to re-evaluate validity if changes to the Bugzilla bug are made, or edit the title of this pull request to link to a different bug.`, e.bugId, bc.Endpoint(), e.bugId, formattedReasons.String())
 		}
 	}
 
@@ -996,7 +998,7 @@ func handleMerge(e event, gc githubClient, bc bugzilla.Client, options plugins.B
 			pr, err := gc.GetPullRequest(item.Org, item.Repo, item.Num)
 			if err != nil {
 				log.WithError(err).Warn("Unexpected error checking merge state of related pull request.")
-				return comment(formatError(fmt.Sprintf("checking the state of a related pull request at https://github.com/%s/%s/pull/%d", item.Org, item.Repo, item.Num), bc.Endpoint(), e.bugId, err))
+				return comment(formatError(fmt.Sprintf("checking the state of a related pull request at https://%s/%s/%s/pull/%d", github.DefaultHost, item.Org, item.Repo, item.Num), bc.Endpoint(), e.bugId, err))
 			}
 			merged = pr.Merged
 			state = pr.State
@@ -1017,7 +1019,7 @@ func handleMerge(e event, gc githubClient, bc bugzilla.Client, options plugins.B
 	}
 
 	link := func(bug bugzilla.ExternalBug) string {
-		return fmt.Sprintf("[%s/%s#%d](https://github.com/%s/%s/pull/%d)", bug.Org, bug.Repo, bug.Num, bug.Org, bug.Repo, bug.Num)
+		return fmt.Sprintf("[%s/%s#%d](https://%s/%s/%s/pull/%d)", bug.Org, bug.Repo, bug.Num, github.DefaultHost, bug.Org, bug.Repo, bug.Num)
 	}
 
 	mergedMessage := func(statement string) string {
@@ -1068,7 +1070,7 @@ func handleCherrypick(e event, gc githubClient, bc bugzilla.Client, options plug
 	pr, err := gc.GetPullRequest(e.org, e.repo, e.cherrypickFromPRNum)
 	if err != nil {
 		log.WithError(err).Warn("Unexpected error getting title of pull request being cherrypicked from.")
-		return comment(fmt.Sprintf("Error creating a cherry-pick bug in Bugzilla: failed to check the state of cherrypicked pull request at https://github.com/%s/%s/pull/%d: %v.\nPlease contact an administrator to resolve this issue, then request a bug refresh with <code>/bugzilla refresh</code>.", e.org, e.repo, e.cherrypickFromPRNum, err))
+		return comment(fmt.Sprintf("Error creating a cherry-pick bug in Bugzilla: failed to check the state of cherrypicked pull request at https://%s/%s/%s/pull/%d: %v.\nPlease contact an administrator to resolve this issue, then request a bug refresh with <code>/bugzilla refresh</code>.", github.DefaultHost, e.org, e.repo, e.cherrypickFromPRNum, err))
 	}
 	// Attempt to identify bug from PR title
 	bugID, bugMissing, err := bugIDFromTitle(pr.Title)
@@ -1239,7 +1241,7 @@ func handleClose(e event, gc githubClient, bc bugzilla.Client, options plugins.B
 						}
 						response += fmt.Sprintf(" All external bug links have been closed. The bug has been moved to the %s state.", options.StateAfterClose)
 					}
-					bzComment := &bugzilla.CommentCreate{ID: bug.ID, Comment: fmt.Sprintf("Bug status changed to %s as previous linked PR https://github.com/%s/%s/pull/%d has been closed", options.StateAfterClose.Status, e.org, e.repo, e.number), IsPrivate: true}
+					bzComment := &bugzilla.CommentCreate{ID: bug.ID, Comment: fmt.Sprintf("Bug status changed to %s as previous linked PR https://%s/%s/%s/pull/%d has been closed", options.StateAfterClose.Status, github.DefaultHost, e.org, e.repo, e.number), IsPrivate: true}
 					if _, err := bc.CreateComment(bzComment); err != nil {
 						response += "\nWarning: Failed to comment on Bugzilla bug with reason for changed state."
 					}

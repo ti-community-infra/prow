@@ -24,12 +24,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,9 +42,9 @@ import (
 	gitignore "github.com/denormal/go-gitignore"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/robfig/cron/v3"
 	"github.com/sirupsen/logrus"
 	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
-	"gopkg.in/robfig/cron.v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -59,6 +61,10 @@ import (
 	"sigs.k8s.io/prow/pkg/kube"
 	"sigs.k8s.io/prow/pkg/pod-utils/decorate"
 	"sigs.k8s.io/prow/pkg/pod-utils/downwardapi"
+)
+
+var cronParser = cron.NewParser(
+	cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 )
 
 const (
@@ -143,6 +149,7 @@ type ProwConfig struct {
 	ConfigVersionSHA     string               `json:"config_version_sha,omitempty"`
 	Tide                 Tide                 `json:"tide,omitempty"`
 	Plank                Plank                `json:"plank,omitempty"`
+	Pipeline             Pipeline             `json:"pipeline,omitempty"`
 	Sinker               Sinker               `json:"sinker,omitempty"`
 	Deck                 Deck                 `json:"deck,omitempty"`
 	BranchProtection     BranchProtection     `json:"branch-protection"`
@@ -271,10 +278,8 @@ func (c *Config) InRepoConfigEnabled(identifier string) bool {
 // Assumes that config will not include http:// or https://
 func (c *Config) InRepoConfigAllowsCluster(clusterName, identifier string) bool {
 	for _, key := range keysForIdentifier(identifier) {
-		for _, allowedCluster := range c.InRepoConfig.AllowedClusters[key] {
-			if allowedCluster == clusterName {
-				return true
-			}
+		if slices.Contains(c.InRepoConfig.AllowedClusters[key], clusterName) {
+			return true
 		}
 	}
 	return false
@@ -640,6 +645,17 @@ func (c *Controller) ReportTemplateForRepo(refs *prowapi.Refs) *template.Templat
 		return tmplByOrg
 	}
 	return def
+}
+
+// Pipeline is config for the Tekton pipeline controller.
+type Pipeline struct {
+	// AllowConcurrentPostsubmitJobs controls the duplicate job abort behavior for Tekton PipelineRuns.
+	// When disabled (default): all duplicate jobs (presubmit and postsubmit) are aborted when a newer
+	// job with the same identifier is detected.
+	// When enabled: only presubmit jobs are aborted; postsubmit jobs are allowed to run concurrently
+	// even if duplicates exist.
+	// This flag only affects jobs using the Tekton agent (agent: tekton-pipeline).
+	AllowConcurrentPostsubmitJobs bool `json:"allow_concurrent_postsubmit_jobs,omitempty"`
 }
 
 // Plank is config for the plank controller.
@@ -1908,7 +1924,7 @@ func loadConfig(prowConfig, jobConfig string, additionalProwConfigDirs []string,
 }
 
 // yamlToConfig converts a yaml file into a Config object.
-func yamlToConfig(path string, nc interface{}, opts ...yaml.JSONOpt) error {
+func yamlToConfig(path string, nc any, opts ...yaml.JSONOpt) error {
 	b, err := ReadFileMaybeGZIP(path)
 	if err != nil {
 		return fmt.Errorf("error reading %s: %w", path, err)
@@ -2019,18 +2035,14 @@ func mergeJobConfigs(a, b JobConfig) (JobConfig, error) {
 
 	// *** Presubmits ***
 	c.PresubmitsStatic = make(map[string][]Presubmit)
-	for repo, jobs := range a.PresubmitsStatic {
-		c.PresubmitsStatic[repo] = jobs
-	}
+	maps.Copy(c.PresubmitsStatic, a.PresubmitsStatic)
 	for repo, jobs := range b.PresubmitsStatic {
 		c.PresubmitsStatic[repo] = append(c.PresubmitsStatic[repo], jobs...)
 	}
 
 	// *** Postsubmits ***
 	c.PostsubmitsStatic = make(map[string][]Postsubmit)
-	for repo, jobs := range a.PostsubmitsStatic {
-		c.PostsubmitsStatic[repo] = jobs
-	}
+	maps.Copy(c.PostsubmitsStatic, a.PostsubmitsStatic)
 	for repo, jobs := range b.PostsubmitsStatic {
 		c.PostsubmitsStatic[repo] = append(c.PostsubmitsStatic[repo], jobs...)
 	}
@@ -2427,7 +2439,7 @@ func (c Config) validatePeriodics(periodics []Periodic) error {
 		}
 
 		if p.Cron != "" {
-			if _, err := cron.Parse(p.Cron); err != nil {
+			if _, err := cronParser.Parse(p.Cron); err != nil {
 				errs = append(errs, fmt.Errorf("invalid cron string %s in periodic %s: %w", p.Cron, p.Name, err))
 			}
 		}
@@ -2544,7 +2556,7 @@ func parseProwConfig(c *Config) error {
 	// We could use sprig.FuncMap() instead in feature.
 	jenkinsFuncMap := template.FuncMap{
 		"replace": func(old, new, src string) string {
-			return strings.Replace(src, old, new, -1)
+			return strings.ReplaceAll(src, old, new)
 		},
 	}
 
@@ -2765,6 +2777,14 @@ func parseProwConfig(c *Config) error {
 		}
 	}
 
+	for key, policy := range c.Tide.GitHubMergeBlocksPolicyMap {
+		switch policy {
+		case GitHubMergeBlocksIgnore, GitHubMergeBlocksPermit, GitHubMergeBlocksBlock:
+		default:
+			return fmt.Errorf("tide.github_merge_blocks_policy[%q] has invalid value %q, must be one of: ignore, permit, block", key, policy)
+		}
+	}
+
 	if c.ProwJobNamespace == "" {
 		c.ProwJobNamespace = "default"
 	}
@@ -2857,10 +2877,8 @@ func parseTideMergeType(tideMergeTypes map[string]TideOrgMergeType) utilerrors.A
 
 func validateLabels(labels map[string]string) error {
 	for label, value := range labels {
-		for _, prowLabel := range decorate.Labels() {
-			if label == prowLabel {
-				return fmt.Errorf("label %s is reserved for decoration", label)
-			}
+		if slices.Contains(decorate.Labels(), label) {
+			return fmt.Errorf("label %s is reserved for decoration", label)
 		}
 		if errs := validation.IsQualifiedName(label); len(errs) != 0 {
 			return fmt.Errorf("invalid label %s: %v", label, errs)
@@ -3438,7 +3456,17 @@ const (
 	contextDescriptionBaseSHADelimiterDeprecated = " Basesha:"
 	contextDescriptionMaxLen                     = 140 // https://developer.github.com/v3/repos/deployments/#parameters-2
 	elide                                        = " ... "
+
+	// SkipRetestSentinel can be embedded in a GitHub status description to signal
+	// that Tide should treat the context as permanently passing for the current HEAD SHA
+	// and not retest it when the base branch moves.
+	SkipRetestSentinel = "[prow:skip-retest]"
 )
+
+// IsSkipRetest returns true if the description contains the SkipRetestSentinel.
+func IsSkipRetest(description string) bool {
+	return strings.Contains(description, SkipRetestSentinel)
+}
 
 // truncate converts "really long messages" into "really ... messages".
 func truncate(in string, maxLen int) string {

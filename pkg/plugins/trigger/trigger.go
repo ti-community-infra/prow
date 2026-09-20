@@ -107,9 +107,11 @@ func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) 
 		Description: `The trigger plugin starts jobs in reaction to various events.
 <br>Presubmit jobs are run automatically on pull requests that are trusted and not in a draft state with file changes matching the file filters and targeting a branch matching the branch filters.
 <br>A pull request is considered trusted if the author is a member of the 'trusted organization' for the repository or if such a member has left an '/ok-to-test' command on the PR.
+<br>Trusted status granted by '/ok-to-test' can be revoked by a trusted user with '/ok-to-test cancel', which restores the 'needs-ok-to-test' label.
 <br>Trigger will not automatically start jobs for a PR in draft state, and if a PR is changed to draft it cancels pending jobs.
 <br>If jobs are not run automatically for a PR because it is not trusted or is in draft state, a trusted user can still start jobs manually via the '/test' command.
 <br>The '/retest' command can be used to rerun jobs that have reported failure.
+<br>The '/test-manual-required' command can be used to start required manually triggered presubmit jobs.
 <br>Trigger starts postsubmit jobs when commits are pushed if the filters on the job match files and branches affected by that push.`,
 		Config:  configInfo,
 		Snippet: yamlSnippet,
@@ -120,6 +122,13 @@ func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) 
 		Featured:    false,
 		WhoCanUse:   "Members of the trusted organization for the repo.",
 		Examples:    []string{"/ok-to-test"},
+	})
+	pluginHelp.AddCommand(pluginhelp.Command{
+		Usage:       "/ok-to-test cancel",
+		Description: "Revokes trusted status previously granted by '/ok-to-test', removing the 'ok-to-test' label and restoring 'needs-ok-to-test'.",
+		Featured:    false,
+		WhoCanUse:   "Members of the trusted organization for the repo.",
+		Examples:    []string{"/ok-to-test cancel"},
 	})
 	pluginHelp.AddCommand(pluginhelp.Command{
 		Usage:       "/test [<job name>|all]",
@@ -134,6 +143,13 @@ func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) 
 		Featured:    true,
 		WhoCanUse:   "Anyone can trigger this command on a trusted PR.",
 		Examples:    []string{"/retest"},
+	})
+	pluginHelp.AddCommand(pluginhelp.Command{
+		Usage:       "/test-manual-required",
+		Description: "Manually starts required presubmit jobs that require an explicit trigger and do not use file change conditions.",
+		Featured:    true,
+		WhoCanUse:   "Anyone can trigger this command on a trusted PR.",
+		Examples:    []string{"/test-manual-required"},
 	})
 	pluginHelp.AddCommand(pluginhelp.Command{
 		Usage:       "/test ?",
@@ -162,8 +178,11 @@ type githubClient interface {
 	RemoveLabel(org, repo string, number int, label string) error
 	TriggerGitHubWorkflow(org, repo string, id int) error
 	TriggerFailedGitHubWorkflow(org, repo string, id int) error
+	GetPendingApprovalActionRuns(org, repo, branchName, headSHA string) ([]github.WorkflowRun, error)
+	ApproveGitHubWorkflowRun(org, repo string, id int) error
 	DeleteStaleComments(org, repo string, number int, comments []github.IssueComment, isStale func(github.IssueComment) bool) error
 	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
+	FindIssuesWithOrg(org, query, sort string, asc bool) ([]github.Issue, error)
 }
 
 type trustedPullRequestClient interface {
@@ -211,7 +230,11 @@ func handlePullRequest(pc plugins.Agent, pr github.PullRequestEvent) error {
 }
 
 func handleGenericCommentEvent(pc plugins.Agent, gc github.GenericCommentEvent) error {
-	return handleGenericComment(getClient(pc), pc.PluginConfig.TriggerFor(gc.Repo.Owner.Login, gc.Repo.Name), gc)
+	cp, err := pc.CommentPruner()
+	if err != nil {
+		return err
+	}
+	return handleGenericComment(getClient(pc), cp, pc.PluginConfig.TriggerFor(gc.Repo.Owner.Login, gc.Repo.Name), gc)
 }
 
 func handlePush(pc plugins.Agent, pe github.PushEvent) error {
@@ -263,7 +286,7 @@ func TrustedUser(ghc trustedUserClient, onlyOrgMembers bool, trustedApps []strin
 	// Determine if user is on trusted_apps list.
 	// This allows automatic tests execution for GitHub automations that cannot be added as collaborators.
 	for _, trustedApp := range trustedApps {
-		if tUser := strings.TrimSuffix(user, "[bot]"); tUser == trustedApp {
+		if strings.HasSuffix(user, "[bot]") && strings.TrimSuffix(user, "[bot]") == trustedApp {
 			return okResponse, nil
 		}
 	}

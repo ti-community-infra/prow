@@ -80,7 +80,7 @@ func GetConfiguredJobs(cfg config.Getter, org, repo string) (*configuredjobs.Job
 		orgRepos = []string{fmt.Sprintf("%s/%s", org, repo)}
 	} else {
 		for _, r := range allRepos {
-			o := strings.Split(r, "/")[0]
+			o, _, _ := strings.Cut(r, "/")
 			if o == org {
 				orgRepos = append(orgRepos, r)
 			}
@@ -163,7 +163,7 @@ func GetConfiguredJobs(cfg config.Getter, org, repo string) (*configuredjobs.Job
 }
 
 func safeName(name string) string {
-	return strings.Replace(name, ".", "-", -1)
+	return strings.ReplaceAll(name, ".", "-")
 }
 
 func getStorageProviderAndBucket(cfg config.Getter, org, repo string, job config.JobBase) (provider string, bucket string, err error) {

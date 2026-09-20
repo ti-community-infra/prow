@@ -1,6 +1,3 @@
-//go:build tools
-// +build tools
-
 /*
 Copyright 2021 The Kubernetes Authors.
 
@@ -25,10 +22,9 @@ package tools
 
 import (
 	// linter(s)
-	_ "github.com/golangci/golangci-lint/cmd/golangci-lint"
+	_ "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
 
 	// kubernetes code generators
-	_ "github.com/go-bindata/go-bindata/v3"
 	_ "k8s.io/code-generator/cmd/client-gen"
 	_ "k8s.io/code-generator/cmd/deepcopy-gen"
 	_ "k8s.io/code-generator/cmd/informer-gen"
@@ -36,12 +32,12 @@ import (
 	_ "sigs.k8s.io/controller-tools/cmd/controller-gen"
 
 	// proto generator
-	_ "github.com/golang/protobuf/protoc-gen-go"
+	_ "google.golang.org/protobuf/cmd/protoc-gen-go"
 
 	// test runner
 	_ "gotest.tools/gotestsum"
 
-	_ "github.com/client9/misspell/cmd/misspell"
+	_ "github.com/client9/misspell"
 
 	// image builder
 	_ "github.com/google/ko"
