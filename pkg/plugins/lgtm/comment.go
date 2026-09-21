@@ -3,10 +3,10 @@ package lgtm
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
-	"k8s.io/utils/strings/slices"
 	"sigs.k8s.io/prow/pkg/github"
 )
 
@@ -76,7 +76,7 @@ func notificationMatcher(isBot func(string) bool) func(*comment) bool {
 func parseValidLGTMFromTimelines(commentBody string) []string {
 	var ret []string
 
-	for _, line := range strings.Split(commentBody, "\n") {
+	for line := range strings.SplitSeq(commentBody, "\n") {
 		agreed, login := parseLgtmTimelineRecordLine(line)
 		if login == "" {
 			continue
