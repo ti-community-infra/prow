@@ -89,7 +89,7 @@ func sanitizeFilename(s string) string {
 
 // CompareWithSerializedFixture compares an object that can be marshalled with a golden file containing the
 // serialized version of the data.
-func CompareWithSerializedFixture(t *testing.T, data interface{}) {
+func CompareWithSerializedFixture(t *testing.T, data any) {
 	t.Helper()
 	tempFile, err := os.CreateTemp("", "tmp-serialized")
 	if err != nil {
@@ -117,4 +117,27 @@ func CompareWithSerializedFixture(t *testing.T, data interface{}) {
 		t.Fatalf("could not determine path to golden file: %v", err)
 	}
 	CompareWithFixture(t, goldenFile, tempFile.Name())
+}
+
+// WriteCredentialsFile writes content to a credentials.json file in a temporary
+// directory and returns its path.
+func WriteCredentialsFile(t *testing.T, content string) string {
+	t.Helper()
+	credentialsFile := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(credentialsFile, []byte(content), 0600); err != nil {
+		t.Fatalf("write credentials file: %v", err)
+	}
+	return credentialsFile
+}
+
+// WriteAuthorizedUserCredentialsFile writes a fake Google authorized_user
+// credentials file into a temporary directory and returns its path.
+func WriteAuthorizedUserCredentialsFile(t *testing.T) string {
+	t.Helper()
+	return WriteCredentialsFile(t, `{
+  "type": "authorized_user",
+  "client_id": "fake-client-id",
+  "client_secret": "fake-client-secret",
+  "refresh_token": "fake-refresh-token"
+}`)
 }

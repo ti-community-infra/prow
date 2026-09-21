@@ -678,6 +678,62 @@ func TestDeleteRef(t *testing.T) {
 	}
 }
 
+func TestCreateRef(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/git/refs" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if diff := cmp.Diff(map[string]interface{}{"ref": "refs/heads/my-feature", "sha": "abcde"}, body); diff != "" {
+			t.Errorf("unexpected request body (-want +got):\n%s", diff)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+	if err := getClient(ts.URL).CreateRef("k8s", "kuber", "refs/heads/my-feature", "abcde"); err != nil {
+		t.Fatalf("CreateRef: %v", err)
+	}
+}
+
+func TestUpdateRef(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/git/refs/heads/my-feature" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if diff := cmp.Diff(map[string]interface{}{"force": false, "sha": "abcde"}, body); diff != "" {
+			t.Errorf("unexpected request body (-want +got):\n%s", diff)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	if err := getClient(ts.URL).UpdateRef("k8s", "kuber", "heads/my-feature", "abcde", false); err != nil {
+		t.Fatalf("UpdateRef: %v", err)
+	}
+}
+
+func TestIsUnprocessableEntity(t *testing.T) {
+	err := requestError{StatusCode: http.StatusUnprocessableEntity}
+	if !IsUnprocessableEntity(fmt.Errorf("wrapped: %w", err)) {
+		t.Fatal("expected wrapped 422 error to be recognized")
+	}
+	if IsUnprocessableEntity(requestError{StatusCode: http.StatusBadRequest}) {
+		t.Fatal("did not expect 400 error to be recognized as 422")
+	}
+}
+
 func TestListFileCommits(t *testing.T) {
 	githubResponse := []byte(`
 [
@@ -896,6 +952,26 @@ func TestGetSingleCommit(t *testing.T) {
 		t.Errorf("Didn't expect error: %v", err)
 	} else if commit.Commit.Tree.SHA != "6dcb09b5b57875f334f61aebed695e2e4193db5e" {
 		t.Errorf("Wrong tree-hash: %s", commit.Commit.Tree.SHA)
+	}
+}
+
+func TestGetMergeBase(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/compare/main...abcdef" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"merge_base_commit": {"sha": "deadbeef"}}`)
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	sha, err := c.GetMergeBase("k8s", "kuber", "main", "abcdef")
+	if err != nil {
+		t.Errorf("Didn't expect error: %v", err)
+	} else if sha != "deadbeef" {
+		t.Errorf("Wrong merge-base SHA: %s", sha)
 	}
 }
 
@@ -1396,6 +1472,125 @@ func TestReadPaginatedResults(t *testing.T) {
 				t.Errorf("%s: expected %s, got %s", tc.name, tc.expectedLabels, labels)
 			}
 		}
+	}
+}
+
+func TestReadPaginatedResultsWithValuesSamePathPagination(t *testing.T) {
+	requestCount := 0
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		var labels []Label
+		switch {
+		case r.URL.Query().Get("page") == "":
+			labels = []Label{{Name: "page1"}}
+			w.Header().Set("Link", fmt.Sprintf(
+				`<https://%s%s?per_page=100&page=2>; rel="next"`,
+				r.Host, r.URL.Path))
+		case r.URL.Query().Get("page") == "2":
+			labels = []Label{{Name: "page2"}}
+		default:
+			t.Errorf("Unexpected request: %s", r.URL.String())
+		}
+		b, err := json.Marshal(labels)
+		if err != nil {
+			t.Errorf("Failed to marshal: %v", err)
+		}
+		fmt.Fprint(w, string(b))
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	var labels []Label
+	err := c.readPaginatedResultsWithValues(
+		"/repos/org/repo/branches",
+		url.Values{
+			"per_page":  []string{"100"},
+			"protected": []string{"false"},
+		},
+		"",
+		"",
+		func() interface{} {
+			return &[]Label{}
+		},
+		func(obj interface{}) {
+			labels = append(labels, *(obj.(*[]Label))...)
+		},
+	)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	expected := []Label{{Name: "page1"}, {Name: "page2"}}
+	if !reflect.DeepEqual(labels, expected) {
+		t.Errorf("Expected %v, got %v", expected, labels)
+	}
+	if requestCount != 2 {
+		t.Errorf("Expected 2 requests, got %d", requestCount)
+	}
+}
+
+func TestReadPaginatedResultsWithRedirect(t *testing.T) {
+	// Simulates the scenario where a GitHub API request is redirected (e.g.
+	// due to a repo rename/transfer). After the redirect, resp.Request.URL
+	// differs from the original pagedPath. The pagination URL construction
+	// must still produce a valid URL for the next page.
+	requestCount := 0
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		switch r.URL.Path {
+		case "/repos/old-org/old-repo/branches":
+			newURL := fmt.Sprintf("https://%s/repos/new-org/new-repo/branches", r.Host)
+			if r.URL.RawQuery != "" {
+				newURL += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, newURL, http.StatusMovedPermanently)
+		case "/repos/new-org/new-repo/branches":
+			var labels []Label
+			if r.URL.Query().Get("page") == "" {
+				labels = []Label{{Name: "page1"}}
+				w.Header().Set("Link", fmt.Sprintf(
+					`<https://%s/repos/new-org/new-repo/branches?%s&page=2>; rel="next"`,
+					r.Host, r.URL.RawQuery))
+			} else {
+				labels = []Label{{Name: "page2"}}
+			}
+			b, err := json.Marshal(labels)
+			if err != nil {
+				t.Errorf("Failed to marshal: %v", err)
+			}
+			fmt.Fprint(w, string(b))
+		default:
+			t.Errorf("Unexpected request path: %s (full: %s)", r.URL.Path, r.URL.String())
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	var labels []Label
+	err := c.readPaginatedResultsWithValues(
+		"/repos/old-org/old-repo/branches",
+		url.Values{
+			"per_page":  []string{"100"},
+			"protected": []string{"false"},
+		},
+		"",
+		"",
+		func() interface{} {
+			return &[]Label{}
+		},
+		func(obj interface{}) {
+			labels = append(labels, *(obj.(*[]Label))...)
+		},
+	)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	expected := []Label{{Name: "page1"}, {Name: "page2"}}
+	if !reflect.DeepEqual(labels, expected) {
+		t.Errorf("Expected %v, got %v", expected, labels)
+	}
+	if requestCount != 3 {
+		t.Errorf("Expected 3 requests (redirect + page1 + page2), got %d", requestCount)
 	}
 }
 
@@ -2795,45 +2990,60 @@ func TestCreateRepo(t *testing.T) {
 	orgsRepoName := "orgs-repository"
 	repoDesc := "description of users-repository"
 	testCases := []struct {
-		description string
-		isUser      bool
-		repo        RepoCreateRequest
-		statusCode  int
+		description     string
+		isUser          bool
+		repo            RepoCreateRequest
+		expectedRequest map[string]any
+		statusCode      int
 
 		expectError bool
 		expectRepo  *FullRepo
 	}{
 		{
-			description: "create repo as user",
+			description: "create private repo as user",
 			isUser:      true,
 			repo: RepoCreateRequest{
 				RepoRequest: RepoRequest{
 					Name:        &usersRepoName,
 					Description: &repoDesc,
+					Private:     new(true),
 				},
+			},
+			expectedRequest: map[string]any{
+				"name":        usersRepoName,
+				"description": repoDesc,
+				"private":     true,
 			},
 			statusCode: http.StatusCreated,
 			expectRepo: &FullRepo{
 				Repo: Repo{
 					Name:        "users-repository",
 					Description: "CREATED",
+					Private:     true,
 				},
 			},
 		},
 		{
-			description: "create repo as org",
+			description: "create internal repo as org",
 			isUser:      false,
 			repo: RepoCreateRequest{
 				RepoRequest: RepoRequest{
 					Name:        &orgsRepoName,
 					Description: &repoDesc,
+					Visibility:  new(RepoVisibilityInternal),
 				},
+			},
+			expectedRequest: map[string]any{
+				"name":        orgsRepoName,
+				"description": repoDesc,
+				"visibility":  "internal",
 			},
 			statusCode: http.StatusCreated,
 			expectRepo: &FullRepo{
 				Repo: Repo{
 					Name:        "orgs-repository",
 					Description: "CREATED",
+					Visibility:  RepoVisibilityInternal,
 				},
 			},
 		},
@@ -2845,6 +3055,10 @@ func TestCreateRepo(t *testing.T) {
 					Name:        &orgsRepoName,
 					Description: &repoDesc,
 				},
+			},
+			expectedRequest: map[string]any{
+				"name":        orgsRepoName,
+				"description": repoDesc,
 			},
 			statusCode:  http.StatusForbidden,
 			expectError: true,
@@ -2864,6 +3078,13 @@ func TestCreateRepo(t *testing.T) {
 				b, err := io.ReadAll(r.Body)
 				if err != nil {
 					t.Fatalf("Could not read request body: %v", err)
+				}
+				var requestBody map[string]any
+				if err := json.Unmarshal(b, &requestBody); err != nil {
+					t.Fatalf("Could not unmarshal request body: %v", err)
+				}
+				if diff := cmp.Diff(tc.expectedRequest, requestBody); diff != "" {
+					t.Errorf("unexpected request body (-want +got):\n%s", diff)
 				}
 				var repo Repo
 				switch err := json.Unmarshal(b, &repo); {
@@ -3670,6 +3891,644 @@ func TestIsAppInstalled(t *testing.T) {
 			if installed != tc.expected {
 				t.Fatalf("response: %v doesn't match expected: %v", installed, tc.expected)
 			}
+		})
+	}
+
+	// IsAppInstalled is a GET request, so it should work in dry-run mode too
+	c.dry = true
+	for _, tc := range testCases {
+		t.Run("dry-run/"+tc.name, func(t *testing.T) {
+			installed, err := c.IsAppInstalled(tc.org, tc.repo)
+			if err != nil {
+				t.Fatalf("unexpected error in dry-run mode: %v", err)
+			}
+			if installed != tc.expected {
+				t.Fatalf("response: %v doesn't match expected: %v", installed, tc.expected)
+			}
+		})
+	}
+}
+
+func TestCollaboratorMethodsDryRun(t *testing.T) {
+	// Test that collaborator methods respect dry-run mode
+	callCount := 0
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		t.Errorf("Unexpected API call in dry-run mode: %s %s", r.Method, r.URL.Path)
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	c.dry = true // Enable dry-run mode
+
+	// Test AddCollaborator in dry-run mode
+	err := c.AddCollaborator("org", "repo", "user", Read)
+	if err != nil {
+		t.Errorf("AddCollaborator in dry-run mode should not return error, got: %v", err)
+	}
+
+	// Test RemoveCollaborator in dry-run mode
+	err = c.RemoveCollaborator("org", "repo", "user")
+	if err != nil {
+		t.Errorf("RemoveCollaborator in dry-run mode should not return error, got: %v", err)
+	}
+
+	// Test UpdateCollaboratorPermission in dry-run mode
+	err = c.UpdateCollaboratorPermission("org", "repo", "user", Admin)
+	if err != nil {
+		t.Errorf("UpdateCollaboratorPermission in dry-run mode should not return error, got: %v", err)
+	}
+
+	// Test UpdateCollaborator in dry-run mode
+	err = c.UpdateCollaborator("org", "repo", "user", Write)
+	if err != nil {
+		t.Errorf("UpdateCollaborator in dry-run mode should not return error, got: %v", err)
+	}
+
+	// Test UpdateRepoInvitation in dry-run mode
+	err = c.UpdateCollaboratorRepoInvitation("org", "repo", 12345, Triage)
+	if err != nil {
+		t.Errorf("UpdateRepoInvitation in dry-run mode should not return error, got: %v", err)
+	}
+
+	// Test DeleteRepoInvitation in dry-run mode
+	err = c.DeleteCollaboratorRepoInvitation("org", "repo", 12345)
+	if err != nil {
+		t.Errorf("DeleteRepoInvitation in dry-run mode should not return error, got: %v", err)
+	}
+
+	// Note: ListDirectCollaboratorsWithPermissions is a read operation and wouldn't be affected by dry-run mode
+
+	// Verify no API calls were made
+	if callCount > 0 {
+		t.Errorf("Expected 0 API calls in dry-run mode, but got %d", callCount)
+	}
+}
+
+func TestGetPendingApprovalActionRuns(t *testing.T) {
+	const (
+		org     = "k8s"
+		repo    = "kuber"
+		branch  = "pr-branch"
+		headSHA = "abc123"
+	)
+	var (
+		pendingRun1 = WorkflowRun{ID: 1, HeadSha: headSHA, Status: "action_required"}
+		pendingRun2 = WorkflowRun{ID: 2, HeadSha: headSHA, Status: "action_required"}
+	)
+	testCases := []struct {
+		name          string
+		queryResponse WorkflowRuns
+		expectedRuns  []WorkflowRun
+	}{
+		{
+			name: "single pending run",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pendingRun1},
+			},
+			expectedRuns: []WorkflowRun{pendingRun1},
+		},
+		{
+			name: "multiple pending runs",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pendingRun1, pendingRun2},
+			},
+			expectedRuns: []WorkflowRun{pendingRun1, pendingRun2},
+		},
+		{
+			name: "no pending runs",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{},
+			},
+			expectedRuns: []WorkflowRun{},
+		},
+		{
+			name: "mixed runs, but API filters to pending only",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pendingRun1},
+			},
+			expectedRuns: []WorkflowRun{pendingRun1},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("Expected GET method, got %s", r.Method)
+				}
+				expectedPath := fmt.Sprintf("/repos/%s/%s/actions/runs", org, repo)
+				if r.URL.Path != expectedPath {
+					t.Errorf("Expected path %s, got %s", expectedPath, r.URL.Path)
+				}
+
+				// Check query parameters
+				query := r.URL.Query()
+				if query.Get("head_sha") != headSHA {
+					t.Errorf("Expected query parameter head_sha=%s, got %s", headSHA, query.Get("head_sha"))
+				}
+				expectedEvent := "pull_request OR pull_request_target"
+				if query.Get("event") != expectedEvent {
+					t.Errorf("Expected query parameter event=%q, got %q", expectedEvent, query.Get("event"))
+				}
+				if query.Get("branch") != branch {
+					t.Errorf("Expected query parameter branch=%s, got %s", branch, query.Get("branch"))
+				}
+				if query.Get("status") != "action_required" {
+					t.Errorf("Expected query parameter status=action_required, got %s", query.Get("status"))
+				}
+
+				// Prepare response
+				b, err := json.Marshal(&tc.queryResponse)
+				if err != nil {
+					t.Fatalf("Unexpected error marshalling JSON: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, string(b))
+			}))
+			defer ts.Close()
+
+			c := getClient(ts.URL)
+			runs, err := c.GetPendingApprovalActionRuns(org, repo, branch, headSHA)
+			if err != nil {
+				t.Errorf("Did not expect error, got %v", err)
+			}
+
+			// Check if the returned runs match the expected runs
+			if len(runs) != len(tc.expectedRuns) {
+				t.Errorf("Expected %d runs, got %d", len(tc.expectedRuns), len(runs))
+			}
+			for i, run := range runs {
+				if i < len(tc.expectedRuns) {
+					expectedRun := tc.expectedRuns[i]
+					if run.ID != expectedRun.ID || run.Status != expectedRun.Status || run.HeadSha != expectedRun.HeadSha {
+						t.Errorf("Run %v does not match expected run %v", run, expectedRun)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestApproveGitHubWorkflowRun(t *testing.T) {
+	const (
+		org   = "k8s"
+		repo  = "kuber"
+		runID = 12345
+	)
+
+	testCases := []struct {
+		name        string
+		statusCode  int
+		expectError bool
+	}{
+		{
+			name:        "successful approval",
+			statusCode:  201,
+			expectError: false,
+		},
+		{
+			name:        "already approved (403)",
+			statusCode:  403,
+			expectError: true,
+		},
+		{
+			name:        "run not found (404)",
+			statusCode:  404,
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("Expected POST method, got %s", r.Method)
+				}
+				expectedPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/approve", org, repo, runID)
+				if r.URL.Path != expectedPath {
+					t.Errorf("Expected path %s, got %s", expectedPath, r.URL.Path)
+				}
+
+				w.WriteHeader(tc.statusCode)
+			}))
+			defer ts.Close()
+
+			c := getClient(ts.URL)
+			err := c.ApproveGitHubWorkflowRun(org, repo, runID)
+
+			if tc.expectError && err == nil {
+				t.Errorf("Expected error but got none")
+			}
+			if !tc.expectError && err != nil {
+				t.Errorf("Did not expect error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestGitHubAppTokenFetchingInDryRunMode(t *testing.T) {
+	// Test that GitHub App installation token fetching works in dry-run mode
+	// while other mutations are still blocked
+
+	tokenFetchCalled := false
+	otherMutationCalled := false
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if this is the token fetch endpoint
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/app/installations/") && strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			tokenFetchCalled = true
+			w.WriteHeader(http.StatusCreated)
+			token := AppInstallationToken{
+				Token:     "test-token",
+				ExpiresAt: time.Now().Add(time.Hour),
+			}
+			_ = json.NewEncoder(w).Encode(token)
+			return
+		}
+
+		// Any other POST/PUT/DELETE should not be called in dry-run mode
+		if r.Method != http.MethodGet {
+			otherMutationCalled = true
+			t.Errorf("Unexpected non-GET API call in dry-run mode: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	c.dry = true // Enable dry-run mode
+
+	// Test 1: Token fetching should work in dry-run mode
+	token, err := c.getAppInstallationToken(12345)
+	if err != nil {
+		t.Errorf("getAppInstallationToken should work in dry-run mode, got error: %v", err)
+	}
+	if token == nil {
+		t.Fatal("Expected token to be returned in dry-run mode")
+	}
+	if !tokenFetchCalled {
+		t.Error("Expected token fetch API to be called even in dry-run mode")
+	}
+	// Verify the token struct fields are properly unmarshalled
+	if token.Token == "" {
+		t.Error("Expected token.Token to be set")
+	}
+	if token.Token != "test-token" {
+		t.Errorf("Expected token.Token='test-token', got %q", token.Token)
+	}
+	if token.ExpiresAt.IsZero() {
+		t.Error("Expected token.ExpiresAt to be set")
+	}
+	if token.ExpiresAt.Before(time.Now()) {
+		t.Error("Expected token.ExpiresAt to be in the future")
+	}
+
+	// Test 2: Other mutations should still be blocked
+	// Reset flags
+	otherMutationCalled = false
+
+	// Try a regular POST operation (should be blocked)
+	err = c.AddCollaborator("org", "repo", "user", Read)
+	if err != nil {
+		t.Errorf("AddCollaborator in dry-run mode should not return error, got: %v", err)
+	}
+	if otherMutationCalled {
+		t.Error("AddCollaborator should not make API calls in dry-run mode")
+	}
+
+	// Try a DELETE operation (should be blocked)
+	err = c.RemoveCollaborator("org", "repo", "user")
+	if err != nil {
+		t.Errorf("RemoveCollaborator in dry-run mode should not return error, got: %v", err)
+	}
+	if otherMutationCalled {
+		t.Error("RemoveCollaborator should not make API calls in dry-run mode")
+	}
+
+	// Note: GraphQL queries (v4 API) also work in dry-run mode with Apps auth because:
+	// 1. They use the same appsRoundTripper which fetches installation tokens
+	// 2. The token fetch uses allowInDryRun=true (tested above)
+	// 3. GraphQL queries themselves are read-only operations in dry-run mode
+	// This is implicitly tested by the token fetching mechanism.
+}
+
+func TestRequestWithAllowInDryRunFlag(t *testing.T) {
+	// Test basic dry-run behavior for different HTTP methods
+	// Note: Allowlist enforcement is tested in TestAllowInDryRunEnforcesAllowlist
+
+	callsMade := []string{}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMade = append(callsMade, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	c.dry = true // Enable dry-run mode
+
+	// Test 1: Regular POST without allowInDryRun should NOT make API call
+	_, err := c.request(&request{
+		method:        http.MethodPost,
+		path:          "/test/regular",
+		exitCodes:     []int{200},
+		allowInDryRun: false,
+	}, nil)
+	if err != nil {
+		t.Errorf("Request should not error in dry-run mode: %v", err)
+	}
+	if len(callsMade) > 0 {
+		t.Errorf("Regular POST should not make API call in dry-run mode, but got: %v", callsMade)
+	}
+
+	// Test 2: GET requests should always work
+	callsMade = []string{}
+	_, err = c.request(&request{
+		method:    http.MethodGet,
+		path:      "/test/get",
+		exitCodes: []int{200},
+	}, nil)
+	if err != nil {
+		t.Errorf("GET request should not error: %v", err)
+	}
+	if len(callsMade) != 1 {
+		t.Errorf("GET request should always make API call in dry-run mode, got %d calls", len(callsMade))
+	}
+
+	// Test 3: PUT without allowInDryRun should NOT make API call
+	callsMade = []string{}
+	_, err = c.request(&request{
+		method:        http.MethodPut,
+		path:          "/test/put",
+		exitCodes:     []int{200},
+		allowInDryRun: false,
+	}, nil)
+	if err != nil {
+		t.Errorf("Request should not error in dry-run mode: %v", err)
+	}
+	if len(callsMade) > 0 {
+		t.Errorf("PUT should not make API call in dry-run mode, but got: %v", callsMade)
+	}
+
+	// Test 4: DELETE without allowInDryRun should NOT make API call
+	callsMade = []string{}
+	_, err = c.request(&request{
+		method:        http.MethodDelete,
+		path:          "/test/delete",
+		exitCodes:     []int{204},
+		allowInDryRun: false,
+	}, nil)
+	if err != nil {
+		t.Errorf("Request should not error in dry-run mode: %v", err)
+	}
+	if len(callsMade) > 0 {
+		t.Errorf("DELETE should not make API call in dry-run mode, but got: %v", callsMade)
+	}
+}
+
+func TestDryRunModeDoesNotAffectNonDryRunClients(t *testing.T) {
+	// Verify that our changes don't affect non-dry-run clients
+
+	callsMade := []string{}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMade = append(callsMade, r.Method+" "+r.URL.Path)
+		// Return appropriate status code based on method
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{}"))
+		}
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	c.dry = false // Non-dry-run mode
+
+	// All requests should make actual API calls when NOT in dry-run mode
+	testCases := []struct {
+		name          string
+		method        string
+		path          string
+		allowInDryRun bool
+	}{
+		{"GET request", http.MethodGet, "/test/get", false},
+		{"POST without allowInDryRun", http.MethodPost, "/test/post1", false},
+		{"POST with allowInDryRun", http.MethodPost, "/test/post2", true},
+		{"PUT request", http.MethodPut, "/test/put", false},
+		{"DELETE request", http.MethodDelete, "/test/delete", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			callsMade = []string{}
+			exitCode := 200
+			if tc.method == http.MethodDelete {
+				exitCode = 204
+			}
+			_, err := c.request(&request{
+				method:        tc.method,
+				path:          tc.path,
+				exitCodes:     []int{exitCode},
+				allowInDryRun: tc.allowInDryRun,
+			}, nil)
+			if err != nil {
+				t.Errorf("Request should not error in non-dry-run mode: %v", err)
+			}
+			if len(callsMade) != 1 {
+				t.Errorf("Expected exactly 1 API call in non-dry-run mode, got %d", len(callsMade))
+			}
+			expected := tc.method + " " + tc.path
+			if len(callsMade) > 0 && callsMade[0] != expected {
+				t.Errorf("Expected %s, got %s", expected, callsMade[0])
+			}
+		})
+	}
+}
+
+func TestAllowInDryRunEnforcesAllowlist(t *testing.T) {
+	// Test that isDryRunAllowed enforces a hardcoded allowlist
+	// Even if allowInDryRun=true is set, only allowlisted endpoints should pass
+
+	callsMade := map[string]int{}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		callsMade[key]++
+
+		// Return appropriate responses
+		if strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			w.WriteHeader(http.StatusCreated)
+			token := AppInstallationToken{Token: "test", ExpiresAt: time.Now().Add(time.Hour)}
+			_ = json.NewEncoder(w).Encode(token)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{}"))
+		}
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	c.dry = true
+
+	// Test 1: Token acquisition endpoint with allowInDryRun=true should work
+	callsMade = map[string]int{}
+	_, err := c.request(&request{
+		method:        http.MethodPost,
+		path:          "/app/installations/12345/access_tokens",
+		exitCodes:     []int{201},
+		allowInDryRun: true, // Should be allowed (on allowlist)
+	}, nil)
+	if err != nil {
+		t.Errorf("Token acquisition should work: %v", err)
+	}
+	if callsMade["POST /app/installations/12345/access_tokens"] != 1 {
+		t.Error("Token acquisition endpoint should be allowed in dry-run with allowInDryRun=true")
+	}
+
+	// Test 2: Non-allowlisted endpoint with allowInDryRun=true should be BLOCKED
+	// This is the critical security test - even with allowInDryRun=true, it should be blocked
+	callsMade = map[string]int{}
+	_, err = c.request(&request{
+		method:        http.MethodPost,
+		path:          "/orgs/test/teams", // NOT on allowlist
+		exitCodes:     []int{201},
+		allowInDryRun: true, // Flag is set, but should be ignored (not on allowlist)
+	}, nil)
+	if err != nil {
+		t.Errorf("Request should not error in dry-run: %v", err)
+	}
+	if callsMade["POST /orgs/test/teams"] > 0 {
+		t.Error("SECURITY ISSUE: Non-allowlisted endpoint was allowed with allowInDryRun=true!")
+	} else {
+		t.Log("✓ Allowlist enforcement: non-allowlisted endpoint blocked even with allowInDryRun=true")
+	}
+
+	// Test 3: Other mutation endpoints should also be blocked even with the flag
+	testCases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/orgs/test/memberships/user"},
+		{http.MethodPost, "/orgs/test/teams"},
+		{http.MethodPatch, "/repos/test/repo"},
+		{http.MethodDelete, "/orgs/test/teams/team-slug"},
+	}
+
+	for _, tc := range testCases {
+		callsMade = map[string]int{}
+		_, err := c.request(&request{
+			method:        tc.method,
+			path:          tc.path,
+			exitCodes:     []int{200, 201, 204},
+			allowInDryRun: true, // Set but should be blocked
+		}, nil)
+		if err != nil {
+			t.Errorf("Request should not error: %v", err)
+		}
+		key := tc.method + " " + tc.path
+		if callsMade[key] > 0 {
+			t.Errorf("SECURITY: %s was allowed with allowInDryRun=true but is not on allowlist!", key)
+		}
+	}
+}
+
+func TestAllowInDryRunOnlyForTokenAcquisition(t *testing.T) {
+	// This test documents and enforces the constraint that allowInDryRun should
+	// ONLY be used for GitHub App token acquisition, not for actual mutations.
+	//
+	// Future contributors: If you're considering using allowInDryRun=true for a new
+	// request, please carefully consider whether it's truly read-only. If it modifies
+	// org/repo state (adding members, creating teams, updating settings, etc.),
+	// it should NOT use allowInDryRun as that would defeat dry-run mode's purpose.
+
+	callsMade := []string{}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMade = append(callsMade, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/app/installations/") && strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			w.WriteHeader(http.StatusCreated)
+			token := AppInstallationToken{
+				Token:     "test-token",
+				ExpiresAt: time.Now().Add(time.Hour),
+			}
+			_ = json.NewEncoder(w).Encode(token)
+			return
+		}
+		t.Errorf("Unexpected API call: %s %s", r.Method, r.URL.Path)
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	c.dry = true
+
+	// This is the ONLY acceptable use of allowInDryRun=true
+	callsMade = []string{}
+	_, err := c.getAppInstallationToken(12345)
+	if err != nil {
+		t.Errorf("Token acquisition should work in dry-run: %v", err)
+	}
+	if len(callsMade) != 1 {
+		t.Errorf("Expected 1 call for token acquisition, got %d", len(callsMade))
+	}
+
+	// Examples of requests that should NEVER use allowInDryRun=true:
+	// (These would make API calls in dry-run mode, which is wrong)
+
+	testCases := []struct {
+		name   string
+		method string
+		path   string
+		reason string
+	}{
+		{
+			name:   "Adding org member",
+			method: http.MethodPut,
+			path:   "/orgs/test/memberships/user",
+			reason: "Modifies org membership",
+		},
+		{
+			name:   "Creating a team",
+			method: http.MethodPost,
+			path:   "/orgs/test/teams",
+			reason: "Creates new team",
+		},
+		{
+			name:   "Updating repo settings",
+			method: http.MethodPatch,
+			path:   "/repos/test/repo",
+			reason: "Modifies repo configuration",
+		},
+		{
+			name:   "Adding collaborator",
+			method: http.MethodPut,
+			path:   "/repos/test/repo/collaborators/user",
+			reason: "Modifies repo access",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			callsMade = []string{}
+
+			// These should be blocked in dry-run mode
+			_, err := c.request(&request{
+				method:        tc.method,
+				path:          tc.path,
+				exitCodes:     []int{200, 201, 204},
+				allowInDryRun: false, // Correct: mutations should not set this to true
+			}, nil)
+
+			if err != nil {
+				t.Errorf("Request should not error in dry-run: %v", err)
+			}
+
+			if len(callsMade) > 0 {
+				t.Errorf("%s should be blocked in dry-run mode (reason: %s), but got call: %v",
+					tc.name, tc.reason, callsMade)
+			}
+
+			// Document what would happen if someone mistakenly used allowInDryRun=true
+			// (This part doesn't actually make the call, just documents the constraint)
+			t.Logf("IMPORTANT: %s must NOT use allowInDryRun=true because: %s", tc.name, tc.reason)
 		})
 	}
 }

@@ -17,10 +17,11 @@ limitations under the License.
 package blockers
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +37,7 @@ var (
 )
 
 type githubClient interface {
-	QueryWithGitHubAppsSupport(ctx context.Context, q interface{}, vars map[string]interface{}, org string) error
+	QueryWithGitHubAppsSupport(ctx context.Context, q any, vars map[string]any, org string) error
 }
 
 // Blocker specifies an issue number that should block tide from merging.
@@ -54,6 +55,27 @@ type OrgRepoBranch struct {
 	Org, Repo, Branch string
 }
 
+type OrgError struct {
+	Orgs  sets.Set[string]
+	inner error
+}
+
+func (e *OrgError) Error() string {
+	return e.inner.Error()
+}
+
+func (e *OrgError) Unwrap() error {
+	return e.inner
+}
+
+func (e *OrgError) Is(other error) bool {
+	if other == nil {
+		return false
+	}
+	_, ok := other.(*OrgError)
+	return ok
+}
+
 // Blockers holds maps of issues that are blocking various repos/branches.
 type Blockers struct {
 	Repo   map[OrgRepo][]Blocker       `json:"repo,omitempty"`
@@ -66,8 +88,8 @@ func (b Blockers) GetApplicable(org, repo, branch string) []Blocker {
 	res = append(res, b.Repo[OrgRepo{Org: org, Repo: repo}]...)
 	res = append(res, b.Branch[OrgRepoBranch{Org: org, Repo: repo, Branch: branch}]...)
 
-	sort.Slice(res, func(i, j int) bool {
-		return res[i].Number < res[j].Number
+	slices.SortFunc(res, func(a, b Blocker) int {
+		return cmp.Compare(a.Number, b.Number)
 	})
 	return res
 }
@@ -77,7 +99,7 @@ func FindAll(ghc githubClient, log *logrus.Entry, label string, orgRepoTokensByO
 	queries := map[string]sets.Set[string]{}
 	for org, query := range orgRepoTokensByOrg {
 		if splitQueryByOrg {
-			queries[org] = sets.New[string](blockerQuery(label, query)...)
+			queries[org] = sets.New(blockerQuery(label, query)...)
 		} else {
 			if queries[""] == nil {
 				queries[""] = sets.Set[string]{}
@@ -90,15 +112,14 @@ func FindAll(ghc githubClient, log *logrus.Entry, label string, orgRepoTokensByO
 	var errs []error
 	var lock sync.Mutex
 	var wg sync.WaitGroup
+	var orgErrs = sets.New[string]()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	for org, query := range queries {
 		org, query := org, strings.Join(sets.List(query), " ")
-		wg.Add(1)
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			result, err := search(
 				ctx,
 				ghc,
@@ -110,20 +131,26 @@ func FindAll(ghc githubClient, log *logrus.Entry, label string, orgRepoTokensByO
 			defer lock.Unlock()
 			if err != nil {
 				errs = append(errs, err)
+				orgErrs.Insert(org)
 				return
 			}
 			issues = append(issues, result...)
 
-		}()
+		})
 
 	}
 	wg.Wait()
 
+	var orgErr error
 	if err := utilerrors.NewAggregate(errs); err != nil {
-		return Blockers{}, fmt.Errorf("error searching for blocker issues: %w", err)
+		if splitQueryByOrg {
+			orgErr = &OrgError{Orgs: orgErrs, inner: fmt.Errorf("error searching for blocker issues: %w", err)}
+		} else {
+			return Blockers{}, fmt.Errorf("error searching for blocker issues: %w", err)
+		}
 	}
 
-	return fromIssues(issues, log), nil
+	return fromIssues(issues, log), orgErr
 }
 
 func fromIssues(issues []Issue, log *logrus.Entry) Blockers {
@@ -178,7 +205,7 @@ func parseBranches(str string) []string {
 func search(ctx context.Context, ghc githubClient, githubOrg string, log *logrus.Entry, q string) ([]Issue, error) {
 	requestStart := time.Now()
 	var ret []Issue
-	vars := map[string]interface{}{
+	vars := map[string]any{
 		"query":        githubql.String(q),
 		"searchCursor": (*githubql.String)(nil),
 	}
@@ -197,7 +224,7 @@ func search(ctx context.Context, ghc githubClient, githubOrg string, log *logrus
 		if !sq.Search.PageInfo.HasNextPage {
 			break
 		}
-		vars["searchCursor"] = githubql.NewString(sq.Search.PageInfo.EndCursor)
+		vars["searchCursor"] = new(sq.Search.PageInfo.EndCursor)
 	}
 	log.WithFields(logrus.Fields{
 		"duration":       time.Since(requestStart).String(),

@@ -22,12 +22,12 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	openai "github.com/sashabaranov/go-openai"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/exp/slices"
 
 	"sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/github"

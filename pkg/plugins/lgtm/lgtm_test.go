@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/strings/slices"
 
 	"sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/github"
@@ -630,13 +630,7 @@ func TestLGTMCommentWithLGTMNoti(t *testing.T) {
 			t.Errorf("For case %s, didn't expect error from lgtmComment: %v", tc.name, err)
 			continue
 		}
-		deleted := false
-		for _, body := range fc.IssueCommentsDeleted {
-			if body == removeLGTMLabelNoti {
-				deleted = true
-				break
-			}
-		}
+		deleted := slices.Contains(fc.IssueCommentsDeleted, removeLGTMLabelNoti)
 		if tc.shouldDelete {
 			if !deleted {
 				t.Errorf("For case %s, LGTM removed notification should have been deleted", tc.name)
@@ -656,6 +650,7 @@ func TestLGTMFromApproveReview(t *testing.T) {
 		action        github.ReviewEventAction
 		body          string
 		reviewer      string
+		reviewerType  string
 		hasLGTM       bool
 		shouldToggle  bool
 		shouldComment bool
@@ -790,6 +785,28 @@ func TestLGTMFromApproveReview(t *testing.T) {
 			shouldComment: false,
 			shouldAssign:  false,
 		},
+		{
+			name:          "Approve review by GitHub App bot, no lgtm on pr",
+			state:         github.ReviewStateApproved,
+			action:        github.ReviewActionSubmitted,
+			reviewer:      "some-app[bot]",
+			reviewerType:  github.UserTypeBot,
+			hasLGTM:       false,
+			shouldToggle:  false,
+			shouldComment: false,
+			shouldAssign:  false,
+		},
+		{
+			name:          "Request changes review by GitHub App bot, lgtm on pr",
+			state:         github.ReviewStateChangesRequested,
+			action:        github.ReviewActionSubmitted,
+			reviewer:      "some-app[bot]",
+			reviewerType:  github.UserTypeBot,
+			hasLGTM:       true,
+			shouldToggle:  false,
+			shouldComment: false,
+			shouldAssign:  false,
+		},
 	}
 	SHA := "0bd3ed50c88cd53a09316bf7a298f900e9371652"
 	for _, tc := range testcases {
@@ -806,7 +823,7 @@ func TestLGTMFromApproveReview(t *testing.T) {
 		fc.Collaborators = []string{"collab1", "collab2"}
 		e := &github.ReviewEvent{
 			Action:      tc.action,
-			Review:      github.Review{Body: tc.body, State: tc.state, HTMLURL: "<url>", User: github.User{Login: tc.reviewer}},
+			Review:      github.Review{Body: tc.body, State: tc.state, HTMLURL: "<url>", User: github.User{Login: tc.reviewer, Type: tc.reviewerType}},
 			PullRequest: github.PullRequest{User: github.User{Login: "author"}, Assignees: []github.User{{Login: "collab1"}, {Login: "assignee1"}}, Number: 5},
 			Repo:        github.Repo{Owner: github.User{Login: "org"}, Name: "repo"},
 		}
@@ -828,13 +845,7 @@ func TestLGTMFromApproveReview(t *testing.T) {
 			continue
 		}
 		if tc.shouldAssign {
-			found := false
-			for _, a := range fc.AssigneesAdded {
-				if a == fmt.Sprintf("%s/%s#%d:%s", "org", "repo", 5, tc.reviewer) {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(fc.AssigneesAdded, fmt.Sprintf("%s/%s#%d:%s", "org", "repo", 5, tc.reviewer))
 			if !found || len(fc.AssigneesAdded) != 1 {
 				t.Errorf("For case %s, should have assigned %s but added assignees are %s", tc.name, tc.reviewer, fc.AssigneesAdded)
 			}
@@ -1311,13 +1322,7 @@ func TestAddTreeHashComment(t *testing.T) {
 			commit.Commit.Tree.SHA = treeSHA
 			fc.Commits[SHA] = commit
 			handle(true, pc, &fakeOwnersClient{}, rc, fc, logrus.WithField("plugin", PluginName), &fakePruner{})
-			found := false
-			for _, body := range fc.IssueCommentsAdded {
-				if addLGTMLabelNotificationRe.MatchString(body) {
-					found = true
-					break
-				}
-			}
+			found := slices.ContainsFunc(fc.IssueCommentsAdded, addLGTMLabelNotificationRe.MatchString)
 			if c.expectTreeSha {
 				if !found {
 					t.Fatalf("expected tree_hash comment but got none")
@@ -1367,13 +1372,7 @@ func TestRemoveTreeHashComment(t *testing.T) {
 		IssueComments: fc.IssueComments[101],
 	}
 	handle(false, pc, &fakeOwnersClient{}, rc, fc, logrus.WithField("plugin", PluginName), fp)
-	found := false
-	for _, body := range fc.IssueCommentsDeleted {
-		if addLGTMLabelNotificationRe.MatchString(body) {
-			found = true
-			break
-		}
-	}
+	found := slices.ContainsFunc(fc.IssueCommentsDeleted, addLGTMLabelNotificationRe.MatchString)
 	if !found {
 		t.Fatalf("expected deleted tree_hash comment but got none")
 	}

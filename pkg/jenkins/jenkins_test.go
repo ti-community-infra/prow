@@ -115,14 +115,6 @@ func testWrapper(t *testing.T, jobs []string, builds map[string][]Build, status 
 	}
 }
 
-func strP(str string) *string {
-	return &str
-}
-
-func intP(i int) *int {
-	return &i
-}
-
 func TestListBuilds(t *testing.T) {
 	tests := []struct {
 		name string
@@ -142,24 +134,24 @@ func TestListBuilds(t *testing.T) {
 			requestedJobs: []BuildQueryParams{{JobName: "unit", ProwJobID: "unitpj"}, {JobName: "unit", ProwJobID: "queued_pj_id"}, {JobName: "integration", ProwJobID: "integrationpj"}, {JobName: "e2e", ProwJobID: "e2epj"}},
 			builds: map[string][]Build{
 				"unit": {
-					{Number: 1, Result: strP(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first"}, {Name: prowJobID, Value: "first"}}}}},
-					{Number: 2, Result: strP(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second"}, {Name: prowJobID, Value: "second"}}}}},
-					{Number: 3, Result: strP(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "third"}, {Name: prowJobID, Value: "third"}}}}},
-					{Number: 4, Result: strP(unstable), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "fourth"}, {Name: prowJobID, Value: "fourth"}}}}},
+					{Number: 1, Result: new(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first"}, {Name: prowJobID, Value: "first"}}}}},
+					{Number: 2, Result: new(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second"}, {Name: prowJobID, Value: "second"}}}}},
+					{Number: 3, Result: new(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "third"}, {Name: prowJobID, Value: "third"}}}}},
+					{Number: 4, Result: new(unstable), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "fourth"}, {Name: prowJobID, Value: "fourth"}}}}},
 				},
 				"integration": {
-					{Number: 1, Result: strP(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first-int"}, {Name: prowJobID, Value: "first-int"}}}}},
-					{Number: 2, Result: strP(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second-int"}, {Name: prowJobID, Value: "second-int"}}}}},
+					{Number: 1, Result: new(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first-int"}, {Name: prowJobID, Value: "first-int"}}}}},
+					{Number: 2, Result: new(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second-int"}, {Name: prowJobID, Value: "second-int"}}}}},
 				},
 			},
 
 			expectedResults: map[string]Build{
-				"first":      {Number: 1, Result: strP(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first"}, {Name: prowJobID, Value: "first"}}}}},
-				"second":     {Number: 2, Result: strP(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second"}, {Name: prowJobID, Value: "second"}}}}},
-				"third":      {Number: 3, Result: strP(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "third"}, {Name: prowJobID, Value: "third"}}}}},
-				"fourth":     {Number: 4, Result: strP(unstable), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "fourth"}, {Name: prowJobID, Value: "fourth"}}}}},
-				"first-int":  {Number: 1, Result: strP(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first-int"}, {Name: prowJobID, Value: "first-int"}}}}},
-				"second-int": {Number: 2, Result: strP(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second-int"}, {Name: prowJobID, Value: "second-int"}}}}},
+				"first":      {Number: 1, Result: new(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first"}, {Name: prowJobID, Value: "first"}}}}},
+				"second":     {Number: 2, Result: new(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second"}, {Name: prowJobID, Value: "second"}}}}},
+				"third":      {Number: 3, Result: new(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "third"}, {Name: prowJobID, Value: "third"}}}}},
+				"fourth":     {Number: 4, Result: new(unstable), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "fourth"}, {Name: prowJobID, Value: "fourth"}}}}},
+				"first-int":  {Number: 1, Result: new(failure), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "first-int"}, {Name: prowJobID, Value: "first-int"}}}}},
+				"second-int": {Number: 2, Result: new(success), Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "second-int"}, {Name: prowJobID, Value: "second-int"}}}}},
 				// queued_pj_id is returned from the testWrapper
 				"queued_pj_id": {Number: 0, Result: nil, Actions: []Action{{Parameters: []Parameter{{Name: statusBuildID, Value: "queued-int"}, {Name: prowJobID, Value: "queued_pj_id"}}}}, enqueued: true, Task: struct {
 					Name string `json:"name"`
@@ -171,7 +163,7 @@ func TestListBuilds(t *testing.T) {
 
 			existingJobs:  []string{"unit"},
 			requestedJobs: []BuildQueryParams{{JobName: "unit", ProwJobID: "prowjobidhere"}},
-			status:        intP(502),
+			status:        new(502),
 
 			expectedErr: fmt.Errorf("cannot list builds for job \"unit\": %w", fmt.Errorf("response not 2XX: %s", "502 Bad Gateway")),
 		},
@@ -710,6 +702,168 @@ func TestGetBuildWithParametersPath(t *testing.T) {
 				t.Errorf("%s: expected values %s, got %s", testCase.name, testCase.output, actualValue)
 			}
 
+		})
+	}
+}
+
+func TestIsRunning(t *testing.T) {
+	tests := []struct {
+		name     string
+		build    Build
+		expected bool
+	}{
+		{
+			name:     "building true, result nil - should be running",
+			build:    Build{Building: true, Result: nil},
+			expected: true,
+		},
+		{
+			name:     "building true, result SUCCESS - should still be running",
+			build:    Build{Building: true, Result: new(success)},
+			expected: true,
+		},
+		{
+			name:     "building true, result FAILURE - should still be running",
+			build:    Build{Building: true, Result: new(failure)},
+			expected: true,
+		},
+		{
+			name:     "building false, result SUCCESS - completed successfully",
+			build:    Build{Building: false, Result: new(success)},
+			expected: false,
+		},
+		{
+			name:     "building false, result FAILURE - completed with failure",
+			build:    Build{Building: false, Result: new(failure)},
+			expected: false,
+		},
+		{
+			name:     "building false, result nil - not yet started (legacy behavior)",
+			build:    Build{Building: false, Result: nil},
+			expected: true,
+		},
+		{
+			name:     "building false, result nil, enqueued - waiting in queue",
+			build:    Build{Building: false, Result: nil, enqueued: true},
+			expected: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := test.build.IsRunning()
+			if result != test.expected {
+				t.Errorf("IsRunning() = %v, expected %v", result, test.expected)
+			}
+		})
+	}
+}
+
+func TestIsSuccess(t *testing.T) {
+	tests := []struct {
+		name     string
+		build    Build
+		expected bool
+	}{
+		{
+			name:     "result SUCCESS - is success",
+			build:    Build{Result: new(success)},
+			expected: true,
+		},
+		{
+			name:     "result FAILURE - not success",
+			build:    Build{Result: new(failure)},
+			expected: false,
+		},
+		{
+			name:     "result nil - not success",
+			build:    Build{Result: nil},
+			expected: false,
+		},
+		{
+			name:     "building true with result SUCCESS - technically success but should check IsRunning first",
+			build:    Build{Building: true, Result: new(success)},
+			expected: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := test.build.IsSuccess()
+			if result != test.expected {
+				t.Errorf("IsSuccess() = %v, expected %v", result, test.expected)
+			}
+		})
+	}
+}
+
+func TestIsFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		build    Build
+		expected bool
+	}{
+		{
+			name:     "result FAILURE - is failure",
+			build:    Build{Result: new(failure)},
+			expected: true,
+		},
+		{
+			name:     "result UNSTABLE - is failure",
+			build:    Build{Result: new(unstable)},
+			expected: true,
+		},
+		{
+			name:     "result SUCCESS - not failure",
+			build:    Build{Result: new(success)},
+			expected: false,
+		},
+		{
+			name:     "result nil - not failure",
+			build:    Build{Result: nil},
+			expected: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := test.build.IsFailure()
+			if result != test.expected {
+				t.Errorf("IsFailure() = %v, expected %v", result, test.expected)
+			}
+		})
+	}
+}
+
+func TestIsAborted(t *testing.T) {
+	tests := []struct {
+		name     string
+		build    Build
+		expected bool
+	}{
+		{
+			name:     "result ABORTED - is aborted",
+			build:    Build{Result: new(aborted)},
+			expected: true,
+		},
+		{
+			name:     "result SUCCESS - not aborted",
+			build:    Build{Result: new(success)},
+			expected: false,
+		},
+		{
+			name:     "result nil - not aborted",
+			build:    Build{Result: nil},
+			expected: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := test.build.IsAborted()
+			if result != test.expected {
+				t.Errorf("IsAborted() = %v, expected %v", result, test.expected)
+			}
 		})
 	}
 }

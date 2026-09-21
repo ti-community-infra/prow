@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -239,6 +240,15 @@ func handlePullRequestReview(gc githubClient, config *plugins.Configuration, own
 
 	// Only react to reviews that are being submitted (not edited or dismissed).
 	if e.Action != github.ReviewActionSubmitted {
+		return nil
+	}
+
+	// Ignore review states from GitHub App bots — they cannot be collaborators.
+	botUserChecker, err := gc.BotUserChecker()
+	if err != nil {
+		return err
+	}
+	if botUserChecker(e.Review.User.Login) || e.Review.User.Type == github.UserTypeBot {
 		return nil
 	}
 
@@ -548,8 +558,8 @@ func handlePullRequest(log *logrus.Entry, gc githubClient, config *plugins.Confi
 		}
 		// older comments are still present
 		// iterate backwards to find the last LGTM tree-hash
-		for i := len(comments) - 1; i >= 0; i-- {
-			comment := comments[i]
+		for _, v := range slices.Backward(comments) {
+			comment := v
 			m := addLGTMLabelNotificationRe.FindStringSubmatch(comment.Body)
 			if botUserChecker(comment.User.Login) && m != nil && comment.UpdatedAt.Equal(comment.CreatedAt) {
 				lastLgtmTreeHash = m[1]

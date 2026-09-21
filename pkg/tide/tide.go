@@ -20,12 +20,14 @@ limitations under the License.
 package tide
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,7 +63,7 @@ type githubClient interface {
 	GetRef(string, string, string) (string, error)
 	GetRepo(owner, name string) (github.FullRepo, error)
 	Merge(string, string, int, github.MergeDetails) error
-	QueryWithGitHubAppsSupport(ctx context.Context, q interface{}, vars map[string]interface{}, org string) error
+	QueryWithGitHubAppsSupport(ctx context.Context, q any, vars map[string]any, org string) error
 	ListIssueComments(org, repo string, number int) ([]github.IssueComment, error)
 	BotUserChecker() (func(candidate string) bool, error)
 	DeleteComment(org, repo string, id int) error
@@ -219,6 +221,13 @@ var (
 
 		// Per controller
 		syncHeartbeat *prometheus.CounterVec
+
+		// Retesting metrics
+		retests             *prometheus.CounterVec
+		poolMissingPRs      *prometheus.GaugeVec
+		poolPendingPRs      *prometheus.GaugeVec
+		poolSuccessfulPRs   *prometheus.GaugeVec
+		poolBatchPendingPRs *prometheus.GaugeVec
 	}{
 		pooledPRs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "pooledprs",
@@ -293,6 +302,47 @@ var (
 		}, []string{
 			"controller",
 		}),
+		retests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tide_retests_total",
+			Help: "Total number of test retriggers by org, repo, branch, and action. Incremented when Tide triggers tests for PRs that need retesting. Action is either TRIGGER (serial) or TRIGGER_BATCH (batch).",
+		}, []string{
+			"org",
+			"repo",
+			"branch",
+			"action",
+		}),
+		poolMissingPRs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "tide_pool_missing_prs",
+			Help: "Number of PRs with missing or failed tests in each pool. High values indicate testing bottlenecks.",
+		}, []string{
+			"org",
+			"repo",
+			"branch",
+		}),
+		poolPendingPRs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "tide_pool_pending_prs",
+			Help: "Number of PRs with pending tests in each pool.",
+		}, []string{
+			"org",
+			"repo",
+			"branch",
+		}),
+		poolSuccessfulPRs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "tide_pool_successful_prs",
+			Help: "Number of PRs with all tests passing in each pool.",
+		}, []string{
+			"org",
+			"repo",
+			"branch",
+		}),
+		poolBatchPendingPRs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "tide_pool_batch_pending_prs",
+			Help: "Number of PRs in a pending batch test in each pool.",
+		}, []string{
+			"org",
+			"repo",
+			"branch",
+		}),
 	}
 )
 
@@ -305,6 +355,11 @@ func init() {
 	prometheus.MustRegister(tideMetrics.syncHeartbeat)
 	prometheus.MustRegister(tideMetrics.poolErrors)
 	prometheus.MustRegister(tideMetrics.queryResults)
+	prometheus.MustRegister(tideMetrics.retests)
+	prometheus.MustRegister(tideMetrics.poolMissingPRs)
+	prometheus.MustRegister(tideMetrics.poolPendingPRs)
+	prometheus.MustRegister(tideMetrics.poolSuccessfulPRs)
+	prometheus.MustRegister(tideMetrics.poolBatchPendingPRs)
 	prometheus.MustRegister(tideMetrics.mergeFailures)
 }
 
@@ -484,7 +539,7 @@ func contextsToStrings(contexts []Context) []string {
 		names = append(names, string(c.Context))
 	}
 	// Sorting names improves readability of logs and simplifies unit tests.
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -515,7 +570,18 @@ func (c *syncController) Sync() error {
 	var blocks blockers.Blockers
 	if len(prs) > 0 {
 		blocks, err = c.provider.blockers()
-		if err != nil {
+
+		// When the GitHubApp authentication is enabled, the blocker issues query is split by organization.
+		// Each query might fail individually, and if this happens, we continue with the rest of the work
+		// but we remove all PRs that belong to any of the affected organizations. This is why we don't
+		// want to take into account PRs for which we don't have all the necessary information to process them.
+		if orgBlockersErr := (&blockers.OrgError{}); errors.As(err, &orgBlockersErr) {
+			failedBlockerOrgs := orgBlockersErr.Orgs.UnsortedList()
+			c.logger.Warnf("failed getting blockers for organizations %q - won't merge any PR coming from those", strings.Join(failedBlockerOrgs, ","))
+			maps.DeleteFunc(prs, func(_ string, pr CodeReviewCommon) bool {
+				return orgBlockersErr.Orgs.Has(pr.Org)
+			})
+		} else if err != nil {
 			return fmt.Errorf("failed getting blockers: %v", err)
 		}
 	}
@@ -987,7 +1053,8 @@ func (c *syncController) accumulateBatch(sp subpool) (successBatch []CodeReviewC
 	return successBatch, pendingBatch
 }
 
-// prowJobsFromContexts constructs ProwJob objects from all successful presubmit contexts that include a baseSHA.
+// prowJobsFromContexts constructs ProwJob objects from successful presubmit contexts that either
+// include a matching baseSHA in their description or carry the skip-retest sentinel.
 // This is needed because otherwise we would always need retesting for results that are older than sinkers
 // max_prowjob_age.
 func (c *syncController) prowJobsFromContexts(pr *CodeReviewCommon, baseSHA string) ([]prowapi.ProwJob, error) {
@@ -1000,8 +1067,10 @@ func (c *syncController) prowJobsFromContexts(pr *CodeReviewCommon, baseSHA stri
 		if headContext.State != githubql.StatusStateSuccess {
 			continue
 		}
-		if baseSHAForContext := config.BaseSHAFromContextDescription(string(headContext.Description)); baseSHAForContext != "" && baseSHAForContext == baseSHA {
-			passingCurrentContexts = append(passingCurrentContexts, string((headContext.Context)))
+		desc := string(headContext.Description)
+		baseSHAForContext := config.BaseSHAFromContextDescription(desc)
+		if config.IsSkipRetest(desc) || (baseSHAForContext != "" && baseSHAForContext == baseSHA) {
+			passingCurrentContexts = append(passingCurrentContexts, string(headContext.Context))
 		}
 	}
 
@@ -1154,7 +1223,7 @@ func (c *syncController) pickBatch(sp subpool, cc map[int]contextChecker, newBat
 	}
 
 	// we must choose the oldest PRs for the batch
-	sort.Slice(sp.prs, func(i, j int) bool { return sp.prs[i].Number < sp.prs[j].Number })
+	slices.SortFunc(sp.prs, func(a, b CodeReviewCommon) int { return cmp.Compare(a.Number, b.Number) })
 
 	var candidates []CodeReviewCommon
 	for _, pr := range sp.prs {
@@ -1308,6 +1377,65 @@ func prHasSuccessfulTideStatusContext(pr CodeReviewCommon) bool {
 	return false
 }
 
+// mergeErr represents a single categorized merge error for a specific PR.
+// Every error must be at least one of userFacing or operatorFacing.
+type mergeErr struct {
+	err            error
+	pr             int
+	userFacing     bool // include message in Tide history for PR authors
+	operatorFacing bool // surface through error-level logs and poolErrors metric
+}
+
+// mergeFailure aggregates categorized merge errors with audience-aware
+// reporting. Error() returns the full message. historyMessage() returns
+// user-appropriate text (with placeholders for operator-only errors).
+// operatorError() returns only operator-facing errors for metrics and logs.
+type mergeFailure struct {
+	errs  []mergeErr
+	batch string // batch context (e.g. " from batch [1 2 3], partial merge [1]")
+}
+
+func (mf *mergeFailure) failedPRs() []int {
+	prs := make([]int, 0, len(mf.errs))
+	for _, me := range mf.errs {
+		prs = append(prs, me.pr)
+	}
+	return prs
+}
+
+func (mf *mergeFailure) Error() string {
+	msgs := make([]string, 0, len(mf.errs))
+	for _, me := range mf.errs {
+		msgs = append(msgs, fmt.Sprintf("#%d: %v", me.pr, me.err))
+	}
+	return fmt.Sprintf("failed merging %v%s: %s", mf.failedPRs(), mf.batch, strings.Join(msgs, "; "))
+}
+
+func (mf *mergeFailure) historyMessage() string {
+	msgs := make([]string, 0, len(mf.errs))
+	for _, me := range mf.errs {
+		if me.userFacing {
+			msgs = append(msgs, fmt.Sprintf("#%d: %v", me.pr, me.err))
+		} else {
+			msgs = append(msgs, fmt.Sprintf("#%d: merge error (contact Prow admin)", me.pr))
+		}
+	}
+	return fmt.Sprintf("failed merging %v%s: %s", mf.failedPRs(), mf.batch, strings.Join(msgs, "; "))
+}
+
+func (mf *mergeFailure) operatorError() error {
+	var msgs []string
+	for _, me := range mf.errs {
+		if me.operatorFacing {
+			msgs = append(msgs, fmt.Sprintf("#%d: %v", me.pr, me.err))
+		}
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("failed merging %v%s: %s", mf.failedPRs(), mf.batch, strings.Join(msgs, "; "))
+}
+
 // tryMerge attempts 1 merge and returns a bool indicating if we should try
 // to merge the remaining PRs and possibly an error.
 //
@@ -1316,7 +1444,7 @@ func tryMerge(mergeFunc func() error) (bool, error) {
 	var err error
 	const maxRetries = 3
 	backoff := time.Second * 4
-	for retry := 0; retry < maxRetries; retry++ {
+	for retry := range maxRetries {
 		if err = mergeFunc(); err == nil {
 			// Successful merge!
 			return true, nil
@@ -1568,7 +1696,8 @@ func refGetterFactory(ref string) config.RefGetter {
 }
 
 // presubmitsByPull creates a map pr -> requiredPresubmits and will filter out all PRs
-// where we failed to find out the required presubmits (can happen if inrepoconfig is enabled).
+// where we failed to find out the required presubmits (can happen if inrepoconfig is enabled
+// or if the changed files of the PR cannot be retrieved).
 func (c *syncController) presubmitsByPull(sp *subpool) (map[int][]config.Presubmit, error) {
 	presubmits := make(map[int][]config.Presubmit, len(sp.prs))
 
@@ -1583,9 +1712,9 @@ func (c *syncController) presubmitsByPull(sp *subpool) (map[int][]config.Presubm
 			log.WithError(err).Debug("Failed to get presubmits for PR, excluding from subpool")
 			continue
 		}
-		filteredPRs = append(filteredPRs, pr)
 		log.WithField("num_possible_presubmit", len(presubmitsForPull)).Debug("Found possible presubmits")
 
+		var changedFilesErr error
 		for _, ps := range presubmitsForPull {
 			if !c.provider.jobIsRequiredByTide(&ps, &pr) {
 				continue
@@ -1599,15 +1728,21 @@ func (c *syncController) presubmitsByPull(sp *subpool) (map[int][]config.Presubm
 			forceRun := (requireManuallyTriggeredJobs && ps.ContextRequired() && ps.NeedsExplicitTrigger()) || ps.RunBeforeMerge
 			shouldRun, err := ps.ShouldRun(sp.branch, c.changedFiles.prChanges(&pr), forceRun, false)
 			if err != nil {
-				return nil, err
+				changedFilesErr = err
+				break
 			}
 			if !shouldRun {
-				log.WithField("context", ps.Context).Debug("Presubmit excluded by ps.ShouldRun")
 				continue
 			}
 
 			presubmits[pr.Number] = append(presubmits[pr.Number], ps)
 		}
+		if changedFilesErr != nil {
+			log.WithError(changedFilesErr).Warn("Failed to determine required presubmits for PR, excluding from subpool")
+			delete(presubmits, pr.Number)
+			continue
+		}
+		filteredPRs = append(filteredPRs, pr)
 		log.WithField("required-presubmit-count", len(presubmits[pr.Number])).Debug("Determined required presubmits for PR.")
 	}
 
@@ -1657,7 +1792,6 @@ func (c *syncController) presubmitsForBatch(prs []CodeReviewCommon, org, repo, b
 			return nil, err
 		}
 		if !shouldRun {
-			log.WithField("context", ps.Context).Debug("Presubmit excluded by ps.ShouldRun")
 			continue
 		}
 
@@ -1690,7 +1824,11 @@ func (c *syncController) syncSubpool(sp subpool, blocks []blockers.Blocker) (Poo
 	} else {
 		act, targets, err = c.takeAction(sp, batchPending, successes, pendings, missings, batchMerge, missingSerialTests)
 		if err != nil {
-			errorString = err.Error()
+			if mf, ok := err.(*mergeFailure); ok {
+				errorString = mf.historyMessage()
+			} else {
+				errorString = err.Error()
+			}
 		}
 		if recordableActions[act] {
 			c.History.Record(
@@ -1704,12 +1842,30 @@ func (c *syncController) syncSubpool(sp subpool, blocks []blockers.Blocker) (Poo
 		}
 	}
 
+	// Extract only operator-facing errors for metrics and logs.
+	// All errors (including user-facing) are already recorded in Tide
+	// history above via errorString.
+	var operatorErr error
+	if mf, ok := err.(*mergeFailure); ok {
+		operatorErr = mf.operatorError()
+	} else {
+		operatorErr = err
+	}
+
 	sp.log.WithFields(logrus.Fields{
 		"action":  string(act),
 		"targets": prNumbers(targets),
 	}).Info("Subpool synced.")
+
 	tideMetrics.pooledPRs.WithLabelValues(sp.org, sp.repo, sp.branch).Set(float64(len(sp.prs)))
 	tideMetrics.updateTime.WithLabelValues(sp.org, sp.repo, sp.branch).Set(float64(time.Now().Unix()))
+	tideMetrics.poolMissingPRs.WithLabelValues(sp.org, sp.repo, sp.branch).Set(float64(len(missings)))
+	tideMetrics.poolPendingPRs.WithLabelValues(sp.org, sp.repo, sp.branch).Set(float64(len(pendings)))
+	tideMetrics.poolSuccessfulPRs.WithLabelValues(sp.org, sp.repo, sp.branch).Set(float64(len(successes)))
+	tideMetrics.poolBatchPendingPRs.WithLabelValues(sp.org, sp.repo, sp.branch).Set(float64(len(batchPending)))
+	if act == Trigger || act == TriggerBatch {
+		tideMetrics.retests.WithLabelValues(sp.org, sp.repo, sp.branch, string(act)).Add(float64(len(targets)))
+	}
 	return Pool{
 			Org:    sp.org,
 			Repo:   sp.repo,
@@ -1728,7 +1884,7 @@ func (c *syncController) syncSubpool(sp subpool, blocks []blockers.Blocker) (Poo
 
 			TenantIDs: tenantIDs,
 		},
-		err
+		operatorErr
 }
 
 func prMeta(prs ...CodeReviewCommon) []prowapi.Pull {
@@ -1746,18 +1902,16 @@ func prMeta(prs ...CodeReviewCommon) []prowapi.Pull {
 }
 
 func sortPools(pools []Pool) {
-	sort.Slice(pools, func(i, j int) bool {
-		if string(pools[i].Org) != string(pools[j].Org) {
-			return string(pools[i].Org) < string(pools[j].Org)
-		}
-		if string(pools[i].Repo) != string(pools[j].Repo) {
-			return string(pools[i].Repo) < string(pools[j].Repo)
-		}
-		return string(pools[i].Branch) < string(pools[j].Branch)
+	slices.SortFunc(pools, func(a, b Pool) int {
+		return cmp.Or(
+			cmp.Compare(a.Org, b.Org),
+			cmp.Compare(a.Repo, b.Repo),
+			cmp.Compare(a.Branch, b.Branch),
+		)
 	})
 
 	sortPRs := func(prs []CodeReviewCommon) {
-		sort.Slice(prs, func(i, j int) bool { return int(prs[i].Number) < int(prs[j].Number) })
+		slices.SortFunc(prs, func(a, b CodeReviewCommon) int { return cmp.Compare(a.Number, b.Number) })
 	}
 	for i := range pools {
 		sortPRs(pools[i].SuccessPRs)
@@ -1850,6 +2004,8 @@ func (c *syncController) dividePool(pool map[string]CodeReviewCommon) (map[strin
 	return sps, nil
 }
 
+const MergeStateStatusBlocked = "BLOCKED"
+
 // PullRequest holds graphql data about a PR, including its commits and their
 // contexts.
 // This struct is GitHub specific
@@ -1858,15 +2014,19 @@ type PullRequest struct {
 	Author struct {
 		Login githubql.String
 	}
+	AuthorMetadata struct {
+		TypeName githubql.String `graphql:"__typename"`
+	} `graphql:"authorMetadata:author"`
 	BaseRef struct {
 		Name   githubql.String
 		Prefix githubql.String
 	}
-	HeadRefName  githubql.String `graphql:"headRefName"`
-	HeadRefOID   githubql.String `graphql:"headRefOid"`
-	Mergeable    githubql.MergeableState
-	CanBeRebased githubql.Boolean `graphql:"canBeRebased"`
-	Repository   struct {
+	HeadRefName      githubql.String `graphql:"headRefName"`
+	HeadRefOID       githubql.String `graphql:"headRefOid"`
+	Mergeable        githubql.MergeableState
+	MergeStateStatus githubql.String  `graphql:"mergeStateStatus"`
+	CanBeRebased     githubql.Boolean `graphql:"canBeRebased"`
+	Repository       struct {
 		Name          githubql.String
 		NameWithOwner githubql.String
 		Owner         struct {
@@ -2105,13 +2265,13 @@ const nonFailedBatchByNameBaseAndPullsIndexName = "tide-non-failed-jobs-by-name-
 // the batch job, and returns a string contain all of them. This is used only by
 // nonFailedBatchByNameBaseAndPullsIndexFunc.
 func nonFailedBatchByNameBaseAndPullsIndexKey(jobName string, refs *prowapi.Refs) string {
-	// sort the pulls to make sure this is deterministic
-	sort.Slice(refs.Pulls, func(i, j int) bool {
-		return refs.Pulls[i].Number < refs.Pulls[j].Number
-	})
+	// sort the pulls to make sure this is determinististic, but make a copy
+	// to avoid mutating the input, it can point to a cache-backed object
+	pulls := slices.Clone(refs.Pulls)
+	slices.SortFunc(pulls, func(a, b prowapi.Pull) int { return cmp.Compare(a.Number, b.Number) })
 
 	keys := []string{jobName, refs.Org, refs.Repo, refs.BaseRef, refs.BaseSHA}
-	for _, pull := range refs.Pulls {
+	for _, pull := range pulls {
 		keys = append(keys, strconv.Itoa(pull.Number), pull.SHA)
 	}
 
@@ -2233,7 +2393,7 @@ func pickBatchWithPreexistingTests(sp subpool, candidates []CodeReviewCommon, ma
 	}
 	prNumbersFromMapKey := func(s string) []int {
 		var result []int
-		for _, element := range strings.Split(s, "|") {
+		for element := range strings.SplitSeq(s, "|") {
 			intVal, err := strconv.Atoi(element)
 			if err != nil {
 				logrus.WithField("element", element).Error("BUG: Found element in pr numbers map that was not parseable as int")

@@ -227,17 +227,31 @@ func getSpecs(pjs *prowjobv1.ProwJobList) []prowjobv1.ProwJobSpec {
 func TestDeck(t *testing.T) {
 	t.Parallel()
 
-	resp, err := http.Get("http://localhost/deck")
-	if err != nil {
-		t.Fatalf("Failed getting deck front end %v", err)
+	// Deck can be transiently unavailable while this test runs: it has a
+	// single replica, and tests running in parallel (TestRerun) restart it
+	// to pick up job-config changes, during which the ingress answers with
+	// a 5xx. Retry until deck serves the front page.
+	var body []byte
+	scraper := func(ctx context.Context) (bool, error) {
+		resp, err := http.Get("http://localhost/deck")
+		if err != nil {
+			t.Logf("Failed getting deck front end: %v", err)
+			return false, nil
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Logf("Expected response status code %d, got %d", http.StatusOK, resp.StatusCode)
+			return false, nil
+		}
+		body, err = io.ReadAll(resp.Body)
+		if err != nil {
+			t.Logf("Failed getting deck body response content: %v", err)
+			return false, nil
+		}
+		return true, nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Expected response status code %d, got %d, ", http.StatusOK, resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("Failed getting deck body response content %v", err)
+	if waitErr := wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 180*time.Second, true, scraper); waitErr != nil {
+		t.Fatalf("Timed out waiting for deck front end: %v", waitErr)
 	}
 	if got, want := string(body), "<title>Prow Status</title>"; !strings.Contains(got, want) {
 		firstLines := strings.Join(strings.SplitN(strings.TrimSpace(got), "\n", 30), "\n")
@@ -270,11 +284,10 @@ func TestDeckTenantIDs(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			//Give them new names to prevent conflict
+			// Give them new names to prevent conflict
 			name := RandomString(t)
 			prowjobs := renamePJs(tt.prowjobs, name)
 			expected := renamePJs(tt.expected, name)
@@ -455,15 +468,19 @@ func TestRerun(t *testing.T) {
 		// for this case.
 		waitDur := time.Second * 5
 		var lastErr error
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			lastErr = nil
 			res, err := http.DefaultClient.Do(req)
 			if err != nil {
+				// res is nil on a transport-level error (e.g. a pooled
+				// connection to the ingress closed under us; Go does not
+				// auto-retry POSTs), so there is no body to close. Retry
+				// like any other transient failure.
 				lastErr = fmt.Errorf("could not make post request %v", err)
-				res.Body.Close()
-				break
+				waitDur *= 2
+				time.Sleep(waitDur)
+				continue
 			}
-			// The only retry condition is status not ok
 			if res.StatusCode != http.StatusOK {
 				lastErr = fmt.Errorf("status not expected: %d", res.StatusCode)
 				res.Body.Close()
@@ -493,7 +510,7 @@ func TestRerun(t *testing.T) {
 	// It may take some time for the new ProwJob to show up, so we will
 	// check every 30s interval three times for it to appear
 	latestRun := jobToRerun
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		time.Sleep(30 * time.Second)
 		rerun(t, jobToRerun.Name, "latest")
 		if latestRun = getLatestJob(t, jobName, &latestRun.CreationTimestamp); latestRun.Labels["foo"] == "bar" {
@@ -504,11 +521,19 @@ func TestRerun(t *testing.T) {
 	if !passed {
 		t.Fatal("Expected updated job.")
 	}
-
+	passed = false
 	// Deck scheduled job from latest configuration, rerun with "original"
 	// should still go with original configuration.
-	rerun(t, jobToRerun.Name, "original")
-	if latestRun := getLatestJob(t, jobName, &latestRun.CreationTimestamp); latestRun.Labels["foo"] != "foo" {
+	// check every 30s interval three times for it update
+	for range 3 {
+		time.Sleep(30 * time.Second)
+		rerun(t, jobToRerun.Name, "original")
+		if latestRun = getLatestJob(t, jobName, &latestRun.CreationTimestamp); latestRun.Labels["foo"] == "foo" {
+			passed = true
+			break
+		}
+	}
+	if !passed {
 		t.Fatalf("Job label mismatch. Want: 'foo', got: '%s'", latestRun.Labels["foo"])
 	}
 }

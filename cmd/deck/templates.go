@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"path"
 
-	"github.com/gorilla/csrf"
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/version"
@@ -32,10 +31,10 @@ type baseTemplateSettings struct {
 	MobileFriendly bool
 	DarkMode       bool
 	PageName       string
-	Arguments      interface{}
+	Arguments      any
 }
 
-func makeBaseTemplateSettings(mobileFriendly bool, darkMode bool, pageName string, arguments interface{}) baseTemplateSettings {
+func makeBaseTemplateSettings(mobileFriendly bool, darkMode bool, pageName string, arguments any) baseTemplateSettings {
 	return baseTemplateSettings{mobileFriendly, darkMode, pageName, arguments}
 }
 
@@ -62,8 +61,8 @@ func getConcreteSectionFunction(o options) func() baseTemplateSections {
 	}
 }
 
-func prepareBaseTemplate(o options, cfg config.Getter, csrfToken string, t *template.Template) (*template.Template, error) {
-	return t.Funcs(map[string]interface{}{
+func prepareBaseTemplate(o options, cfg config.Getter, t *template.Template) (*template.Template, error) {
+	return t.Funcs(map[string]any{
 		"settings":         makeBaseTemplateSettings,
 		"branding":         getConcreteBrandingFunction(cfg),
 		"sections":         getConcreteSectionFunction(o),
@@ -73,14 +72,13 @@ func prepareBaseTemplate(o options, cfg config.Getter, csrfToken string, t *temp
 		"lightMode":        func() bool { return false },
 		"deckVersion":      func() string { return version.Version },
 		"googleAnalytics":  func() string { return cfg().Deck.GoogleAnalytics },
-		"csrfToken":        func() string { return csrfToken },
 	}).ParseFiles(path.Join(o.templateFilesLocation, "base.html"))
 }
 
-func handleSimpleTemplate(o options, cfg config.Getter, templateName string, param interface{}) http.HandlerFunc {
+func handleSimpleTemplate(o options, cfg config.Getter, templateName string, param any) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		t := template.New(templateName) // the name matters, and must match the filename.
-		if _, err := prepareBaseTemplate(o, cfg, csrf.Token(r), t); err != nil {
+		if _, err := prepareBaseTemplate(o, cfg, t); err != nil {
 			logrus.WithError(err).Error("error preparing base template")
 			http.Error(w, "error preparing base template", http.StatusInternalServerError)
 			return

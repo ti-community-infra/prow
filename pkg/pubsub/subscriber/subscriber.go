@@ -20,9 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
@@ -164,7 +165,7 @@ func (s *Subscriber) handleMessage(msg messageInterface, subscription string, al
 	// Do not check for HTTP client authorization, because we're handling a
 	// PubSub message.
 	var allowedApiClient *config.AllowedApiClient = nil
-	var requireTenantID bool = false
+	var requireTenantID bool
 
 	cfgAdapter := gangway.ProwCfgAdapter{Config: s.ConfigAgent.Config()}
 	if _, err = gangway.HandleProwJob(l, s.getReporterFunc(l), cjer, s.ProwJobClient, &cfgAdapter, s.InRepoConfigGetter, allowedApiClient, requireTenantID, allowedClusters); err != nil {
@@ -245,19 +246,13 @@ func (s *Subscriber) peToCjer(l *logrus.Entry, pe *ProwJobEvent, eType, subscrip
 
 	pso := gangway.PodSpecOptions{}
 	pso.Labels = make(map[string]string)
-	for k, v := range pe.Labels {
-		pso.Labels[k] = v
-	}
+	maps.Copy(pso.Labels, pe.Labels)
 
 	pso.Annotations = make(map[string]string)
-	for k, v := range pe.Annotations {
-		pso.Annotations[k] = v
-	}
+	maps.Copy(pso.Annotations, pe.Annotations)
 
 	pso.Envs = make(map[string]string)
-	for k, v := range pe.Envs {
-		pso.Envs[k] = v
-	}
+	maps.Copy(pso.Envs, pe.Envs)
 
 	cjer.PodSpecOptions = &pso
 

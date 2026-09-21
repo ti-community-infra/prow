@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -32,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -41,7 +41,6 @@ import (
 	"sigs.k8s.io/prow/pkg/tide"
 
 	"github.com/NYTimes/gziphandler"
-	"github.com/gorilla/csrf"
 	"github.com/gorilla/sessions"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
@@ -91,6 +90,7 @@ import (
 	_ "sigs.k8s.io/prow/pkg/spyglass/lenses/html"
 	_ "sigs.k8s.io/prow/pkg/spyglass/lenses/junit"
 	_ "sigs.k8s.io/prow/pkg/spyglass/lenses/links"
+	_ "sigs.k8s.io/prow/pkg/spyglass/lenses/markdown"
 	_ "sigs.k8s.io/prow/pkg/spyglass/lenses/metadata"
 	_ "sigs.k8s.io/prow/pkg/spyglass/lenses/podinfo"
 	_ "sigs.k8s.io/prow/pkg/spyglass/lenses/restcoverage"
@@ -183,7 +183,7 @@ func gatherOptions(fs *flag.FlagSet, args ...string) options {
 	fs.StringVar(&o.templateFilesLocation, "template-files-location", fmt.Sprintf("%s%s", os.Getenv("KO_DATA_PATH"), defaultTemplateFilesLocation), "Path to the template files")
 	fs.BoolVar(&o.gcsCookieAuth, "gcs-cookie-auth", false, "Use storage.cloud.google.com instead of signed URLs")
 	fs.BoolVar(&o.rerunCreatesJob, "rerun-creates-job", false, "Change the re-run option in Deck to actually create the job. **WARNING:** Only use this with non-public deck instances, otherwise strangers can DOS your Prow instance")
-	fs.BoolVar(&o.allowInsecure, "allow-insecure", false, "Allows insecure requests for CSRF and GitHub oauth.")
+	fs.BoolVar(&o.allowInsecure, "allow-insecure", false, "Allows insecure requests for GitHub oauth.")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "Whether or not to make mutating API calls to GitHub.")
 	fs.Var(&o.tenantIDs, "tenant-id", "The tenantID(s) used by the ProwJobs that should be displayed by this instance of Deck. This flag can be repeated.")
 	o.config.AddFlags(fs)
@@ -360,6 +360,10 @@ func main() {
 				DefaultNamespaces: map[string]cache.Config{
 					cfg().ProwJobNamespace: {},
 				},
+				// Deck serves cached ProwJobs close to verbatim, so it cannot
+				// use pjutil.TrimCachedProwJob. Managed fields it does strip
+				// from every response already.
+				DefaultTransform: cache.TransformStripManagedFields(),
 			},
 			Metrics: metricsserver.Options{
 				BindAddress: "0",
@@ -464,50 +468,8 @@ func main() {
 		mux = prodOnlyMain(cfg, pluginAgent, authCfgGetter, githubClient, o, mux)
 	}
 
-	// cookie secret will be used for CSRF protection and should be exactly 32 bytes
-	// we sometimes accept different lengths to stay backwards compatible
-	var csrfToken []byte
-	if o.cookieSecretFile != "" {
-		cookieSecretRaw, err := loadToken(o.cookieSecretFile)
-		if err != nil {
-			logrus.WithError(err).Fatal("Could not read cookie secret file")
-		}
-		decodedSecret, err := base64.StdEncoding.DecodeString(string(cookieSecretRaw))
-		if err != nil {
-			logrus.WithError(err).Fatal("Error decoding cookie secret")
-		}
-		if len(decodedSecret) == 32 {
-			csrfToken = decodedSecret
-		}
-		if len(decodedSecret) > 32 {
-			logrus.Warning("Cookie secret should be exactly 32 bytes. Consider truncating the existing cookie to that length")
-			hash := sha256.Sum256(decodedSecret)
-			csrfToken = hash[:]
-		}
-		if len(decodedSecret) < 32 {
-			if o.rerunCreatesJob {
-				logrus.Fatal("Cookie secret must be exactly 32 bytes")
-				return
-			}
-			logrus.Warning("Cookie secret should be exactly 32 bytes")
-		}
-	}
-
-	// if we allow direct reruns, we must protect against CSRF in all post requests using the cookie secret as a token
-	// for more information about CSRF, see https://docs.prow.k8s.io/docs/components/core/deck/csrf/
-	empty := prowapi.ProwJobSpec{}
-	if o.rerunCreatesJob && csrfToken == nil && !authCfgGetter(&empty).IsAllowAnyone() {
-		logrus.Fatal("Rerun creates job cannot be enabled without CSRF protection, which requires --cookie-secret to be exactly 32 bytes")
-		return
-	}
-
-	var server *http.Server
-	if csrfToken != nil {
-		CSRF := csrf.Protect(csrfToken, csrf.Path("/"), csrf.Secure(!o.allowInsecure))
-		server = &http.Server{Addr: ":8080", Handler: CSRF(traceHandler(mux))}
-	} else {
-		server = &http.Server{Addr: ":8080", Handler: traceHandler(mux)}
-	}
+	cop := http.NewCrossOriginProtection()
+	server := &http.Server{Addr: ":8080", Handler: cop.Handler(traceHandler(mux))}
 
 	health.ServeReady()
 	interrupts.ListenAndServe(server, 5*time.Second)
@@ -780,45 +742,85 @@ func handleNotCached(next http.Handler) http.HandlerFunc {
 	}
 }
 
+// handleProwJobs returns an http.HandlerFunc that serves the /prowjobs.js endpoint.
+// It accepts the following optional query parameters:
+//
+// - omit: comma-separated list of fields to strip from each job in the response.
+// - org: filter jobs to those whose Spec.Refs.Org matches exactly (case-sensitive).
+// - repo: filter jobs to those whose Spec.Refs.Repo matches exactly (case-sensitive).
+// - owner: filter jobs to those with a pull in Spec.Refs.Pulls whose Author matches exactly (case-sensitive)
 func handleProwJobs(ja *jobs.JobAgent, log *logrus.Entry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setHeadersNoCaching(w)
 		jobs := ja.ProwJobs()
 		omit := r.URL.Query().Get("omit")
+		omitSet := sets.New[string](strings.Split(omit, ",")...)
 
-		if set := sets.New[string](strings.Split(omit, ",")...); set.Len() > 0 {
-			for i := range jobs {
-				jobs[i].ManagedFields = nil
-				if set.Has(Annotations) {
-					jobs[i].Annotations = nil
-				}
-				if set.Has(Labels) {
-					jobs[i].Labels = nil
-				}
-				if set.Has(DecorationConfig) {
-					jobs[i].Spec.DecorationConfig = nil
-				}
-				if set.Has(PodSpec) {
-					// when we omit the podspec, we don't set it completely to nil
-					// instead, we set it to a new podspec that just has an empty container for each container that exists in the actual podspec
-					// this is so we can determine how many containers there are for a given prowjob without fetching all of the podspec details
-					// this is necessary for prow/cmd/deck/static/prow/pkg.ts to determine whether the logIcon should link to a log endpoint or to spyglass
-					if jobs[i].Spec.PodSpec != nil {
-						emptyContainers := []coreapi.Container{}
-						for range jobs[i].Spec.PodSpec.Containers {
-							emptyContainers = append(emptyContainers, coreapi.Container{})
-						}
-						jobs[i].Spec.PodSpec = &coreapi.PodSpec{
-							Containers: emptyContainers,
-						}
+		org := r.URL.Query().Get("org")
+		repo := r.URL.Query().Get("repo")
+		owner := r.URL.Query().Get("owner")
+
+		ownerMatch := func(job prowapi.ProwJob, owner string) bool {
+			// Periodic jobs do not have a Pull request owner
+			if job.Spec.Refs == nil {
+				return false
+			}
+			return slices.ContainsFunc(job.Spec.Refs.Pulls, func(pull prowapi.Pull) bool {
+				return pull.Author == owner
+			})
+		}
+
+		refsMatch := func(job prowapi.ProwJob, value string, field func(prowapi.Refs) string) bool {
+			if job.Spec.Refs == nil {
+				return slices.ContainsFunc(job.Spec.ExtraRefs, func(ref prowapi.Refs) bool {
+					return field(ref) == value
+				})
+			}
+			return field(*job.Spec.Refs) == value
+		}
+
+		finalJobs := make([]prowapi.ProwJob, 0)
+		for i := range jobs {
+			if org != "" && !refsMatch(jobs[i], org, func(r prowapi.Refs) string { return r.Org }) {
+				continue
+			}
+			if repo != "" && !refsMatch(jobs[i], repo, func(r prowapi.Refs) string { return r.Repo }) {
+				continue
+			}
+			if owner != "" && !ownerMatch(jobs[i], owner) {
+				continue
+			}
+			jobs[i].ManagedFields = nil
+			if omitSet.Has(Annotations) {
+				jobs[i].Annotations = nil
+			}
+			if omitSet.Has(Labels) {
+				jobs[i].Labels = nil
+			}
+			if omitSet.Has(DecorationConfig) {
+				jobs[i].Spec.DecorationConfig = nil
+			}
+			if omitSet.Has(PodSpec) {
+				// when we omit the podspec, we don't set it completely to nil
+				// instead, we set it to a new podspec that just has an empty container for each container that exists in the actual podspec
+				// this is so we can determine how many containers there are for a given prowjob without fetching all of the podspec details
+				// this is necessary for prow/cmd/deck/static/prow/pkg.ts to determine whether the logIcon should link to a log endpoint or to spyglass
+				if jobs[i].Spec.PodSpec != nil {
+					emptyContainers := []coreapi.Container{}
+					for range jobs[i].Spec.PodSpec.Containers {
+						emptyContainers = append(emptyContainers, coreapi.Container{})
+					}
+					jobs[i].Spec.PodSpec = &coreapi.PodSpec{
+						Containers: emptyContainers,
 					}
 				}
 			}
+			finalJobs = append(finalJobs, jobs[i])
 		}
 
 		jd, err := json.Marshal(struct {
 			Items []prowapi.ProwJob `json:"items"`
-		}{jobs})
+		}{finalJobs})
 		if err != nil {
 			log.WithError(err).Error("Error marshaling jobs.")
 			jd = []byte("{}")
@@ -986,8 +988,7 @@ func handleRequestJobViews(sg *spyglass.Spyglass, cfg config.Getter, o options, 
 		setHeadersNoCaching(w)
 		src := strings.TrimPrefix(r.URL.Path, "/view/")
 
-		csrfToken := csrf.Token(r)
-		page, err := renderSpyglass(r.Context(), sg, cfg, src, o, csrfToken, log)
+		page, err := renderSpyglass(r.Context(), sg, cfg, src, o, log)
 		if err != nil {
 			msg := fmt.Sprintf("error rendering spyglass page: %v", err)
 			if shouldLogHTTPErrors(err) {
@@ -1008,7 +1009,7 @@ func handleRequestJobViews(sg *spyglass.Spyglass, cfg config.Getter, o options, 
 }
 
 // renderSpyglass returns a pre-rendered Spyglass page from the given source string
-func renderSpyglass(ctx context.Context, sg *spyglass.Spyglass, cfg config.Getter, src string, o options, csrfToken string, log *logrus.Entry) (string, error) {
+func renderSpyglass(ctx context.Context, sg *spyglass.Spyglass, cfg config.Getter, src string, o options, log *logrus.Entry) (string, error) {
 	renderStart := time.Now()
 
 	src = strings.TrimSuffix(src, "/")
@@ -1200,7 +1201,7 @@ lensesLoop:
 	}
 	t := template.New("spyglass.html")
 
-	if _, err := prepareBaseTemplate(o, cfg, csrfToken, t); err != nil {
+	if _, err := prepareBaseTemplate(o, cfg, t); err != nil {
 		return "", fmt.Errorf("error preparing base template: %w", err)
 	}
 	t, err = t.ParseFiles(path.Join(o.templateFilesLocation, "spyglass.html"))
@@ -1322,10 +1323,10 @@ func handleRemoteLens(lens config.LensFileConfig, w http.ResponseWriter, r *http
 	}
 
 	(&httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			r.URL = lens.RemoteConfig.ParsedEndpoint
-			r.ContentLength = int64(len(serializedRequest))
-			r.Body = stdio.NopCloser(bytes.NewBuffer(serializedRequest))
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL = lens.RemoteConfig.ParsedEndpoint
+			pr.Out.ContentLength = int64(len(serializedRequest))
+			pr.Out.Body = stdio.NopCloser(bytes.NewBuffer(serializedRequest))
 		},
 	}).ServeHTTP(w, r)
 }
@@ -1479,7 +1480,7 @@ func handleProwJob(prowJobClient prowv1.ProwJobInterface, log *logrus.Entry) htt
 	}
 }
 
-func handleSerialize(w http.ResponseWriter, name string, data interface{}, l *logrus.Entry) {
+func handleSerialize(w http.ResponseWriter, name string, data any, l *logrus.Entry) {
 	setHeadersNoCaching(w)
 	b, err := yaml.Marshal(data)
 	if err != nil {

@@ -967,7 +967,7 @@ func testUpdateConfig(clients localgit.Clients, t *testing.T) {
 					},
 					"prow/plugins.yaml": {
 						Name: "plugins",
-						GZIP: boolPtr(false),
+						GZIP: new(false),
 					},
 				},
 			},
@@ -1027,7 +1027,7 @@ func testUpdateConfig(clients localgit.Clients, t *testing.T) {
 				Maps: map[string]plugins.ConfigMapSpec{
 					"prow/config.yaml": {
 						Name: "config",
-						GZIP: boolPtr(true),
+						GZIP: new(true),
 					},
 					"prow/plugins.yaml": {
 						Name: "plugins",
@@ -1613,7 +1613,7 @@ func testUpdateConfig(clients localgit.Clients, t *testing.T) {
 			if err != nil && errors.IsNotFound(err) {
 				t.Errorf("%s: Should have updated or created configmap for '%s'", tc.name, expected)
 			} else if !equality.Semantic.DeepEqual(expected, actual) {
-				t.Errorf("%s: incorrect ConfigMap state after update: %v", tc.name, diff.ObjectReflectDiff(expected, actual))
+				t.Errorf("%s: incorrect ConfigMap state after update: %v", tc.name, diff.Diff(expected, actual))
 			}
 		}
 	}
@@ -1705,7 +1705,7 @@ func TestHandleDefaultNamespace(t *testing.T) {
 	for _, tc := range testcases {
 		actual := handleDefaultNamespace(tc.given, defaultNamespace)
 		if !equality.Semantic.DeepEqual(tc.expected, actual) {
-			t.Errorf("%s: incorrect changes: %v", tc.name, diff.ObjectReflectDiff(tc.expected, actual))
+			t.Errorf("%s: incorrect changes: %v", tc.name, diff.Diff(tc.expected, actual))
 		}
 	}
 }
@@ -1889,7 +1889,7 @@ func testUpdate(clients localgit.Clients, t *testing.T) {
 		if err != nil && errors.IsNotFound(err) {
 			t.Errorf("%s: Should have updated or created configmap for '%s'", tc.name, expected)
 		} else if !equality.Semantic.DeepEqual(expected, actual) {
-			t.Errorf("%s: incorrect ConfigMap state after update: %v", tc.name, diff.ObjectReflectDiff(expected, actual))
+			t.Errorf("%s: incorrect ConfigMap state after update: %v", tc.name, diff.Diff(expected, actual))
 		}
 	}
 }
@@ -1904,10 +1904,6 @@ func getFileMap(s string) map[string][]byte {
 		}
 	}
 	return result
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }
 
 type MapFS fstest.MapFS
@@ -2085,6 +2081,157 @@ func TestMarkStaleKeysForDeletion(t *testing.T) {
 				return a.Key < b.Key
 			})); diff != "" {
 				t.Fatalf("ConfigMapUpdate slice mismatch. want(-), got(+):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFilterChangesWithACLs(t *testing.T) {
+	testCases := []struct {
+		name               string
+		config             plugins.ConfigUpdater
+		changes            []github.PullRequestChange
+		repo               string   // in org/repo format
+		expectedConfigMaps []string // list of configmap names that should be updated
+	}{
+		{
+			name: "no ACLs - all configmaps updated",
+			config: plugins.ConfigUpdater{
+				Maps: map[string]plugins.ConfigMapSpec{
+					"prow/config.yaml": {
+						Name:     "config",
+						Clusters: map[string][]string{"default": {"default"}},
+					},
+				},
+			},
+			changes: []github.PullRequestChange{
+				{Filename: "prow/config.yaml", Status: "modified"},
+			},
+			repo:               "kubernetes/test-infra",
+			expectedConfigMaps: []string{"config"},
+		},
+		{
+			name: "org/repo in allowed repos - configmap updated",
+			config: plugins.ConfigUpdater{
+				Maps: map[string]plugins.ConfigMapSpec{
+					"prow/config.yaml": {
+						Name:         "config",
+						Clusters:     map[string][]string{"default": {"default"}},
+						AllowedRepos: []string{"kubernetes/test-infra"},
+					},
+				},
+			},
+			changes: []github.PullRequestChange{
+				{Filename: "prow/config.yaml", Status: "modified"},
+			},
+			repo:               "kubernetes/test-infra",
+			expectedConfigMaps: []string{"config"},
+		},
+		{
+			name: "org/repo not in allowed repos - configmap not updated",
+			config: plugins.ConfigUpdater{
+				Maps: map[string]plugins.ConfigMapSpec{
+					"prow/config.yaml": {
+						Name:         "config",
+						Clusters:     map[string][]string{"default": {"default"}},
+						AllowedRepos: []string{"kubernetes/kubernetes"},
+					},
+				},
+			},
+			changes: []github.PullRequestChange{
+				{Filename: "prow/config.yaml", Status: "modified"},
+			},
+			repo:               "kubernetes/test-infra",
+			expectedConfigMaps: []string{},
+		},
+		{
+			name: "org in allowed repos (org-level entry) - configmap updated",
+			config: plugins.ConfigUpdater{
+				Maps: map[string]plugins.ConfigMapSpec{
+					"prow/config.yaml": {
+						Name:         "config",
+						Clusters:     map[string][]string{"default": {"default"}},
+						AllowedRepos: []string{"kubernetes"},
+					},
+				},
+			},
+			changes: []github.PullRequestChange{
+				{Filename: "prow/config.yaml", Status: "modified"},
+			},
+			repo:               "kubernetes/test-infra",
+			expectedConfigMaps: []string{"config"},
+		},
+		{
+			name: "org/repo in denied repos - configmap not updated",
+			config: plugins.ConfigUpdater{
+				Maps: map[string]plugins.ConfigMapSpec{
+					"prow/config.yaml": {
+						Name:        "config",
+						Clusters:    map[string][]string{"default": {"default"}},
+						DeniedRepos: []string{"kubernetes/test-infra"},
+					},
+				},
+			},
+			changes: []github.PullRequestChange{
+				{Filename: "prow/config.yaml", Status: "modified"},
+			},
+			repo:               "kubernetes/test-infra",
+			expectedConfigMaps: []string{},
+		},
+		{
+			name: "multiple configmaps with different ACLs",
+			config: plugins.ConfigUpdater{
+				Maps: map[string]plugins.ConfigMapSpec{
+					"prow/config.yaml": {
+						Name:         "config",
+						Clusters:     map[string][]string{"default": {"default"}},
+						AllowedRepos: []string{"kubernetes/test-infra"},
+					},
+					"prow/plugins.yaml": {
+						Name:        "plugins",
+						Clusters:    map[string][]string{"default": {"default"}},
+						DeniedRepos: []string{"kubernetes/test-infra"},
+					},
+				},
+			},
+			changes: []github.PullRequestChange{
+				{Filename: "prow/config.yaml", Status: "modified"},
+				{Filename: "prow/plugins.yaml", Status: "modified"},
+			},
+			repo:               "kubernetes/test-infra",
+			expectedConfigMaps: []string{"config"},
+		},
+		{
+			name: "empty repo with no ACLs - configmap updated",
+			config: plugins.ConfigUpdater{
+				Maps: map[string]plugins.ConfigMapSpec{
+					"prow/config.yaml": {
+						Name:     "config",
+						Clusters: map[string][]string{"default": {"default"}},
+					},
+				},
+			},
+			changes: []github.PullRequestChange{
+				{Filename: "prow/config.yaml", Status: "modified"},
+			},
+			repo:               "",
+			expectedConfigMaps: []string{"config"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := logrus.NewEntry(logrus.StandardLogger())
+			result := FilterChanges(tc.config, tc.changes, "default", false, log, tc.repo)
+
+			actualConfigMaps := sets.New[string]()
+			for id := range result {
+				actualConfigMaps.Insert(id.Name)
+			}
+
+			expectedSet := sets.New[string](tc.expectedConfigMaps...)
+			if !actualConfigMaps.Equal(expectedSet) {
+				t.Errorf("Expected configmaps %v, got %v", sets.List(expectedSet), sets.List(actualConfigMaps))
 			}
 		})
 	}

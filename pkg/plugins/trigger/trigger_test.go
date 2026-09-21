@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	clienttesting "k8s.io/client-go/testing"
-	"k8s.io/utils/ptr"
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 	"sigs.k8s.io/prow/pkg/client/clientset/versioned/fake"
@@ -201,7 +200,7 @@ func TestRunRequested(t *testing.T) {
 				Head: github.PullRequestBranch{
 					SHA: "foobar1",
 				},
-				Mergable: ptr.To(false),
+				Mergable: new(false),
 			},
 			requestedJobs: []config.Presubmit{{
 				JobBase: config.JobBase{
@@ -431,6 +430,20 @@ func TestTrustedUser(t *testing.T) {
 			expectedTrusted: false,
 			expectedReason:  (notMember | notCollaborator).String(),
 		},
+		{
+			name:            "github-app (no bot suffix) matches trusted app name, should not be trusted",
+			user:            "github-app",
+			trustedApps:     []string{"github-app"},
+			expectedTrusted: false,
+			expectedReason:  (notMember | notCollaborator).String(),
+		},
+		{
+			name:            "github-app[bot]suffix (bot not as suffix) matches trusted app name, should not be trusted",
+			user:            "github-app[bot]suffix",
+			trustedApps:     []string{"github-app"},
+			expectedTrusted: false,
+			expectedReason:  (notMember | notCollaborator).String(),
+		},
 	}
 
 	for _, tc := range testcases {
@@ -482,7 +495,7 @@ func TestGetPresubmits(t *testing.T) {
 					},
 				},
 				ProwConfig: config.ProwConfig{
-					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": ptr.To(true)}},
+					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": new(true)}},
 				},
 			},
 
@@ -506,7 +519,7 @@ func TestGetPresubmits(t *testing.T) {
 					},
 				},
 				ProwConfig: config.ProwConfig{
-					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": ptr.To(true)}},
+					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": new(true)}},
 				},
 			},
 
@@ -560,7 +573,7 @@ func TestGetPostsubmits(t *testing.T) {
 					},
 				},
 				ProwConfig: config.ProwConfig{
-					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": ptr.To(true)}},
+					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": new(true)}},
 				},
 			},
 
@@ -584,7 +597,7 @@ func TestGetPostsubmits(t *testing.T) {
 					},
 				},
 				ProwConfig: config.ProwConfig{
-					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": ptr.To(true)}},
+					InRepoConfig: config.InRepoConfig{Enabled: map[string]*bool{"*": new(true)}},
 				},
 			},
 
@@ -632,7 +645,6 @@ func TestCreateWithRetry(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 
 			fakeProwJobClient := fake.NewSimpleClientset()

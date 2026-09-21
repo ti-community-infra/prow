@@ -47,6 +47,14 @@ func issueLabels(labels ...string) []string {
 
 const shouldNotAddComment = "<none>"
 
+type fakeCommentPruner struct {
+	called bool
+}
+
+func (cp *fakeCommentPruner) PruneComments(shouldPrune func(github.IssueComment) bool) {
+	cp.called = true
+}
+
 type testcase struct {
 	name string
 
@@ -65,6 +73,7 @@ type testcase struct {
 	IgnoreOkToTest bool
 	AddedComment   string
 	Stack          *github.PullRequestStack
+	PruneHelp      bool
 }
 
 func TestHandleGenericComment(t *testing.T) {
@@ -124,6 +133,7 @@ func TestHandleGenericComment(t *testing.T) {
 			State:       "open",
 			IsPR:        true,
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name:        "reject /test from non-trusted member when PR author is untrusted",
@@ -142,6 +152,7 @@ func TestHandleGenericComment(t *testing.T) {
 			State:       "open",
 			IsPR:        true,
 			ShouldBuild: true,
+			PruneHelp:   true,
 			IssueLabels: issueLabels(labels.OkToTest),
 		},
 		{
@@ -152,6 +163,7 @@ func TestHandleGenericComment(t *testing.T) {
 			State:         "open",
 			IsPR:          true,
 			ShouldBuild:   true,
+			PruneHelp:     true,
 			IssueLabels:   issueLabels(labels.NeedsOkToTest, labels.OkToTest),
 			RemovedLabels: issueLabels(labels.NeedsOkToTest),
 		},
@@ -202,6 +214,7 @@ func TestHandleGenericComment(t *testing.T) {
 			State:       "open",
 			IsPR:        true,
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name: "Wrong branch",
@@ -224,6 +237,7 @@ func TestHandleGenericComment(t *testing.T) {
 			Stack:         stackWithBase("master"),
 			ShouldBuild:   true,
 			StartsExactly: "pull-job",
+			PruneHelp:     true,
 		},
 		{
 			name: "Stacked PR on a feature base: /test <job> matches the stack base",
@@ -236,6 +250,7 @@ func TestHandleGenericComment(t *testing.T) {
 			Stack:         stackWithBase("master"),
 			ShouldBuild:   true,
 			StartsExactly: "pull-job",
+			PruneHelp:     true,
 		},
 		{
 			name: "Stacked PR on a feature base: /retest matches the stack base",
@@ -263,6 +278,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jib",
+			PruneHelp:     true,
 		},
 		{
 			name: "Non-stacked PR on a feature base: /retest does not match the trunk branch",
@@ -288,6 +304,7 @@ func TestHandleGenericComment(t *testing.T) {
 				},
 			},
 			ShouldBuild: false,
+			PruneHelp:   true,
 		},
 		{
 			name: "Stacked PR on a feature base: help lists jobs matching the stack base",
@@ -310,6 +327,7 @@ func TestHandleGenericComment(t *testing.T) {
 			IsPR:          true,
 			ShouldBuild:   true,
 			StartsExactly: "pull-jib",
+			PruneHelp:     true,
 		},
 		{
 			name: "Retest with one running and one failed, trailing space.",
@@ -320,6 +338,7 @@ func TestHandleGenericComment(t *testing.T) {
 			IsPR:          true,
 			ShouldBuild:   true,
 			StartsExactly: "pull-jib",
+			PruneHelp:     true,
 		},
 		{
 			name:   "test of silly regex job",
@@ -344,6 +363,10 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jab",
+
+			// We only add/remove help comments for things that look like the
+			// normal triggers.
+			PruneHelp: false,
 		},
 		{
 			name: "needs-ok-to-test label is removed when no presubmit runs by default",
@@ -434,6 +457,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jab",
+			PruneHelp:     true,
 		},
 		{
 			name:   "Retest of skip_if_only_changed job that hasn't run. Changes require job",
@@ -461,6 +485,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jab",
+			PruneHelp:     true,
 		},
 		{
 			name:   "Retest of run_if_changed job that failed. Changes require job",
@@ -487,6 +512,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jib",
+			PruneHelp:     true,
 		},
 		{
 			name:   "Retest of skip_if_only_changed job that failed. Changes require job",
@@ -513,6 +539,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jib",
+			PruneHelp:     true,
 		},
 		{
 			name:   "/test of run_if_changed job that has passed",
@@ -539,6 +566,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jub",
+			PruneHelp:     true,
 		},
 		{
 			name:   "/test of skip_if_only_changed job that has passed",
@@ -565,6 +593,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jub",
+			PruneHelp:     true,
 		},
 		{
 			name:   "Retest triggers failed job",
@@ -587,6 +616,7 @@ func TestHandleGenericComment(t *testing.T) {
 				},
 			},
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name:   "Retest triggers failed job that is optional",
@@ -610,6 +640,7 @@ func TestHandleGenericComment(t *testing.T) {
 				},
 			},
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name:   "Retest-Required doesn't triggers failed job",
@@ -632,6 +663,7 @@ func TestHandleGenericComment(t *testing.T) {
 				},
 			},
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name:   "Retest-Required doesn't trigger failed job that is optional",
@@ -654,6 +686,89 @@ func TestHandleGenericComment(t *testing.T) {
 					},
 				},
 			},
+			PruneHelp: true,
+		},
+		{
+			name:   "Test-Manual-Required triggers missing required manual job",
+			Author: "trusted-member",
+			Body:   "/test-manual-required",
+			State:  "open",
+			IsPR:   true,
+			Presubmits: map[string][]config.Presubmit{
+				"org/repo": {
+					{
+						JobBase: config.JobBase{
+							Name: "jab",
+						},
+						Reporter: config.Reporter{
+							Context: "pull-jab",
+						},
+						Trigger:      `(?m)^/test (?:.*? )?jab(?: .*?)?$`,
+						RerunCommand: `/test jab`,
+					},
+				},
+			},
+			ShouldBuild:   true,
+			StartsExactly: "pull-jab",
+			PruneHelp:     true,
+		},
+		{
+			name:   "Test-Manual-Required doesn't trigger missing optional job",
+			Author: "trusted-member",
+			Body:   "/test-manual-required",
+			State:  "open",
+			IsPR:   true,
+			Presubmits: map[string][]config.Presubmit{
+				"org/repo": {
+					{
+						JobBase: config.JobBase{
+							Name: "jab",
+						},
+						Optional: true,
+						Reporter: config.Reporter{
+							Context: "pull-jab",
+						},
+						Trigger:      `(?m)^/test (?:.*? )?jab(?: .*?)?$`,
+						RerunCommand: `/test jab`,
+					},
+				},
+			},
+			PruneHelp: true,
+		},
+		{
+			name:   "Test-Manual-Required does not trigger always_run or conditional jobs",
+			Author: "trusted-member",
+			Body:   "/test-manual-required",
+			State:  "open",
+			IsPR:   true,
+			Presubmits: map[string][]config.Presubmit{
+				"org/repo": {
+					{
+						JobBase: config.JobBase{
+							Name: "always-run",
+						},
+						AlwaysRun: true,
+						Reporter: config.Reporter{
+							Context: "pull-always-run",
+						},
+						Trigger:      `(?m)^/test (?:.*? )?always-run(?: .*?)?$`,
+						RerunCommand: `/test always-run`,
+					},
+					{
+						JobBase: config.JobBase{
+							Name: "conditional",
+						},
+						RegexpChangeMatcher: config.RegexpChangeMatcher{RunIfChanged: "CHANGED"},
+						Reporter: config.Reporter{
+							Context: "pull-conditional",
+						},
+						Trigger:      `(?m)^/test (?:.*? )?conditional(?: .*?)?$`,
+						RerunCommand: `/test conditional`,
+					},
+				},
+			},
+			ShouldBuild: false,
+			PruneHelp:   true,
 		},
 		{
 			name:   "Retest of run_if_changed job that failed. Changes do not require the job",
@@ -679,6 +794,7 @@ func TestHandleGenericComment(t *testing.T) {
 				},
 			},
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name:   "Retest of skip_if_only_changed job that failed. Changes do not require the job",
@@ -704,6 +820,7 @@ func TestHandleGenericComment(t *testing.T) {
 				},
 			},
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name:   "Run if changed job triggered by /ok-to-test",
@@ -797,6 +914,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jab",
+			PruneHelp:     true,
 		},
 		{
 			name:   "branch-sharded job. no shard matches base branch",
@@ -856,6 +974,7 @@ func TestHandleGenericComment(t *testing.T) {
 					},
 				},
 			},
+			PruneHelp: true,
 		},
 		{
 			name: "/retest of SkipIfOnlyChanged job that doesn't need to run and hasn't run",
@@ -881,6 +1000,7 @@ func TestHandleGenericComment(t *testing.T) {
 					},
 				},
 			},
+			PruneHelp: true,
 		},
 		{
 			name: "explicit /test for RunIfChanged job that doesn't need to run",
@@ -959,6 +1079,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jub",
+			PruneHelp:     true,
 		},
 		{
 			name:   "/test all of skip_if_only_changed job that has passed and needs to run",
@@ -985,6 +1106,7 @@ func TestHandleGenericComment(t *testing.T) {
 			},
 			ShouldBuild:   true,
 			StartsExactly: "pull-jub",
+			PruneHelp:     true,
 		},
 		{
 			name:   "/test all of run_if_changed job that has passed and doesn't need to run",
@@ -1042,6 +1164,7 @@ func TestHandleGenericComment(t *testing.T) {
 			State:       "open",
 			IsPR:        true,
 			ShouldBuild: true,
+			PruneHelp:   true,
 		},
 		{
 			name:        `Non-trusted member after "/lgtm" and "/approve"`,
@@ -1176,7 +1299,7 @@ func TestHandleGenericComment(t *testing.T) {
 			AddedComment: pjutil.TestWithoutTargetNote + helpComment + helpTestAllWithJobsComment,
 		},
 		{
-			name:         "ignore `/test` with no target results in a code block",
+			name:         "ignore `/test` with no target in a code block",
 			Author:       "trusted-member",
 			Body:         "```\n/test\n```",
 			State:        "open",
@@ -1184,7 +1307,7 @@ func TestHandleGenericComment(t *testing.T) {
 			AddedComment: shouldNotAddComment,
 		},
 		{
-			name:         "ignore `/test` with no target results in a tilda code block",
+			name:         "ignore `/test` with no target in a tilde code block",
 			Author:       "trusted-member",
 			Body:         "~~~\n/test\n~~~",
 			State:        "open",
@@ -1208,7 +1331,7 @@ func TestHandleGenericComment(t *testing.T) {
 			AddedComment: pjutil.RetestWithTargetNote + helpComment + helpTestAllWithJobsComment,
 		},
 		{
-			name:         "/retest with trailing words results in a code block",
+			name:         "/retest with trailing words in a code block",
 			Author:       "trusted-member",
 			Body:         produceCodeBlock("/retest FOO", false),
 			State:        "open",
@@ -1223,6 +1346,7 @@ func TestHandleGenericComment(t *testing.T) {
 			IsPR:          true,
 			ShouldBuild:   true,
 			StartsExactly: "pull-jib",
+			PruneHelp:     true,
 		},
 		{
 			name:         "/test with unknown target results in a help message",
@@ -1233,7 +1357,7 @@ func TestHandleGenericComment(t *testing.T) {
 			AddedComment: pjutil.TargetNotFoundNote + helpComment + helpTestAllWithJobsComment,
 		},
 		{
-			name:         "/test with unknown target results in code block. Should be ignored",
+			name:         "/test with unknown target in code block. Should be ignored",
 			Author:       "trusted-member",
 			Body:         produceCodeBlock("/test FOO", false),
 			State:        "open",
@@ -1241,7 +1365,7 @@ func TestHandleGenericComment(t *testing.T) {
 			AddedComment: shouldNotAddComment,
 		},
 		{
-			name:         "two `/test` with unknown target results. One in a code block, and one is not.",
+			name:         "two `/test` with unknown target. One in a code block, and one is not.",
 			Author:       "trusted-member",
 			Body:         produceCodeBlock("/test FOO", true) + "/test BAR",
 			State:        "open",
@@ -1249,7 +1373,7 @@ func TestHandleGenericComment(t *testing.T) {
 			AddedComment: pjutil.TargetNotFoundNote + helpComment + helpTestAllWithJobsComment,
 		},
 		{
-			name:         "two `/test` with unknown target results. One out of a code block, and one is inside.",
+			name:         "two `/test` with unknown target. One out of a code block, and one is inside.",
 			Author:       "trusted-member",
 			Body:         "/test FOO\n" + produceCodeBlock("/test BAR", false),
 			State:        "open",
@@ -1575,23 +1699,25 @@ func TestHandleGenericComment(t *testing.T) {
 			}
 			trigger.SetDefaults()
 
+			cp := &fakeCommentPruner{}
+
 			log.Printf("running case %s", tc.name)
 			// In some cases handleGenericComment can be called twice for the same event.
 			// For instance on Issue/PR creation and modification.
 			// Let's call it twice to ensure idempotency.
-			if err := handleGenericComment(c, trigger, event); err != nil {
+			if err := handleGenericComment(c, cp, trigger, event); err != nil {
 				t.Fatalf("%s: didn't expect error: %s", tc.name, err)
 			}
-			validate(t, fakeProwJobClient.Fake.Actions(), g, tc)
-			if err := handleGenericComment(c, trigger, event); err != nil {
+			validate(t, fakeProwJobClient.Fake.Actions(), g, cp, tc)
+			if err := handleGenericComment(c, cp, trigger, event); err != nil {
 				t.Fatalf("%s: didn't expect error: %s", tc.name, err)
 			}
-			validate(t, fakeProwJobClient.Fake.Actions(), g, tc)
+			validate(t, fakeProwJobClient.Fake.Actions(), g, cp, tc)
 		})
 	}
 }
 
-func validate(t *testing.T, actions []clienttesting.Action, g *fakegithub.FakeClient, tc testcase) {
+func validate(t *testing.T, actions []clienttesting.Action, g *fakegithub.FakeClient, cp *fakeCommentPruner, tc testcase) {
 	startedContexts := sets.New[string]()
 	for _, action := range actions {
 		switch action := action.(type) {
@@ -1630,6 +1756,11 @@ func validate(t *testing.T, actions []clienttesting.Action, g *fakegithub.FakeCl
 				}
 			}
 		}
+	}
+	if tc.PruneHelp && !cp.called {
+		t.Errorf("expected to prune old help comment on successful trigger, but did not")
+	} else if !tc.PruneHelp && cp.called {
+		t.Errorf("expected to not prune old help comment, but did")
 	}
 }
 
@@ -1725,4 +1856,341 @@ func produceCodeBlock(text string, withNewLine bool) string {
 	}
 
 	return fmt.Sprintf("```\n%s\n```%s", text, newline)
+}
+
+func TestApproveGitHubActionsWorkflowRuns(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		body                   string
+		triggerGitHubWorkflows bool
+		ignoreOkToTest         bool
+		pendingRuns            []github.WorkflowRun
+		expectApprovalAttempt  bool
+	}{
+		{
+			name:                   "/ok-to-test with TriggerGitHubWorkflows enabled - should approve",
+			body:                   "/ok-to-test",
+			triggerGitHubWorkflows: true,
+			ignoreOkToTest:         false,
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			expectApprovalAttempt: true,
+		},
+		{
+			name:                   "/ok-to-test with TriggerGitHubWorkflows disabled - should not approve",
+			body:                   "/ok-to-test",
+			triggerGitHubWorkflows: false,
+			ignoreOkToTest:         false,
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			expectApprovalAttempt: false,
+		},
+		{
+			name:                   "/test all should not approve workflows",
+			body:                   "/test all",
+			triggerGitHubWorkflows: true,
+			ignoreOkToTest:         false,
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			expectApprovalAttempt: false,
+		},
+		{
+			name:                   "/retest should not approve workflows",
+			body:                   "/retest",
+			triggerGitHubWorkflows: true,
+			ignoreOkToTest:         false,
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			expectApprovalAttempt: false,
+		},
+		{
+			name:                   "IgnoreOkToTest=true with TriggerGitHubWorkflows=true - should not approve",
+			body:                   "/ok-to-test",
+			triggerGitHubWorkflows: true,
+			ignoreOkToTest:         true,
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			expectApprovalAttempt: false,
+		},
+		{
+			name:                   "/ok-to-test with multiple pending runs",
+			body:                   "/ok-to-test",
+			triggerGitHubWorkflows: true,
+			ignoreOkToTest:         false,
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow-1", Status: "action_required"},
+				{ID: 2, Name: "test-workflow-2", Status: "action_required"},
+			},
+			expectApprovalAttempt: true,
+		},
+		{
+			name:                   "/ok-to-test with no pending runs",
+			body:                   "/ok-to-test",
+			triggerGitHubWorkflows: true,
+			ignoreOkToTest:         false,
+			pendingRuns:            []github.WorkflowRun{},
+			expectApprovalAttempt:  false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			org := "org"
+			repo := "repo"
+			branch := "master"
+			headSHA := "abc123"
+
+			g := &fakegithub.FakeClient{
+				IssueComments: map[int][]github.IssueComment{},
+				OrgMembers:    map[string][]string{"org": {"trusted-member"}},
+				PullRequests: map[int]*github.PullRequest{
+					0: {
+						Base: github.PullRequestBranch{Ref: branch},
+						Head: github.PullRequestBranch{
+							Ref: "pr-branch",
+							SHA: headSHA,
+						},
+						User: github.User{Login: "author"},
+					},
+				},
+				IssueLabelsAdded:     []string{},
+				IssueLabelsRemoved:   []string{},
+				PendingApprovalRuns:  map[string][]github.WorkflowRun{},
+				ApprovedWorkflowRuns: []string{},
+			}
+
+			// Set up pending runs if any
+			if len(tc.pendingRuns) > 0 {
+				key := fmt.Sprintf("%s/%s/pr-branch/%s", org, repo, headSHA)
+				g.PendingApprovalRuns[key] = tc.pendingRuns
+			}
+
+			fakeConfig := &config.Config{ProwConfig: config.ProwConfig{ProwJobNamespace: "prowjobs"}}
+			fakeProwJobClient := fake.NewSimpleClientset()
+
+			presubmits := map[string][]config.Presubmit{
+				"org/repo": {
+					{
+						JobBase: config.JobBase{
+							Name: "test-job",
+						},
+						Brancher:     config.Brancher{Branches: []string{branch}},
+						Reporter:     config.Reporter{Context: "pull-test-job"},
+						Trigger:      `(?m)^/test (?:.*? )?test-job(?: .*?)?$`,
+						RerunCommand: "/test test-job",
+						AlwaysRun:    true,
+					},
+				},
+			}
+			if err := fakeConfig.SetPresubmits(presubmits); err != nil {
+				t.Fatalf("failed to set presubmits: %v", err)
+			}
+
+			c := Client{
+				GitHubClient:  g,
+				ProwJobClient: fakeProwJobClient.ProwV1().ProwJobs(fakeConfig.ProwJobNamespace),
+				Config:        fakeConfig,
+				Logger:        logrus.WithField("plugin", PluginName),
+			}
+
+			event := github.GenericCommentEvent{
+				Action: github.GenericCommentActionCreated,
+				Repo: github.Repo{
+					Owner:    github.User{Login: org},
+					Name:     repo,
+					FullName: "org/repo",
+				},
+				Body:        tc.body,
+				User:        github.User{Login: "trusted-member"},
+				IssueAuthor: github.User{Login: "author"},
+				IssueState:  "open",
+				IsPR:        true,
+			}
+
+			trigger := plugins.Trigger{
+				TriggerGitHubWorkflows: tc.triggerGitHubWorkflows,
+				IgnoreOkToTest:         tc.ignoreOkToTest,
+			}
+			trigger.SetDefaults()
+
+			cp := &fakeCommentPruner{}
+
+			err := handleGenericComment(c, cp, trigger, event)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Verify approval was attempted or not based on expectations.
+			// Negative cases use the fake client which records synchronously in
+			// the goroutine; positive cases only verify no error from the handler.
+			if tc.expectApprovalAttempt {
+				if len(tc.pendingRuns) > 0 {
+					t.Logf("Approval should be attempted for %d pending runs", len(tc.pendingRuns))
+				}
+			} else {
+				// This only works because the fake client records approvals synchronously
+				if len(g.ApprovedWorkflowRuns) > 0 {
+					t.Errorf("Expected no approval attempts, but found %d approvals: %v", len(g.ApprovedWorkflowRuns), g.ApprovedWorkflowRuns)
+				}
+			}
+		})
+	}
+}
+
+func TestApproveWorkflowRunsFallback(t *testing.T) {
+	testCases := []struct {
+		name             string
+		pendingRuns      []github.WorkflowRun
+		approveErrors    map[string]error
+		rerunErrors      map[string]error
+		expectApproved   []string
+		expectReran      []string
+		expectNoApproved bool
+		expectNoReran    bool
+	}{
+		{
+			name: "successful approval - no rerun needed",
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			expectApproved: []string{"org/repo/1"},
+			expectNoReran:  true,
+		},
+		{
+			name: "404 from approve - already approved, no rerun",
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			approveErrors: map[string]error{
+				"org/repo/1": github.NewNotFound(),
+			},
+			expectNoApproved: true,
+			expectNoReran:    true,
+		},
+		{
+			name: "403 from approve - falls back to rerun",
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			approveErrors: map[string]error{
+				"org/repo/1": github.NewForbidden(),
+			},
+			expectNoApproved: true,
+			expectReran:      []string{"org/repo/1"},
+		},
+		{
+			name: "403 from approve and rerun also fails - logs error",
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			approveErrors: map[string]error{
+				"org/repo/1": github.NewForbidden(),
+			},
+			rerunErrors: map[string]error{
+				"org/repo/1": fmt.Errorf("rerun failed"),
+			},
+			expectNoApproved: true,
+			expectNoReran:    true,
+		},
+		{
+			name: "generic error from approve - no rerun attempted",
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "test-workflow", Status: "action_required"},
+			},
+			approveErrors: map[string]error{
+				"org/repo/1": fmt.Errorf("server error"),
+			},
+			expectNoApproved: true,
+			expectNoReran:    true,
+		},
+		{
+			name: "multiple runs with 403 - all fall back to rerun",
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "workflow-1", Status: "action_required"},
+				{ID: 2, Name: "workflow-2", Status: "action_required"},
+			},
+			approveErrors: map[string]error{
+				"org/repo/1": github.NewForbidden(),
+				"org/repo/2": github.NewForbidden(),
+			},
+			expectNoApproved: true,
+			expectReran:      []string{"org/repo/1", "org/repo/2"},
+		},
+		{
+			name: "mixed: one approve succeeds, one gets 403 and reruns",
+			pendingRuns: []github.WorkflowRun{
+				{ID: 1, Name: "workflow-1", Status: "action_required"},
+				{ID: 2, Name: "workflow-2", Status: "action_required"},
+			},
+			approveErrors: map[string]error{
+				"org/repo/2": github.NewForbidden(),
+			},
+			expectApproved: []string{"org/repo/1"},
+			expectReran:    []string{"org/repo/2"},
+		},
+		{
+			name:          "no pending runs - no-op",
+			pendingRuns:   []github.WorkflowRun{},
+			expectNoReran: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			org := "org"
+			repo := "repo"
+			branch := "pr-branch"
+			headSHA := "abc123"
+
+			g := &fakegithub.FakeClient{
+				PendingApprovalRuns:      map[string][]github.WorkflowRun{},
+				ApprovedWorkflowRuns:     []string{},
+				ApproveWorkflowRunErrors: tc.approveErrors,
+				ReranWorkflowRuns:        []string{},
+				ReranWorkflowRunErrors:   tc.rerunErrors,
+			}
+
+			if len(tc.pendingRuns) > 0 {
+				key := fmt.Sprintf("%s/%s/%s/%s", org, repo, branch, headSHA)
+				g.PendingApprovalRuns[key] = tc.pendingRuns
+			}
+
+			c := Client{
+				GitHubClient: g,
+				Logger:       logrus.WithField("plugin", PluginName),
+			}
+
+			wg := approveGitHubActionsWorkflowRuns(c, org, repo, branch, headSHA)
+			wg.Wait()
+
+			// Check approved runs
+			if tc.expectNoApproved {
+				if len(g.ApprovedWorkflowRuns) > 0 {
+					t.Errorf("Expected no approved runs, got %v", g.ApprovedWorkflowRuns)
+				}
+			}
+			if len(tc.expectApproved) > 0 {
+				if !reflect.DeepEqual(sets.New[string](g.ApprovedWorkflowRuns...), sets.New[string](tc.expectApproved...)) {
+					t.Errorf("Expected approved runs %v, got %v", tc.expectApproved, g.ApprovedWorkflowRuns)
+				}
+			}
+
+			// Check reran runs
+			if tc.expectNoReran {
+				if len(g.ReranWorkflowRuns) > 0 {
+					t.Errorf("Expected no reran runs, got %v", g.ReranWorkflowRuns)
+				}
+			}
+			if len(tc.expectReran) > 0 {
+				if !reflect.DeepEqual(sets.New[string](g.ReranWorkflowRuns...), sets.New[string](tc.expectReran...)) {
+					t.Errorf("Expected reran runs %v, got %v", tc.expectReran, g.ReranWorkflowRuns)
+				}
+			}
+		})
+	}
 }

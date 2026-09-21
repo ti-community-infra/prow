@@ -36,6 +36,7 @@ import (
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 	"sigs.k8s.io/prow/pkg/config"
+	git "sigs.k8s.io/prow/pkg/git/v2"
 	"sigs.k8s.io/prow/pkg/github"
 	"sigs.k8s.io/prow/pkg/tide/blockers"
 )
@@ -870,6 +871,1033 @@ func TestExpectedStatus(t *testing.T) {
 	}
 }
 
+func TestRequirementDiff(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		prLabels               []string
+		prAuthor               string
+		prMilestone            *Milestone
+		prBaseBranch           string
+		prContexts             []Context
+		prCheckRuns            []CheckRun
+		reviewDecision         githubql.PullRequestReviewDecision
+		mergeStateStatus       string
+		queryLabels            []string
+		queryForbiddenLabels   []string
+		queryAuthor            string
+		queryMilestone         string
+		queryExcludedBranches  []string
+		queryIncludedBranches  []string
+		reviewApprovedRequired bool
+		requiredContexts       []string
+		expectedDiff           int
+		expectedDescContains   string
+	}{
+		// MergeStateStatus tests
+		{
+			name:                   "Blocked merge state with changes requested",
+			reviewDecision:         githubql.PullRequestReviewDecisionChangesRequested,
+			mergeStateStatus:       "BLOCKED",
+			reviewApprovedRequired: false,
+			expectedDiff:           100,
+			expectedDescContains:   "Blocked by GitHub (branch rulesets or protection)",
+		},
+		{
+			name:                   "Blocked merge state with specific review decision, review required",
+			reviewDecision:         githubql.PullRequestReviewDecisionChangesRequested,
+			mergeStateStatus:       "BLOCKED",
+			reviewApprovedRequired: true,
+			expectedDiff:           150,
+			expectedDescContains:   "PullRequest is missing sufficient approving GitHub review(s)",
+		},
+		{
+			name:                   "Blocked merge state without specific review decision",
+			mergeStateStatus:       "BLOCKED",
+			reviewApprovedRequired: false,
+			expectedDiff:           100,
+			expectedDescContains:   "Blocked by GitHub (branch rulesets or protection)",
+		},
+		{
+			name:                   "Clean merge state allows merge",
+			mergeStateStatus:       "CLEAN",
+			reviewApprovedRequired: false,
+			expectedDiff:           0,
+			expectedDescContains:   "",
+		},
+		{
+			name:                   "Missing approval when required",
+			reviewDecision:         "",
+			reviewApprovedRequired: true,
+			expectedDiff:           50,
+			expectedDescContains:   "missing sufficient approving",
+		},
+		{
+			name:                   "Approved review passes",
+			reviewDecision:         githubql.PullRequestReviewDecisionApproved,
+			reviewApprovedRequired: true,
+			expectedDiff:           0,
+			expectedDescContains:   "",
+		},
+		{
+			name:                   "No review decision without requirement passes",
+			reviewDecision:         "",
+			reviewApprovedRequired: false,
+			expectedDiff:           0,
+			expectedDescContains:   "",
+		},
+		// Branch filtering tests
+		{
+			name:                  "Branch in excluded list",
+			prBaseBranch:          "release-1.0",
+			queryExcludedBranches: []string{"release-1.0", "release-2.0"},
+			expectedDiff:          2000,
+			expectedDescContains:  "Merging to branch release-1.0 is forbidden",
+		},
+		{
+			name:                  "Branch not in excluded list",
+			prBaseBranch:          "main",
+			queryExcludedBranches: []string{"release-1.0", "release-2.0"},
+			expectedDiff:          0,
+			expectedDescContains:  "",
+		},
+		{
+			name:                  "Branch not in included list",
+			prBaseBranch:          "feature-branch",
+			queryIncludedBranches: []string{"main", "develop"},
+			expectedDiff:          2000,
+			expectedDescContains:  "Merging to branch feature-branch is forbidden",
+		},
+		{
+			name:                  "Branch in included list",
+			prBaseBranch:          "main",
+			queryIncludedBranches: []string{"main", "develop"},
+			expectedDiff:          0,
+			expectedDescContains:  "",
+		},
+		// Author tests
+		{
+			name:                 "Matching author",
+			prAuthor:             "alice",
+			queryAuthor:          "alice",
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name:                 "Non-matching author",
+			prAuthor:             "bob",
+			queryAuthor:          "alice",
+			expectedDiff:         1000,
+			expectedDescContains: "Must be by author alice",
+		},
+		{
+			name:                 "No author requirement",
+			prAuthor:             "anyone",
+			queryAuthor:          "",
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		// Milestone tests
+		{
+			name:                 "Matching milestone",
+			prMilestone:          &Milestone{Title: githubql.String("v1.0")},
+			queryMilestone:       "v1.0",
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name:                 "Non-matching milestone",
+			prMilestone:          &Milestone{Title: githubql.String("v1.1")},
+			queryMilestone:       "v1.0",
+			expectedDiff:         100,
+			expectedDescContains: "Must be in milestone v1.0",
+		},
+		{
+			name:                 "PR has no milestone but query requires one",
+			prMilestone:          nil,
+			queryMilestone:       "v1.0",
+			expectedDiff:         100,
+			expectedDescContains: "Must be in milestone v1.0",
+		},
+		{
+			name:                 "No milestone requirement",
+			prMilestone:          &Milestone{Title: githubql.String("v1.0")},
+			queryMilestone:       "",
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		// Label tests
+		{
+			name:                 "All required labels present",
+			prLabels:             []string{"lgtm", "approved"},
+			queryLabels:          []string{"lgtm", "approved"},
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name:                 "Missing one required label",
+			prLabels:             []string{"lgtm"},
+			queryLabels:          []string{"lgtm", "approved"},
+			expectedDiff:         1,
+			expectedDescContains: "Needs approved label",
+		},
+		{
+			name:                 "Missing multiple required labels",
+			prLabels:             []string{},
+			queryLabels:          []string{"lgtm", "approved"},
+			expectedDiff:         2,
+			expectedDescContains: "Needs approved, lgtm labels",
+		},
+		{
+			name:                 "Has forbidden label",
+			prLabels:             []string{"lgtm", "do-not-merge"},
+			queryForbiddenLabels: []string{"do-not-merge"},
+			expectedDiff:         1,
+			expectedDescContains: "Should not have do-not-merge label",
+		},
+		{
+			name:                 "Has multiple forbidden labels",
+			prLabels:             []string{"lgtm", "do-not-merge", "hold"},
+			queryForbiddenLabels: []string{"do-not-merge", "hold"},
+			expectedDiff:         2,
+			expectedDescContains: "Should not have do-not-merge, hold labels",
+		},
+		{
+			name:                 "Alternative labels (one of several)",
+			prLabels:             []string{"approved"},
+			queryLabels:          []string{"lgtm,approved"},
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name:                 "Alternative labels with none present",
+			prLabels:             []string{},
+			queryLabels:          []string{"lgtm,approved"},
+			expectedDiff:         1,
+			expectedDescContains: "Needs lgtm or approved label",
+		},
+		// Context tests
+		{
+			name: "All contexts successful",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+				{Context: githubql.String("ci/build"), State: githubql.StatusStateSuccess},
+			},
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name: "One failed context",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			expectedDiff:         1,
+			expectedDescContains: "Job ci/test has not succeeded",
+		},
+		{
+			name: "Multiple failed contexts",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+				{Context: githubql.String("ci/build"), State: githubql.StatusStateError},
+			},
+			expectedDiff:         2,
+			expectedDescContains: "Jobs ci/build, ci/test have not succeeded",
+		},
+		{
+			name: "Pending context counts as failed",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStatePending},
+			},
+			expectedDiff:         1,
+			expectedDescContains: "Job ci/test has not succeeded",
+		},
+		{
+			name: "Successful checkrun",
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("test-job"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+			},
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name: "Failed checkrun",
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("test-job"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateFailure)},
+			},
+			expectedDiff:         1,
+			expectedDescContains: "Job test-job has not succeeded",
+		},
+		// Priority ordering test: branch takes precedence
+		{
+			name:                  "Branch mismatch takes precedence over other issues",
+			prBaseBranch:          "forbidden-branch",
+			queryExcludedBranches: []string{"forbidden-branch"},
+			prAuthor:              "wrong-author",
+			queryAuthor:           "correct-author",
+			prLabels:              []string{},
+			queryLabels:           []string{"lgtm"},
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			expectedDiff:         3002, // 2000 (branch) + 1000 (author) + 1 (label) + 1 (context)
+			expectedDescContains: "Merging to branch forbidden-branch is forbidden",
+		},
+		// Author takes precedence over labels and contexts
+		{
+			name:        "Author mismatch takes precedence over labels and contexts",
+			prAuthor:    "wrong-author",
+			queryAuthor: "correct-author",
+			prLabels:    []string{},
+			queryLabels: []string{"lgtm"},
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			expectedDiff:         1002, // 1000 (author) + 1 (label) + 1 (context)
+			expectedDescContains: "Must be by author correct-author",
+		},
+		// Milestone takes precedence over labels and contexts
+		{
+			name:           "Milestone mismatch takes precedence over labels and contexts",
+			prMilestone:    &Milestone{Title: githubql.String("v1.1")},
+			queryMilestone: "v1.0",
+			prLabels:       []string{},
+			queryLabels:    []string{"lgtm"},
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			expectedDiff:         102, // 100 (milestone) + 1 (label) + 1 (context)
+			expectedDescContains: "Must be in milestone v1.0",
+		},
+		// Labels take precedence over contexts
+		{
+			name:        "Missing labels take precedence over failed contexts",
+			prLabels:    []string{},
+			queryLabels: []string{"lgtm"},
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			expectedDiff:         2, // 1 (label) + 1 (context)
+			expectedDescContains: "Needs lgtm label",
+		},
+		// Forbidden labels take precedence over contexts
+		{
+			name:                 "Forbidden labels take precedence over failed contexts",
+			prLabels:             []string{"do-not-merge"},
+			queryForbiddenLabels: []string{"do-not-merge"},
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			expectedDiff:         2, // 1 (forbidden label) + 1 (context)
+			expectedDescContains: "Should not have do-not-merge label",
+		},
+		// All aspects satisfied - perfect PR
+		{
+			name:                   "Complex: All requirements satisfied across all areas",
+			prBaseBranch:           "main",
+			queryIncludedBranches:  []string{"main", "develop"},
+			prAuthor:               "approved-contributor",
+			queryAuthor:            "approved-contributor",
+			prMilestone:            &Milestone{Title: githubql.String("v1.0")},
+			queryMilestone:         "v1.0",
+			prLabels:               []string{"lgtm", "approved", "size/small"},
+			queryLabels:            []string{"lgtm", "approved"},
+			queryForbiddenLabels:   []string{"do-not-merge", "hold"},
+			reviewDecision:         githubql.PullRequestReviewDecisionApproved,
+			reviewApprovedRequired: true,
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+				{Context: githubql.String("ci/lint"), State: githubql.StatusStateSuccess},
+			},
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("security-scan"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+				{Name: githubql.String("e2e-tests"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+			},
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		// All aspects with branch issue
+		{
+			name:                   "Complex: Multiple issues across all areas with branch taking precedence",
+			prBaseBranch:           "release-1.0",
+			queryExcludedBranches:  []string{"release-1.0"},
+			prAuthor:               "unauthorized-user",
+			queryAuthor:            "authorized-user",
+			prMilestone:            &Milestone{Title: githubql.String("v2.0")},
+			queryMilestone:         "v1.0",
+			prLabels:               []string{"do-not-merge"},
+			queryLabels:            []string{"lgtm", "approved"},
+			queryForbiddenLabels:   []string{"do-not-merge"},
+			reviewDecision:         githubql.PullRequestReviewDecisionChangesRequested,
+			reviewApprovedRequired: true,
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+				{Context: githubql.String("ci/lint"), State: githubql.StatusStateError},
+			},
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("security-scan"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateFailure)},
+			},
+			mergeStateStatus: "BLOCKED",
+			// 2000 (branch) + 1000 (author) + 100 (milestone) + 2 (missing labels) + 1 (forbidden label) + 100 (blocked) + 50 (review) + 3 (contexts: 2 status + 1 checkrun)
+			expectedDiff:         3256,
+			expectedDescContains: "Merging to branch release-1.0 is forbidden",
+		},
+		// All aspects with author issue
+		{
+			name:                   "Complex: Multiple issues across all areas with author taking precedence",
+			prBaseBranch:           "main",
+			queryIncludedBranches:  []string{"main", "develop"},
+			prAuthor:               "external-contributor",
+			queryAuthor:            "core-team",
+			prMilestone:            nil,
+			queryMilestone:         "v1.5",
+			prLabels:               []string{"help-wanted", "needs-rebase", "wip"},
+			queryLabels:            []string{"lgtm", "approved", "size/small"},
+			queryForbiddenLabels:   []string{"wip", "needs-rebase"},
+			reviewDecision:         githubql.PullRequestReviewDecisionApproved,
+			reviewApprovedRequired: true,
+			prContexts: []Context{
+				{Context: githubql.String("ci/build"), State: githubql.StatusStatePending},
+				{Context: githubql.String("ci/unit-tests"), State: githubql.StatusStateSuccess},
+			},
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("integration-tests"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+				{Name: githubql.String("e2e-tests"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateFailure)},
+			},
+			mergeStateStatus: "CLEAN",
+			// 0 (branch OK) + 1000 (author) + 100 (milestone) + 3 (missing labels) + 2 (forbidden labels) + 0 (not blocked) + 2 (failed contexts: ci/build pending + e2e-tests failed)
+			expectedDiff:         1107,
+			expectedDescContains: "Must be by author core-team",
+		},
+		// All aspects with milestone issue
+		{
+			name:                   "Complex: Branch and author OK, other issues present with milestone precedence",
+			prBaseBranch:           "develop",
+			queryIncludedBranches:  []string{"main", "develop"},
+			prAuthor:               "approved-dev",
+			queryAuthor:            "approved-dev",
+			prMilestone:            &Milestone{Title: githubql.String("backlog")},
+			queryMilestone:         "sprint-23",
+			prLabels:               []string{"lgtm", "hold"},
+			queryLabels:            []string{"lgtm", "approved"},
+			queryForbiddenLabels:   []string{"hold", "blocked"},
+			reviewDecision:         githubql.PullRequestReviewDecisionChangesRequested,
+			reviewApprovedRequired: false,
+			prContexts: []Context{
+				{Context: githubql.String("ci/verify"), State: githubql.StatusStateSuccess},
+			},
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("code-coverage"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateFailure)},
+			},
+			mergeStateStatus: "BLOCKED",
+			// 0 (branch OK) + 0 (author OK) + 100 (milestone) + 1 (missing approved label) + 1 (forbidden hold label) + 100 (blocked) + 1 (failed checkrun)
+			expectedDiff:         203,
+			expectedDescContains: "Must be in milestone sprint-23",
+		},
+		//  All aspects with changes requested issue
+		{
+			name:                   "Complex: All requirements met but changes requested blocks merge",
+			prBaseBranch:           "main",
+			queryIncludedBranches:  []string{"main", "develop"},
+			prAuthor:               "core-maintainer",
+			queryAuthor:            "core-maintainer",
+			prMilestone:            &Milestone{Title: githubql.String("v2.0")},
+			queryMilestone:         "v2.0",
+			prLabels:               []string{"lgtm", "approved", "ready-to-merge"},
+			queryLabels:            []string{"lgtm", "approved"},
+			queryForbiddenLabels:   []string{"do-not-merge", "hold"},
+			reviewDecision:         githubql.PullRequestReviewDecisionChangesRequested,
+			reviewApprovedRequired: false,
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+				{Context: githubql.String("ci/lint"), State: githubql.StatusStateSuccess},
+				{Context: githubql.String("ci/build"), State: githubql.StatusStateSuccess},
+			},
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("security-scan"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+				{Name: githubql.String("e2e-tests"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+			},
+			mergeStateStatus: "BLOCKED",
+			// 0 (branch OK) + 0 (author OK) + 0 (milestone OK) + 0 (labels OK) + 100 (blocked) + 50(review) + 0 (contexts OK)
+			expectedDiff:         100,
+			expectedDescContains: "Blocked by GitHub (branch rulesets or protection)",
+		},
+		// Tests for missing required contexts (new functionality)
+		{
+			name: "Missing required context not present in PR",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+			},
+			requiredContexts:     []string{"ci/required-check"},
+			expectedDiff:         2, // 1 for ci/test being present + 1 for missing ci/required-check
+			expectedDescContains: "Job ci/required-check has not succeeded",
+		},
+		{
+			name: "Multiple missing required contexts",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+			},
+			requiredContexts:     []string{"ci/required-1", "ci/required-2"},
+			expectedDiff:         4, // 1 for ci/test + 2 for missing required contexts + 1 for total context count
+			expectedDescContains: "Jobs ci/required-1, ci/required-2 have not succeeded",
+		},
+		{
+			name: "Required context present and successful",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+				{Context: githubql.String("ci/required-check"), State: githubql.StatusStateSuccess},
+			},
+			requiredContexts:     []string{"ci/required-check"},
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name: "Required context present but failed",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+				{Context: githubql.String("ci/required-check"), State: githubql.StatusStateFailure},
+			},
+			requiredContexts:     []string{"ci/required-check"},
+			expectedDiff:         1,
+			expectedDescContains: "Job ci/required-check has not succeeded",
+		},
+		{
+			name: "Duplicate contexts are deduplicated",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("ci/test"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateFailure)},
+			},
+			expectedDiff:         2, // Before deduplication: 2 failed ci/test, after: still counted as 2 in diff
+			expectedDescContains: "Job ci/test has not succeeded",
+		},
+		{
+			name: "Missing required context combined with failed context",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			requiredContexts:     []string{"ci/required-check"},
+			expectedDiff:         3, // 1 for ci/test in contexts + 1 for failed ci/test + 1 for missing ci/required-check
+			expectedDescContains: "Jobs ci/required-check, ci/test have not succeeded",
+		},
+		{
+			name: "Multiple missing required contexts with some failed contexts",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+				{Context: githubql.String("ci/lint"), State: githubql.StatusStateError},
+			},
+			requiredContexts:     []string{"ci/required-1", "ci/required-2"},
+			expectedDiff:         6, // 2 for contexts in PR + 2 failed + 2 missing required
+			expectedDescContains: "Jobs ci/lint, ci/required-1, ci/required-2, ci/test have not succeeded",
+		},
+		{
+			name: "Required context in checkrun format",
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("ci/required-check"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+			},
+			requiredContexts:     []string{"ci/required-check"},
+			expectedDiff:         0,
+			expectedDescContains: "",
+		},
+		{
+			name: "Required context missing when only checkruns present",
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("ci/other-check"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateSuccess)},
+			},
+			requiredContexts:     []string{"ci/required-check"},
+			expectedDiff:         2, // 1 for ci/other-check present + 1 for missing ci/required-check
+			expectedDescContains: "Job ci/required-check has not succeeded",
+		},
+		{
+			name: "Deduplication with failed context and missing required context with same name",
+			prContexts: []Context{
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateFailure},
+			},
+			requiredContexts:     []string{"ci/test"},
+			expectedDiff:         1,
+			expectedDescContains: "Job ci/test has not succeeded",
+		},
+		{
+			name: "Complex scenario with duplicates across contexts and checkruns",
+			prContexts: []Context{
+				{Context: githubql.String("ci/build"), State: githubql.StatusStateFailure},
+				{Context: githubql.String("ci/test"), State: githubql.StatusStateSuccess},
+			},
+			prCheckRuns: []CheckRun{
+				{Name: githubql.String("ci/build"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateFailure)},
+				{Name: githubql.String("ci/lint"), Status: githubql.String(githubql.CheckStatusStateCompleted), Conclusion: githubql.String(githubql.StatusStateFailure)},
+			},
+			requiredContexts:     []string{"ci/required", "ci/build"},
+			expectedDiff:         5, // 2 contexts + 2 checkruns = 4 total, 2 failed ci/build + 1 failed ci/lint + 1 missing ci/required + 1 for ci/build in required = 5
+			expectedDescContains: "Jobs ci/build, ci/lint, ci/required have not succeeded",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := &PullRequest{
+				ReviewDecision:   tc.reviewDecision,
+				MergeStateStatus: githubql.String(tc.mergeStateStatus),
+				HeadRefOID:       githubql.String("abc123"),
+			}
+
+			if tc.prBaseBranch != "" {
+				pr.BaseRef = struct {
+					Name   githubql.String
+					Prefix githubql.String
+				}{
+					Name: githubql.String(tc.prBaseBranch),
+				}
+			}
+
+			if tc.prAuthor != "" {
+				pr.Author = struct {
+					Login githubql.String
+				}{
+					Login: githubql.String(tc.prAuthor),
+				}
+			}
+
+			pr.Milestone = tc.prMilestone
+
+			for _, label := range tc.prLabels {
+				pr.Labels.Nodes = append(pr.Labels.Nodes, struct{ Name githubql.String }{Name: githubql.String(label)})
+			}
+
+			if len(tc.prContexts) > 0 || len(tc.prCheckRuns) > 0 {
+				var checkRunNodes []CheckRunNode
+				for _, cr := range tc.prCheckRuns {
+					checkRunNodes = append(checkRunNodes, CheckRunNode{CheckRun: cr})
+				}
+				pr.Commits.Nodes = append(pr.Commits.Nodes, struct{ Commit Commit }{
+					Commit: Commit{
+						OID: githubql.String("abc123"),
+						Status: struct{ Contexts []Context }{
+							Contexts: tc.prContexts,
+						},
+						StatusCheckRollup: StatusCheckRollup{
+							Contexts: StatusCheckRollupContext{
+								Nodes: checkRunNodes,
+							},
+						},
+					},
+				})
+			}
+
+			query := &config.TideQuery{
+				Labels:                 tc.queryLabels,
+				MissingLabels:          tc.queryForbiddenLabels,
+				Author:                 tc.queryAuthor,
+				Milestone:              tc.queryMilestone,
+				ExcludedBranches:       tc.queryExcludedBranches,
+				IncludedBranches:       tc.queryIncludedBranches,
+				ReviewApprovedRequired: tc.reviewApprovedRequired,
+			}
+
+			// Set repository info for the PR (needed for EnforceGitHubMergeBlocks check)
+			pr.Repository = struct {
+				Name          githubql.String
+				NameWithOwner githubql.String
+				Owner         struct {
+					Login githubql.String
+				}
+			}{
+				Name: githubql.String("test-repo"),
+				Owner: struct {
+					Login githubql.String
+				}{
+					Login: githubql.String("test-org"),
+				},
+			}
+
+			cc := &config.TideContextPolicy{
+				RequiredContexts: tc.requiredContexts,
+			}
+
+			desc, diff := requirementDiff(pr, query, cc, config.GitHubMergeBlocksBlock)
+
+			if diff != tc.expectedDiff {
+				t.Errorf("Expected diff %d, but got %d", tc.expectedDiff, diff)
+			}
+
+			if tc.expectedDescContains != "" {
+				if !strings.Contains(desc, tc.expectedDescContains) {
+					t.Errorf("Expected description to contain %q, but got %q", tc.expectedDescContains, desc)
+				}
+			} else if desc != "" {
+				t.Errorf("Expected empty description, but got %q", desc)
+			}
+		})
+	}
+}
+
+// TestContextCheckerGetterFactoryAppend tests that contextCheckerGetterFactory
+// appends additional required contexts instead of replacing them.
+func TestContextCheckerGetterFactoryAppend(t *testing.T) {
+	testCases := []struct {
+		name                    string
+		baseRequiredContexts    []string
+		additionalContexts      []string
+		expectedRequiredCount   int
+		expectedContextsContain []string
+	}{
+		{
+			name:                    "Append additional contexts to base contexts",
+			baseRequiredContexts:    []string{"ci/test", "ci/build"},
+			additionalContexts:      []string{"ci/lint", "ci/security"},
+			expectedRequiredCount:   4,
+			expectedContextsContain: []string{"ci/test", "ci/build", "ci/lint", "ci/security"},
+		},
+		{
+			name:                    "No additional contexts - base contexts remain",
+			baseRequiredContexts:    []string{"ci/test", "ci/build"},
+			additionalContexts:      []string{},
+			expectedRequiredCount:   2,
+			expectedContextsContain: []string{"ci/test", "ci/build"},
+		},
+		{
+			name:                    "Empty base contexts with additional contexts",
+			baseRequiredContexts:    []string{},
+			additionalContexts:      []string{"ci/lint", "ci/security"},
+			expectedRequiredCount:   2,
+			expectedContextsContain: []string{"ci/lint", "ci/security"},
+		},
+		{
+			name:                    "Both empty - no contexts",
+			baseRequiredContexts:    []string{},
+			additionalContexts:      []string{},
+			expectedRequiredCount:   0,
+			expectedContextsContain: []string{},
+		},
+		{
+			name:                    "Duplicate contexts are preserved (no deduplication in factory)",
+			baseRequiredContexts:    []string{"ci/test", "ci/build"},
+			additionalContexts:      []string{"ci/test", "ci/lint"},
+			expectedRequiredCount:   4,
+			expectedContextsContain: []string{"ci/test", "ci/build", "ci/lint"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a mock config with base required contexts
+			cfg := &config.Config{
+				ProwConfig: config.ProwConfig{
+					Tide: config.Tide{
+						TideGitHubConfig: config.TideGitHubConfig{
+							ContextOptions: config.TideContextPolicyOptions{
+								TideContextPolicy: config.TideContextPolicy{
+									RequiredContexts: tc.baseRequiredContexts,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			// Mock git client factory - return nil as it's not used in this test path
+			var gc git.ClientFactory
+
+			// Mock base SHA getter
+			baseSHAGetter := func() (string, error) {
+				return "base-sha", nil
+			}
+
+			// Create the context checker getter
+			ccGetter := contextCheckerGetterFactory(cfg, gc, "test-org", "test-repo", "main", baseSHAGetter, "head-sha", tc.additionalContexts)
+
+			// Call the getter to get the context checker
+			cc, err := ccGetter()
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+
+			// Cast to TideContextPolicy to access RequiredContexts
+			policy, ok := cc.(*config.TideContextPolicy)
+			if !ok {
+				t.Fatalf("Expected *config.TideContextPolicy, got %T", cc)
+			}
+
+			// Check the count
+			if len(policy.RequiredContexts) != tc.expectedRequiredCount {
+				t.Errorf("Expected %d required contexts, but got %d: %v", tc.expectedRequiredCount, len(policy.RequiredContexts), policy.RequiredContexts)
+			}
+
+			// Check that all expected contexts are present
+			contextSet := sets.New[string](policy.RequiredContexts...)
+			for _, expected := range tc.expectedContextsContain {
+				if !contextSet.Has(expected) {
+					t.Errorf("Expected context %q to be in required contexts, but it was not found. Got: %v", expected, policy.RequiredContexts)
+				}
+			}
+		})
+	}
+}
+
+func TestGitHubMergeBlocksPolicy(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		org                    string
+		repo                   string
+		mergeStateStatus       string
+		tideConfig             *config.Tide
+		expectedDiff           int
+		expectedDescContains   string
+		expectedDescNotContain string
+	}{
+		{
+			name:             "Block policy globally - BLOCKED state should add diff",
+			org:              "test-org",
+			repo:             "test-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"*": config.GitHubMergeBlocksBlock,
+				},
+			},
+			expectedDiff:         100,
+			expectedDescContains: "Blocked by GitHub",
+		},
+		{
+			name:             "Permit policy globally - BLOCKED state should not add diff",
+			org:              "test-org",
+			repo:             "test-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"*": config.GitHubMergeBlocksPermit,
+				},
+			},
+			expectedDiff:           0,
+			expectedDescNotContain: "Blocked by GitHub",
+		},
+		{
+			name:             "Ignore policy globally - BLOCKED state should not add diff",
+			org:              "test-org",
+			repo:             "test-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"*": config.GitHubMergeBlocksIgnore,
+				},
+			},
+			expectedDiff:           0,
+			expectedDescNotContain: "Blocked by GitHub",
+		},
+		{
+			name:             "Policy not configured (default to permit) - BLOCKED state should not add diff",
+			org:              "test-org",
+			repo:             "test-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig:       &config.Tide{},
+			expectedDiff:     0,
+		},
+		{
+			name:             "Block policy for specific org - BLOCKED state should add diff",
+			org:              "enforced-org",
+			repo:             "test-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"enforced-org": config.GitHubMergeBlocksBlock,
+				},
+			},
+			expectedDiff:         100,
+			expectedDescContains: "Blocked by GitHub",
+		},
+		{
+			name:             "Block policy for specific org - different org should use default (permit)",
+			org:              "other-org",
+			repo:             "test-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"enforced-org": config.GitHubMergeBlocksBlock,
+				},
+			},
+			expectedDiff: 0,
+		},
+		{
+			name:             "Block policy for specific repo - BLOCKED state should add diff",
+			org:              "test-org",
+			repo:             "enforced-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"test-org/enforced-repo": config.GitHubMergeBlocksBlock,
+				},
+			},
+			expectedDiff:         100,
+			expectedDescContains: "Blocked by GitHub",
+		},
+		{
+			name:             "Block policy for specific repo - different repo should use default (permit)",
+			org:              "test-org",
+			repo:             "other-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"test-org/enforced-repo": config.GitHubMergeBlocksBlock,
+				},
+			},
+			expectedDiff: 0,
+		},
+		{
+			name:             "Repo config overrides org config - repo uses ignore",
+			org:              "test-org",
+			repo:             "special-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"test-org":              config.GitHubMergeBlocksBlock,
+					"test-org/special-repo": config.GitHubMergeBlocksIgnore,
+				},
+			},
+			expectedDiff: 0,
+		},
+		{
+			name:             "Repo config overrides org config - repo uses block",
+			org:              "test-org",
+			repo:             "special-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"test-org":              config.GitHubMergeBlocksPermit,
+					"test-org/special-repo": config.GitHubMergeBlocksBlock,
+				},
+			},
+			expectedDiff:         100,
+			expectedDescContains: "Blocked by GitHub",
+		},
+		{
+			name:             "CLEAN merge state - block policy should not add diff",
+			org:              "test-org",
+			repo:             "test-repo",
+			mergeStateStatus: "CLEAN",
+			tideConfig: &config.Tide{
+				GitHubMergeBlocksPolicyMap: map[string]config.GitHubMergeBlocksPolicy{
+					"*": config.GitHubMergeBlocksBlock,
+				},
+			},
+			expectedDiff: 0,
+		},
+		{
+			name:             "Nil tide config - should not panic",
+			org:              "test-org",
+			repo:             "test-repo",
+			mergeStateStatus: "BLOCKED",
+			tideConfig:       nil,
+			expectedDiff:     0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := &PullRequest{
+				MergeStateStatus: githubql.String(tc.mergeStateStatus),
+				HeadRefOID:       githubql.String("abc123"),
+				Repository: struct {
+					Name          githubql.String
+					NameWithOwner githubql.String
+					Owner         struct {
+						Login githubql.String
+					}
+				}{
+					Name: githubql.String(tc.repo),
+					Owner: struct {
+						Login githubql.String
+					}{
+						Login: githubql.String(tc.org),
+					},
+				},
+			}
+
+			query := &config.TideQuery{}
+			cc := &config.TideContextPolicy{}
+
+			orgRepo := config.OrgRepo{Org: tc.org, Repo: tc.repo}
+			var policy config.GitHubMergeBlocksPolicy
+			if tc.tideConfig != nil {
+				policy = tc.tideConfig.GitHubMergeBlocksPolicy(orgRepo)
+			} else {
+				policy = config.GitHubMergeBlocksPermit
+			}
+
+			desc, diff := requirementDiff(pr, query, cc, policy)
+
+			if diff != tc.expectedDiff {
+				t.Errorf("Expected diff %d, but got %d", tc.expectedDiff, diff)
+			}
+
+			if tc.expectedDescContains != "" {
+				if !strings.Contains(desc, tc.expectedDescContains) {
+					t.Errorf("Expected description to contain %q, but got %q", tc.expectedDescContains, desc)
+				}
+			}
+
+			if tc.expectedDescNotContain != "" {
+				if strings.Contains(desc, tc.expectedDescNotContain) {
+					t.Errorf("Expected description NOT to contain %q, but got %q", tc.expectedDescNotContain, desc)
+				}
+			}
+		})
+	}
+}
+
+func TestPoolStatus(t *testing.T) {
+	testCases := []struct {
+		name           string
+		mergeState     string
+		policy         config.GitHubMergeBlocksPolicy
+		expectedStatus string
+	}{
+		{
+			name:           "BLOCKED with permit policy shows warning",
+			mergeState:     "BLOCKED",
+			policy:         config.GitHubMergeBlocksPermit,
+			expectedStatus: statusInPoolDespiteBlocked,
+		},
+		{
+			name:           "BLOCKED with block policy shows normal status",
+			mergeState:     "BLOCKED",
+			policy:         config.GitHubMergeBlocksBlock,
+			expectedStatus: statusInPool,
+		},
+		{
+			name:           "BLOCKED with ignore policy shows normal status",
+			mergeState:     "BLOCKED",
+			policy:         config.GitHubMergeBlocksIgnore,
+			expectedStatus: statusInPool,
+		},
+		{
+			name:           "CLEAN with permit policy shows normal status",
+			mergeState:     "CLEAN",
+			policy:         config.GitHubMergeBlocksPermit,
+			expectedStatus: statusInPool,
+		},
+		{
+			name:           "BEHIND with permit policy shows normal status",
+			mergeState:     "BEHIND",
+			policy:         config.GitHubMergeBlocksPermit,
+			expectedStatus: statusInPool,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := &PullRequest{
+				MergeStateStatus: githubql.String(tc.mergeState),
+			}
+
+			log := logrus.NewEntry(logrus.New())
+			status := poolStatus(pr, tc.policy, log)
+
+			if status != tc.expectedStatus {
+				t.Errorf("Expected status %q, but got %q", tc.expectedStatus, status)
+			}
+		})
+	}
+}
+
 func TestSetStatuses(t *testing.T) {
 	statusNotInPoolEmpty := fmt.Sprintf(statusNotInPool, "")
 	testcases := []struct {
@@ -1031,6 +2059,28 @@ func TestSetStatuses(t *testing.T) {
 }
 
 func TestTargetUrl(t *testing.T) {
+	makePR := func(authorLogin, authorTypeName, org, repo, headRef string) *PullRequest {
+		pr := &PullRequest{
+			Author: struct {
+				Login githubql.String
+			}{Login: githubql.String(authorLogin)},
+			Repository: struct {
+				Name          githubql.String
+				NameWithOwner githubql.String
+				Owner         struct {
+					Login githubql.String
+				}
+			}{
+				Owner:         struct{ Login githubql.String }{Login: githubql.String(org)},
+				Name:          githubql.String(repo),
+				NameWithOwner: githubql.String(fmt.Sprintf("%s/%s", org, repo)),
+			},
+			HeadRefName: githubql.String(headRef),
+		}
+		pr.AuthorMetadata.TypeName = githubql.String(authorTypeName)
+		return pr
+	}
+
 	testcases := []struct {
 		name   string
 		pr     *PullRequest
@@ -1057,64 +2107,20 @@ func TestTargetUrl(t *testing.T) {
 			expectedURL: "tide.com",
 		},
 		{
-			name: "PR dashboard config",
-			pr: &PullRequest{
-				Author: struct {
-					Login githubql.String
-				}{Login: githubql.String("author")},
-				Repository: struct {
-					Name          githubql.String
-					NameWithOwner githubql.String
-					Owner         struct {
-						Login githubql.String
-					}
-				}{NameWithOwner: githubql.String("org/repo")},
-				HeadRefName: "head",
-			},
+			name:        "PR dashboard config",
+			pr:          makePR("author", "", "org", "repo", "head"),
 			config:      config.Tide{TideGitHubConfig: config.TideGitHubConfig{PRStatusBaseURLs: map[string]string{"*": "pr.status.com"}}},
 			expectedURL: "pr.status.com?query=is%3Apr+repo%3Aorg%2Frepo+author%3Aauthor+head%3Ahead",
 		},
 		{
-			name: "generate link by default config",
-			pr: &PullRequest{
-				Author: struct {
-					Login githubql.String
-				}{Login: githubql.String("author")},
-				Repository: struct {
-					Name          githubql.String
-					NameWithOwner githubql.String
-					Owner         struct {
-						Login githubql.String
-					}
-				}{
-					Owner:         struct{ Login githubql.String }{Login: githubql.String("testOrg")},
-					Name:          githubql.String("testRepo"),
-					NameWithOwner: githubql.String("testOrg/testRepo"),
-				},
-				HeadRefName: "head",
-			},
+			name:        "generate link by default config",
+			pr:          makePR("author", "", "testOrg", "testRepo", "head"),
 			config:      config.Tide{TideGitHubConfig: config.TideGitHubConfig{PRStatusBaseURLs: map[string]string{"*": "default.pr.status.com"}}},
 			expectedURL: "default.pr.status.com?query=is%3Apr+repo%3AtestOrg%2FtestRepo+author%3Aauthor+head%3Ahead",
 		},
 		{
 			name: "generate link by org config",
-			pr: &PullRequest{
-				Author: struct {
-					Login githubql.String
-				}{Login: githubql.String("author")},
-				Repository: struct {
-					Name          githubql.String
-					NameWithOwner githubql.String
-					Owner         struct {
-						Login githubql.String
-					}
-				}{
-					Owner:         struct{ Login githubql.String }{Login: githubql.String("testOrg")},
-					Name:          githubql.String("testRepo"),
-					NameWithOwner: githubql.String("testOrg/testRepo"),
-				},
-				HeadRefName: "head",
-			},
+			pr:   makePR("author", "", "testOrg", "testRepo", "head"),
 			config: config.Tide{TideGitHubConfig: config.TideGitHubConfig{PRStatusBaseURLs: map[string]string{
 				"*":       "default.pr.status.com",
 				"testOrg": "byorg.pr.status.com"},
@@ -1123,29 +2129,25 @@ func TestTargetUrl(t *testing.T) {
 		},
 		{
 			name: "generate link by repo config",
-			pr: &PullRequest{
-				Author: struct {
-					Login githubql.String
-				}{Login: githubql.String("author")},
-				Repository: struct {
-					Name          githubql.String
-					NameWithOwner githubql.String
-					Owner         struct {
-						Login githubql.String
-					}
-				}{
-					Owner:         struct{ Login githubql.String }{Login: githubql.String("testOrg")},
-					Name:          githubql.String("testRepo"),
-					NameWithOwner: githubql.String("testOrg/testRepo"),
-				},
-				HeadRefName: "head",
-			},
+			pr:   makePR("author", "", "testOrg", "testRepo", "head"),
 			config: config.Tide{TideGitHubConfig: config.TideGitHubConfig{PRStatusBaseURLs: map[string]string{
 				"*":                "default.pr.status.com",
 				"testOrg":          "byorg.pr.status.com",
 				"testOrg/testRepo": "byrepo.pr.status.com"},
 			}},
 			expectedURL: "byrepo.pr.status.com?query=is%3Apr+repo%3AtestOrg%2FtestRepo+author%3Aauthor+head%3Ahead",
+		},
+		{
+			name:        "bot author uses app qualifier",
+			pr:          makePR("dependabot", github.UserTypeBot, "org", "repo", "dependabot/github_actions/actions/cache-4.0.0"),
+			config:      config.Tide{TideGitHubConfig: config.TideGitHubConfig{PRStatusBaseURLs: map[string]string{"*": "pr.status.com"}}},
+			expectedURL: "pr.status.com?query=is%3Apr+repo%3Aorg%2Frepo+author%3Aapp%2Fdependabot+head%3Adependabot%2Fgithub_actions%2Factions%2Fcache-4.0.0",
+		},
+		{
+			name:        "bot author avoids double app qualifier",
+			pr:          makePR("app/dependabot", github.UserTypeBot, "org", "repo", "dependabot/github_actions/actions/cache-4.0.0"),
+			config:      config.Tide{TideGitHubConfig: config.TideGitHubConfig{PRStatusBaseURLs: map[string]string{"*": "pr.status.com"}}},
+			expectedURL: "pr.status.com?query=is%3Apr+repo%3Aorg%2Frepo+author%3Aapp%2Fdependabot+head%3Adependabot%2Fgithub_actions%2Factions%2Fcache-4.0.0",
 		},
 	}
 

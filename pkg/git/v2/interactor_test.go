@@ -87,7 +87,7 @@ func TestInteractor_Clone(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -199,7 +199,7 @@ func TestInteractor_CloneWithRepoOpts(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -278,7 +278,7 @@ func TestInteractor_MirrorClone(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -340,7 +340,7 @@ func TestInteractor_Checkout(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -404,7 +404,7 @@ func TestInteractor_RevParse(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 			if actualOut != testCase.expectedOut {
 				t.Errorf("%s: got incorrect output: expected %v, got %v", testCase.name, testCase.expectedOut, actualOut)
@@ -466,7 +466,7 @@ func TestInteractor_BranchExists(t *testing.T) {
 				t.Errorf("%s: got incorrect output: expected %v, got %v", testCase.name, testCase.expectedOut, actualOut)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -520,7 +520,7 @@ func TestInteractor_ObjectExists(t *testing.T) {
 				t.Errorf("%s: got incorrect output: expected %v, got %v", testCase.name, testCase.expectedOut, actualOut)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -582,7 +582,7 @@ func TestInteractor_CheckoutNewBranch(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -672,7 +672,7 @@ func TestInteractor_Merge(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -907,6 +907,111 @@ func TestInteractor_MergeWithStrategy(t *testing.T) {
 			expectedMerge: false,
 			expectedErr:   true,
 		},
+		{
+			name:       "rebase succeeds",
+			commitlike: "prHead",
+			strategy:   "rebase",
+			responses: map[string]execResponse{
+				"rev-parse HEAD": {
+					out: []byte("baseSHA\n"),
+				},
+				"rebase --no-stat baseSHA prHead": {
+					out: []byte(`ok`),
+				},
+			},
+			expectedCalls: [][]string{
+				{"rev-parse", "HEAD"},
+				{"rebase", "--no-stat", "baseSHA", "prHead"},
+			},
+			expectedMerge: true,
+			expectedErr:   false,
+		},
+		{
+			name:       "rebase fails, abort succeeds, HEAD is restored to pre-rebase state",
+			commitlike: "prHead",
+			strategy:   "rebase",
+			responses: map[string]execResponse{
+				"rev-parse HEAD": {
+					out: []byte("baseSHA\n"),
+				},
+				"rebase --no-stat baseSHA prHead": {
+					err: errors.New("conflict"),
+				},
+				"rebase --abort": {
+					out: []byte(`ok`),
+				},
+				"checkout baseSHA": {
+					out: []byte(`ok`),
+				},
+			},
+			expectedCalls: [][]string{
+				{"rev-parse", "HEAD"},
+				{"rebase", "--no-stat", "baseSHA", "prHead"},
+				{"rebase", "--abort"},
+				{"checkout", "baseSHA"},
+			},
+			expectedMerge: false,
+			expectedErr:   false,
+		},
+		{
+			name:       "rebase fails, abort fails",
+			commitlike: "prHead",
+			strategy:   "rebase",
+			responses: map[string]execResponse{
+				"rev-parse HEAD": {
+					out: []byte("baseSHA\n"),
+				},
+				"rebase --no-stat baseSHA prHead": {
+					err: errors.New("conflict"),
+				},
+				"rebase --abort": {
+					err: errors.New("oops"),
+				},
+			},
+			expectedCalls: [][]string{
+				{"rev-parse", "HEAD"},
+				{"rebase", "--no-stat", "baseSHA", "prHead"},
+				{"rebase", "--abort"},
+			},
+			expectedMerge: false,
+			expectedErr:   true,
+		},
+		{
+			name:       "rebase fails, abort succeeds, HEAD restore fails",
+			commitlike: "prHead",
+			strategy:   "rebase",
+			responses: map[string]execResponse{
+				"rev-parse HEAD": {
+					out: []byte("baseSHA\n"),
+				},
+				"rebase --no-stat baseSHA prHead": {
+					err: errors.New("conflict"),
+				},
+				"rebase --abort": {
+					out: []byte(`ok`),
+				},
+				"checkout baseSHA": {
+					err: errors.New("oops"),
+				},
+			},
+			expectedCalls: [][]string{
+				{"rev-parse", "HEAD"},
+				{"rebase", "--no-stat", "baseSHA", "prHead"},
+				{"rebase", "--abort"},
+				{"checkout", "baseSHA"},
+			},
+			expectedMerge: false,
+			expectedErr:   true,
+		},
+		{
+			name:          "rebase with empty commitlike",
+			commitlike:    "",
+			strategy:      "rebase",
+			responses:     map[string]execResponse{},
+			expectedCalls: [][]string{},
+			expectedMerge: false,
+			expectedErr:   true,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -931,7 +1036,7 @@ func TestInteractor_MergeWithStrategy(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1104,7 +1209,7 @@ func TestInteractor_MergeAndCheckout(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1187,7 +1292,7 @@ func TestInteractor_Am(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1284,7 +1389,7 @@ func TestInteractor_RemoteUpdate(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1375,7 +1480,7 @@ func TestInteractor_Fetch(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1453,7 +1558,7 @@ func TestInteractor_FetchRef(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1541,7 +1646,7 @@ func TestInteractor_FetchFromRemote(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1671,7 +1776,7 @@ func TestInteractor_CheckoutPullRequest(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1735,7 +1840,7 @@ func TestInteractor_Config(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1813,7 +1918,7 @@ prow/git/v2/remote_test.go`),
 			}
 			actualOut, actualErr := i.Diff(testCase.head, testCase.sha)
 			if !reflect.DeepEqual(actualOut, testCase.expectedOut) {
-				t.Errorf("%s: got incorrect output: %v", testCase.name, diff.ObjectReflectDiff(actualOut, testCase.expectedOut))
+				t.Errorf("%s: got incorrect output: %v", testCase.name, diff.Diff(actualOut, testCase.expectedOut))
 			}
 			if testCase.expectedErr && actualErr == nil {
 				t.Errorf("%s: expected an error but got none", testCase.name)
@@ -1822,7 +1927,7 @@ prow/git/v2/remote_test.go`),
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1906,7 +2011,7 @@ func TestInteractor_MergeCommitsExistBetween(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1959,7 +2064,7 @@ func TestInteractor_ShowRef(t *testing.T) {
 				t.Errorf("%s: expected no error but got one: %v", testCase.name, actualErr)
 			}
 			if actual, expected := e.records, testCase.expectedCalls; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect git calls: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
