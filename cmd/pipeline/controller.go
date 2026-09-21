@@ -67,7 +67,7 @@ type controller struct {
 	pjLister   prowjoblisters.ProwJobLister
 	pjInformer cache.SharedIndexInformer
 
-	workqueue workqueue.RateLimitingInterface
+	workqueue workqueue.TypedRateLimitingInterface[any]
 
 	recorder record.EventRecorder
 
@@ -83,7 +83,7 @@ type controllerOptions struct {
 	pipelineConfigs map[string]pipelineConfig
 	totURL          string
 	prowConfig      config.Getter
-	rl              workqueue.RateLimitingInterface
+	rl              workqueue.TypedRateLimitingInterface[any]
 }
 
 // pjNamespace returns the prow namespace from configuration
@@ -152,7 +152,7 @@ func newController(opts controllerOptions) (*controller, error) {
 
 	// Reconcile whenever a prowjob changes
 	opts.pji.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
+		AddFunc: func(obj any) {
 			pj, ok := obj.(*prowjobv1.ProwJob)
 			if !ok {
 				logrus.Warnf("Ignoring bad prowjob add: %v", obj)
@@ -160,7 +160,7 @@ func newController(opts controllerOptions) (*controller, error) {
 			}
 			c.enqueueKey(pjutil.ClusterToCtx(pj.Spec.Cluster), pj)
 		},
-		UpdateFunc: func(old, new interface{}) {
+		UpdateFunc: func(old, new any) {
 			pj, ok := new.(*prowjobv1.ProwJob)
 			if !ok {
 				logrus.Warnf("Ignoring bad prowjob update: %v", new)
@@ -168,7 +168,7 @@ func newController(opts controllerOptions) (*controller, error) {
 			}
 			c.enqueueKey(pjutil.ClusterToCtx(pj.Spec.Cluster), pj)
 		},
-		DeleteFunc: func(obj interface{}) {
+		DeleteFunc: func(obj any) {
 			pj, ok := obj.(*prowjobv1.ProwJob)
 			if !ok {
 				logrus.Warnf("Ignoring bad prowjob delete: %v", obj)
@@ -180,15 +180,14 @@ func newController(opts controllerOptions) (*controller, error) {
 
 	for ctx, cfg := range opts.pipelineConfigs {
 		// Reconcile whenever a pipelinerun changes.
-		ctx := ctx // otherwise it will change
 		cfg.informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				c.enqueueKey(ctx, obj)
 			},
-			UpdateFunc: func(old, new interface{}) {
+			UpdateFunc: func(old, new any) {
 				c.enqueueKey(ctx, new)
 			},
-			DeleteFunc: func(obj interface{}) {
+			DeleteFunc: func(obj any) {
 				c.enqueueKey(ctx, obj)
 			},
 		})
@@ -209,7 +208,7 @@ func (c *controller) Run(threads int, stop <-chan struct{}) error {
 	}
 
 	logrus.Info("Starting workers")
-	for i := 0; i < threads; i++ {
+	for range threads {
 		go wait.Until(c.runWorker, time.Second, stop)
 	}
 
@@ -253,7 +252,7 @@ func fromKey(key string) (string, string, string, error) {
 }
 
 // enqueueKey schedules an item for reconciliation
-func (c *controller) enqueueKey(ctx string, obj interface{}) {
+func (c *controller) enqueueKey(ctx string, obj any) {
 	switch o := obj.(type) {
 	case *prowjobv1.ProwJob:
 		ns := o.Spec.Namespace
@@ -279,6 +278,7 @@ type reconciler interface {
 	createPipelineRun(context, namespace string, b *pipelinev1.PipelineRun) (*pipelinev1.PipelineRun, error)
 	pipelineID(prowjobv1.ProwJob) (string, string, error)
 	now() metav1.Time
+	allowConcurrentPostsubmitJobs() bool
 }
 
 func (c *controller) getPipelineConfig(ctx string) (pipelineConfig, error) {
@@ -374,6 +374,10 @@ func (c *controller) pipelineID(pj prowjobv1.ProwJob) (string, string, error) {
 	return id, url, nil
 }
 
+func (c *controller) allowConcurrentPostsubmitJobs() bool {
+	return c.config().Pipeline.AllowConcurrentPostsubmitJobs
+}
+
 func createProwJobIdentifier(pj *prowjobv1.ProwJob) string {
 	var additionalIdentifier string
 	if pj.Spec.Refs != nil {
@@ -408,6 +412,7 @@ func abortDuplicatedProwJobs(c reconciler, pj *prowjobv1.ProwJob) (*prowjobv1.Pr
 	if !runningState(pj.Status.State) || pj.Spec.Agent != prowjobv1.TektonAgent {
 		return pj, nil
 	}
+
 	id := createProwJobIdentifier(pj)
 	prowJobsToFilter, err := c.listProwJobs(pj.Namespace)
 	if err != nil {
@@ -461,9 +466,17 @@ func reconcile(c reconciler, key string) error {
 		wantPipelineRun = true
 	}
 	if !apierrors.IsNotFound(err) {
-		pj, err = abortDuplicatedProwJobs(c, pj)
-		if err != nil {
-			return fmt.Errorf("abort duplicated prowjobs: %w", err)
+		// Check if we should abort duplicates based on the feature flag and job type.
+		// When AllowConcurrentPostsubmitJobs is enabled, postsubmit jobs are allowed
+		// to run concurrently and should not be aborted.
+		shouldAbortDuplicates := !c.allowConcurrentPostsubmitJobs() || pj.Spec.Type != prowjobv1.PostsubmitJob
+		if shouldAbortDuplicates {
+			pj, err = abortDuplicatedProwJobs(c, pj)
+			if err != nil {
+				return fmt.Errorf("abort duplicated prowjobs: %w", err)
+			}
+		} else {
+			logrus.WithFields(pjutil.ProwJobFields(pj)).Info("Skipping abort for postsubmit job because AllowConcurrentPostsubmitJobs is enabled")
 		}
 	}
 	newpj := pj.DeepCopy()

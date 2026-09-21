@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -252,13 +253,7 @@ func TestArtifacts_ListGCS(t *testing.T) {
 				nested.Fatalf("Failed to get artifact names: %v", err)
 			}
 			for _, ea := range tc.expectedArtifacts {
-				found := false
-				for _, aa := range actualArtifacts {
-					if ea == aa {
-						found = true
-						break
-					}
-				}
+				found := slices.Contains(actualArtifacts, ea)
 				if !found {
 					nested.Fatalf("failed to retrieve the following artifact: %s\nRetrieved: %s.", ea, actualArtifacts)
 				}
@@ -392,7 +387,7 @@ RU5EIFBSSVZBVEUgS0VZLS0tLS1cbgo=`)
 		useCookie bool
 		expected  string
 		contains  []string
-		err       string
+		err       string // substring expected in the error
 	}{
 		{
 			name:     "anon auth works",
@@ -406,7 +401,7 @@ RU5EIFBSSVZBVEUgS0VZLS0tLS1cbgo=`)
 		{
 			name:      "invalid json file errors",
 			fakeCreds: "yaml: 123",
-			err:       "dialing: invalid character 'y' looking for beginning of value",
+			err:       "invalid character 'y' looking for beginning of value",
 		},
 		{
 			name: "bad private key errors",
@@ -424,7 +419,7 @@ RU5EIFBSSVZBVEUgS0VZLS0tLS1cbgo=`)
 			  "private_key": "` + fakePrivateKey + `",
 			  "client_email": "fake-user@k8s.io"
 			}`,
-			err: "dialing: unknown credential type: \"user\"",
+			err: `credentials: unsupported filetype "user"`,
 		},
 		{
 			name: "signed URLs work",
@@ -476,8 +471,8 @@ RU5EIFBSSVZBVEUgS0VZLS0tLS1cbgo=`)
 			}
 			switch {
 			case err != nil:
-				if tc.err != err.Error() {
-					t.Errorf("expected error: %v, got: %v", tc.err, err)
+				if tc.err == "" || !strings.Contains(err.Error(), tc.err) {
+					t.Errorf("expected error containing %q, got: %v", tc.err, err)
 				}
 			case tc.err != "":
 				t.Errorf("Failed to receive an expected error, got %q", actual)

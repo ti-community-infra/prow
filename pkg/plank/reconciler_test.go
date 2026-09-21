@@ -148,11 +148,10 @@ func TestAdd(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fakeProwJobInformer := &controllertest.FakeInformer{Synced: true}
-			fakePodInformers := &controllertest.FakeInformer{Synced: true}
+			fakeProwJobInformer := controllertest.NewFakeInformer(controllertest.Synced)
+			fakePodInformers := controllertest.NewFakeInformer(controllertest.Synced)
 
 			prowJobInformerStarted := make(chan struct{})
 			mgr, err := mgrFromFakeInformer(prowv1.SchemeGroupVersion.WithKind("ProwJob"), fakeProwJobInformer, prowJobInformerStarted)
@@ -179,7 +178,9 @@ func TestAdd(t *testing.T) {
 				predicateResultChan <- !b
 			}
 			var errMsg string
-			if err := add(mgr, buildMgrs, nil, cfg, nil, "", tc.additionalSelector, reconcile, predicateCallBack, 1); err != nil {
+			// Use unique controller name per test to avoid conflicts in controller-runtime v0.20.1
+			controllerName := "plank-test-" + tc.name
+			if err := add(mgr, buildMgrs, nil, cfg, nil, "", tc.additionalSelector, reconcile, predicateCallBack, 1, controllerName); err != nil {
 				errMsg = err.Error()
 			}
 			if errMsg != tc.expectedError {
@@ -188,8 +189,7 @@ func TestAdd(t *testing.T) {
 			if errMsg != "" {
 				return
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			go func() {
 				if err := mgr.Start(ctx); err != nil {
@@ -276,6 +276,13 @@ type eventHandlerSignalingInformer struct {
 
 func (ehsi *eventHandlerSignalingInformer) AddEventHandler(handler toolscache.ResourceEventHandler) (toolscache.ResourceEventHandlerRegistration, error) {
 	reg, err := ehsi.SharedIndexInformer.AddEventHandler(handler)
+	close(ehsi.signal)
+
+	return reg, err
+}
+
+func (ehsi *eventHandlerSignalingInformer) AddEventHandlerWithOptions(handler toolscache.ResourceEventHandler, opts toolscache.HandlerOptions) (toolscache.ResourceEventHandlerRegistration, error) {
+	reg, err := ehsi.SharedIndexInformer.AddEventHandlerWithOptions(handler, opts)
 	close(ehsi.signal)
 
 	return reg, err

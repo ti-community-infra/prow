@@ -91,7 +91,7 @@ html {
     color: rgba(255, 224, 0, 1.0);
 }
 .match-highlighted {
-    color: rgba(255, 0, 0, 1.0);
+    color: #ff4423;
 }
 .skipped {
     display: none;
@@ -134,6 +134,18 @@ html {
 
 .focus-line {
   background: #42425A;
+}
+
+.log-error {
+  color: #c23621;
+  padding: 8px 12px;
+  margin: 4px 0;
+}
+
+.log-warning {
+  color: #adad27;
+  padding: 8px 12px;
+  margin: 4px 0;
 }
 
 /* ansi colors from https://en.wikipedia.org/wiki/ANSI_escape_code#Colors */

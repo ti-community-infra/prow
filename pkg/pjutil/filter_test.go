@@ -116,6 +116,62 @@ func TestTestAllFilter(t *testing.T) {
 	}
 }
 
+func TestTestAllWithExistingStatusFilter(t *testing.T) {
+	successContexts := sets.New[string]("already-passing", "also-passing")
+
+	presubmits := []config.Presubmit{
+		{
+			JobBase:   config.JobBase{Name: "already-passing"},
+			Reporter:  config.Reporter{Context: "already-passing"},
+			AlwaysRun: true,
+		},
+		{
+			JobBase:   config.JobBase{Name: "still-failing"},
+			Reporter:  config.Reporter{Context: "still-failing"},
+			AlwaysRun: true,
+		},
+		{
+			JobBase:   config.JobBase{Name: "no-status-yet"},
+			Reporter:  config.Reporter{Context: "no-status-yet"},
+			AlwaysRun: true,
+		},
+		{
+			JobBase:      config.JobBase{Name: "needs-explicit"},
+			Reporter:     config.Reporter{Context: "needs-explicit"},
+			Trigger:      `(?m)^/test (?:.*? )?explicit(?: .*?)?$`,
+			RerunCommand: "/test explicit",
+		},
+		{
+			JobBase:   config.JobBase{Name: "also-passing"},
+			Reporter:  config.Reporter{Context: "also-passing"},
+			AlwaysRun: true,
+		},
+	}
+
+	expected := [][]bool{
+		{false, false, false}, // already-passing: skipped (in success set)
+		{true, false, false},  // still-failing: run
+		{true, false, false},  // no-status-yet: run
+		{false, false, false}, // needs-explicit: skipped (explicit trigger)
+		{false, false, false}, // also-passing: skipped (in success set)
+	}
+
+	if err := config.SetPresubmitRegexes(presubmits); err != nil {
+		t.Fatalf("could not set presubmit regexes: %v", err)
+	}
+
+	filter := NewTestAllWithExistingStatusFilter(successContexts)
+	for i, presubmit := range presubmits {
+		actualFiltered, actualForced, actualDefault := filter.ShouldRun(presubmit)
+		expectedFiltered, expectedForced, expectedDefault := expected[i][0], expected[i][1], expected[i][2]
+		if actualFiltered != expectedFiltered || actualForced != expectedForced || actualDefault != expectedDefault {
+			t.Errorf("presubmit %q: expected (%v, %v, %v) but got (%v, %v, %v)",
+				presubmit.Name, expectedFiltered, expectedForced, expectedDefault,
+				actualFiltered, actualForced, actualDefault)
+		}
+	}
+}
+
 func TestCommandFilter(t *testing.T) {
 	var testCases = []struct {
 		name         string
@@ -411,7 +467,7 @@ func TestFilterPresubmits(t *testing.T) {
 				t.Errorf("%s: expected no error filtering presubmits, but got one: %v", testCase.name, err)
 			}
 			if !reflect.DeepEqual(actualToTrigger, testCase.expectedToTrigger) {
-				t.Errorf("%s: incorrect set of presubmits to skip: %s", testCase.name, diff.ObjectReflectDiff(actualToTrigger, testCase.expectedToTrigger))
+				t.Errorf("%s: incorrect set of presubmits to skip: %s", testCase.name, diff.Diff(actualToTrigger, testCase.expectedToTrigger))
 			}
 		})
 	}
@@ -465,12 +521,12 @@ func TestPresubmitFilter(t *testing.T) {
 		},
 	}}
 	var testCases = []struct {
-		name                 string
-		honorOkToTest        bool
-		body, org, repo, ref string
-		presubmits           []config.Presubmit
-		expected             [][]bool
-		statusErr, expectErr bool
+		name                  string
+		honorOkToTest         bool
+		body, org, repo, ref  string
+		presubmits            []config.Presubmit
+		expected              [][]bool
+		statusErr, expectErr  bool
 	}{
 		{
 			name: "test all comment selects all tests that don't need an explicit trigger",
@@ -751,6 +807,58 @@ func TestPresubmitFilter(t *testing.T) {
 				},
 			},
 			expected: [][]bool{{false, false, false}, {false, false, false}, {false, false, false}, {true, false, true}, {true, false, false}},
+		},
+		{
+			name: "test-manual-required triggers only required manual jobs without file conditions",
+			body: "/test-manual-required",
+			org:  "org",
+			repo: "repo",
+			ref:  "ref",
+			presubmits: []config.Presubmit{
+				{
+					JobBase:      config.JobBase{Name: "manual-required"},
+					Reporter:     config.Reporter{Context: "manual-required"},
+					Trigger:      `(?m)^/test (?:.*? )?manual(?: .*?)?$`,
+					RerunCommand: "/test manual",
+				},
+				{
+					JobBase:      config.JobBase{Name: "manual-optional"},
+					Optional:     true,
+					Reporter:     config.Reporter{Context: "manual-optional"},
+					Trigger:      `(?m)^/test (?:.*? )?manual-optional(?: .*?)?$`,
+					RerunCommand: "/test manual-optional",
+				},
+				{
+					JobBase:   config.JobBase{Name: "always-runs"},
+					AlwaysRun: true,
+					Reporter:  config.Reporter{Context: "always-runs"},
+				},
+				{
+					JobBase:      config.JobBase{Name: "run-if-changed"},
+					Reporter:     config.Reporter{Context: "run-if-changed"},
+					Trigger:      `(?m)^/test (?:.*? )?conditional(?: .*?)?$`,
+					RerunCommand: "/test conditional",
+					RegexpChangeMatcher: config.RegexpChangeMatcher{
+						RunIfChanged: "sometimes",
+					},
+				},
+				{
+					JobBase:      config.JobBase{Name: "skip-if-only-changed"},
+					Reporter:     config.Reporter{Context: "skip-if-only-changed"},
+					Trigger:      `(?m)^/test (?:.*? )?skip(?: .*?)?$`,
+					RerunCommand: "/test skip",
+					RegexpChangeMatcher: config.RegexpChangeMatcher{
+						SkipIfOnlyChanged: "sometimes",
+					},
+				},
+			},
+			expected: [][]bool{
+				{true, true, false},
+				{false, false, false},
+				{false, false, false},
+				{false, false, false},
+				{false, false, false},
+			},
 		},
 		{
 			name: "explicit test command filters for jobs that match",

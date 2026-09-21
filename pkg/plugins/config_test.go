@@ -31,7 +31,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
 	"sigs.k8s.io/prow/pkg/bugzilla"
@@ -147,7 +146,7 @@ func TestOwnersFilenames(t *testing.T) {
 		}
 		actual := cfg.OwnersFilenames(tc.org, tc.repo)
 		if actual != tc.expected {
-			t.Errorf("%s/%s: unexpected value. Diff: %v", tc.org, tc.repo, diff.ObjectDiff(actual, tc.expected))
+			t.Errorf("%s/%s: unexpected value. Diff: %v", tc.org, tc.repo, diff.Diff(actual, tc.expected))
 		}
 	}
 }
@@ -206,7 +205,7 @@ func TestSetDefault_Maps(t *testing.T) {
 		}
 		for k, n := range tc.expected {
 			if an := actual[k]; !reflect.DeepEqual(an, n) {
-				t.Errorf("%s - %s: unexpected value. Diff: %v", tc.name, k, diff.ObjectReflectDiff(an, n))
+				t.Errorf("%s - %s: unexpected value. Diff: %v", tc.name, k, diff.Diff(an, n))
 			}
 		}
 	}
@@ -551,7 +550,7 @@ func TestOptionsForItem(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			if actual, expected := OptionsForItem(testCase.item, testCase.config), testCase.expected; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: got incorrect options for item %q: %v", testCase.name, testCase.item, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: got incorrect options for item %q: %v", testCase.name, testCase.item, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -735,12 +734,12 @@ func TestResolveBugzillaOptions(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			if actual, expected := ResolveBugzillaOptions(testCase.parent, testCase.child), testCase.expected; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: resolved incorrect options for parent and child: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: resolved incorrect options for parent and child: %v", testCase.name, diff.Diff(actual, expected))
 			}
 		})
 	}
 
-	var i int = 0
+	var i = 0
 	managedCol1 := ManagedColumn{ID: &i, Name: "col1", State: "open", Labels: []string{"area/conformance", "area/testing"}, Org: "org1"}
 	managedCol3 := ManagedColumn{ID: &i, Name: "col2", State: "open", Labels: []string{}, Org: "org2"}
 	managedColx := ManagedColumn{ID: &i, Name: "col2", State: "open", Labels: []string{"area/conformance", "area/testing"}, Org: "org2"}
@@ -972,7 +971,7 @@ orgs:
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			if actual, expected := config.OptionsForBranch(testCase.org, testCase.repo, testCase.branch), testCase.expected; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: resolved incorrect options for %s/%s#%s: %v", testCase.name, testCase.org, testCase.repo, testCase.branch, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: resolved incorrect options for %s/%s#%s: %v", testCase.name, testCase.org, testCase.repo, testCase.branch, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1065,7 +1064,7 @@ orgs:
 	for _, testCase := range repoTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			if actual, expected := config.OptionsForRepo(testCase.org, testCase.repo), testCase.expected; !reflect.DeepEqual(actual, expected) {
-				t.Errorf("%s: resolved incorrect options for %s/%s: %v", testCase.name, testCase.org, testCase.repo, diff.ObjectReflectDiff(actual, expected))
+				t.Errorf("%s: resolved incorrect options for %s/%s: %v", testCase.name, testCase.org, testCase.repo, diff.Diff(actual, expected))
 			}
 		})
 	}
@@ -1232,7 +1231,7 @@ func TestBugzillaBugState_AsBugUpdate(t *testing.T) {
 			}
 
 			if !reflect.DeepEqual(tc.expected, actual) {
-				t.Errorf("%s: BugUpdate differs from expected:\n%s", tc.name, diff.ObjectReflectDiff(*actual, *tc.expected))
+				t.Errorf("%s: BugUpdate differs from expected:\n%s", tc.name, diff.Diff(*actual, *tc.expected))
 			}
 		})
 	}
@@ -1463,7 +1462,7 @@ func TestConfigUpdaterResolve(t *testing.T) {
 				Maps: map[string]ConfigMapSpec{"map": {
 					Name:          "name",
 					Key:           "key",
-					GZIP:          ptr.To(true),
+					GZIP:          new(true),
 					ClusterGroups: []string{"some-group", "another-group"}},
 				},
 			},
@@ -1471,7 +1470,7 @@ func TestConfigUpdaterResolve(t *testing.T) {
 				Maps: map[string]ConfigMapSpec{"map": {
 					Name: "name",
 					Key:  "key",
-					GZIP: ptr.To(true),
+					GZIP: new(true),
 					Clusters: map[string][]string{
 						"cluster-a": {"namespace-a"},
 						"cluster-b": {"namespace-b"},
@@ -1653,16 +1652,14 @@ func TestConfigMergingProperties(t *testing.T) {
 	fuzzer := fuzz.NewWithSeed(seed)
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			for _, propertyTest := range expectedProperties {
-				propertyTest := propertyTest
 				t.Run(propertyTest.name, func(t *testing.T) {
 					t.Parallel()
 
-					for i := 0; i < 100; i++ {
+					for range 100 {
 						fuzzedConfig := &Configuration{}
 						fuzzer.Fuzz(fuzzedConfig)
 
@@ -2226,7 +2223,7 @@ func TestHasConfigFor(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			for i := 0; i < 100; i++ {
+			for range 100 {
 				fuzzedConfig := &Configuration{}
 				fuzzer.Fuzz(fuzzedConfig)
 
@@ -2418,6 +2415,101 @@ func TestValidatePluginsDupes(t *testing.T) {
 	}
 }
 
+func TestValidateMutuallyExclusivePlugins(t *testing.T) {
+	testCases := []struct {
+		name        string
+		plugins     Plugins
+		expectError bool
+		errContains string
+	}{
+		{
+			name: "no conflict",
+			plugins: Plugins{
+				"org": OrgPlugins{
+					Plugins: []string{"approve", "blunderbuss"},
+				},
+				"org/repo": OrgPlugins{
+					Plugins: []string{"lgtm"},
+				},
+			},
+		},
+		{
+			name: "both in same entry",
+			plugins: Plugins{
+				"org": OrgPlugins{
+					Plugins: []string{"blunderbuss", "rifle"},
+				},
+			},
+			expectError: true,
+			errContains: "mutually exclusive",
+		},
+		{
+			name: "org has blunderbuss, repo has rifle",
+			plugins: Plugins{
+				"org": OrgPlugins{
+					Plugins: []string{"blunderbuss"},
+				},
+				"org/repo": OrgPlugins{
+					Plugins: []string{"rifle"},
+				},
+			},
+			expectError: true,
+			errContains: "mutually exclusive",
+		},
+		{
+			name: "org has rifle, repo has blunderbuss",
+			plugins: Plugins{
+				"org": OrgPlugins{
+					Plugins: []string{"rifle"},
+				},
+				"org/repo": OrgPlugins{
+					Plugins: []string{"blunderbuss"},
+				},
+			},
+			expectError: true,
+			errContains: "mutually exclusive",
+		},
+		{
+			name: "no conflict when repo is excluded",
+			plugins: Plugins{
+				"org": OrgPlugins{
+					Plugins:       []string{"blunderbuss"},
+					ExcludedRepos: []string{"repo"},
+				},
+				"org/repo": OrgPlugins{
+					Plugins: []string{"rifle"},
+				},
+			},
+		},
+		{
+			name: "separate orgs no conflict",
+			plugins: Plugins{
+				"org-a": OrgPlugins{
+					Plugins: []string{"blunderbuss"},
+				},
+				"org-b": OrgPlugins{
+					Plugins: []string{"rifle"},
+				},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMutuallyExclusivePlugins(tc.plugins)
+			if tc.expectError {
+				if err == nil {
+					t.Fatal("expected error but got nil")
+				}
+				if !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("expected error containing %q, got: %v", tc.errContains, err)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestRestrictedLabelsFor(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -2584,6 +2676,351 @@ func TestRestrictedLabelsFor(t *testing.T) {
 				if !expectedTriggers.Equal(actualTriggers) {
 					t.Errorf("AssignOn triggers mismatch for %s:\nexpected: %v\ngot: %v", labelKey, sets.List(expectedTriggers), sets.List(actualTriggers))
 				}
+			}
+		})
+	}
+}
+
+func TestConfigMapSpecIsAllowed(t *testing.T) {
+	testCases := []struct {
+		name     string
+		cm       ConfigMapSpec
+		repo     string // in org/repo format
+		expected bool
+	}{
+		{
+			name:     "no ACLs configured - allow all",
+			cm:       ConfigMapSpec{Name: "test-config"},
+			repo:     "kubernetes/test-infra",
+			expected: true,
+		},
+		{
+			name: "org/repo in allowed repos - allowed",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"kubernetes/test-infra", "kubernetes/kubernetes"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: true,
+		},
+		{
+			name: "org/repo not in allowed repos - denied",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"kubernetes/kubernetes"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: false,
+		},
+		{
+			name: "org in allowed repos (org-level entry) - allowed",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"kubernetes", "istio"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: true,
+		},
+		{
+			name: "org not in allowed repos - denied",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"istio"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: false,
+		},
+		{
+			name: "org/repo in denied repos - denied",
+			cm: ConfigMapSpec{
+				Name:        "test-config",
+				DeniedRepos: []string{"kubernetes/test-infra"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: false,
+		},
+		{
+			name: "org/repo not in denied repos - allowed",
+			cm: ConfigMapSpec{
+				Name:        "test-config",
+				DeniedRepos: []string{"kubernetes/kubernetes"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: true,
+		},
+		{
+			name: "org in denied repos (org-level entry) - denied",
+			cm: ConfigMapSpec{
+				Name:        "test-config",
+				DeniedRepos: []string{"kubernetes"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: false,
+		},
+		{
+			name: "org denied, different org/repo not explicitly allowed - denied",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				DeniedRepos:  []string{"kubernetes"},
+				AllowedRepos: []string{"kubernetes/kubernetes"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: false,
+		},
+		{
+			name: "org/repo in allowed repos but also in denied repos - denied (deny takes precedence)",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"kubernetes/test-infra"},
+				DeniedRepos:  []string{"kubernetes/test-infra"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: false,
+		},
+		{
+			name: "org allowed but specific org/repo in denied repos - denied",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"kubernetes"},
+				DeniedRepos:  []string{"kubernetes/test-infra"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: false,
+		},
+		{
+			name: "mixed org and org/repo entries - allowed via org/repo",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"istio", "kubernetes/test-infra"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: true,
+		},
+		{
+			name: "mixed org and org/repo entries - allowed via org",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"kubernetes", "istio/istio"},
+			},
+			repo:     "kubernetes/test-infra",
+			expected: true,
+		},
+		{
+			name: "empty repo with no ACLs - allowed",
+			cm: ConfigMapSpec{
+				Name: "test-config",
+			},
+			repo:     "",
+			expected: true,
+		},
+		{
+			name: "empty repo with allowed repos - denied",
+			cm: ConfigMapSpec{
+				Name:         "test-config",
+				AllowedRepos: []string{"kubernetes"},
+			},
+			repo:     "",
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := tc.cm.IsAllowed(tc.repo)
+			if result != tc.expected {
+				t.Errorf("Expected IsAllowed(%q) = %v, got %v", tc.repo, tc.expected, result)
+			}
+		})
+	}
+}
+
+func TestValidateInvalidCommitMsg(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      []InvalidCommitMsg
+		expectedErr bool
+	}{
+		{
+			name: "valid config",
+			config: []InvalidCommitMsg{
+				{
+					Repos: []string{"kubernetes/test-infra", "kubernetes"},
+					Checks: []InvalidCommitMsgCheck{
+						{Name: "fixupPrefix", Disabled: false},
+					},
+				},
+			},
+			expectedErr: false,
+		},
+		{
+			name: "empty repo name",
+			config: []InvalidCommitMsg{
+				{
+					Repos: []string{"kubernetes/test-infra", ""},
+					Checks: []InvalidCommitMsgCheck{
+						{Name: "fixupPrefix"},
+					},
+				},
+			},
+			expectedErr: true,
+		},
+		{
+			name: "whitespace repo name",
+			config: []InvalidCommitMsg{
+				{
+					Repos: []string{"kubernetes/test-infra", "  "},
+					Checks: []InvalidCommitMsgCheck{
+						{Name: "fixupPrefix", Disabled: true},
+					},
+				},
+			},
+			expectedErr: true,
+		},
+		{
+			name: "invalid check name",
+			config: []InvalidCommitMsg{
+				{
+					Repos: []string{"kubernetes"},
+					Checks: []InvalidCommitMsgCheck{
+						{Name: "invalidCheck"},
+					},
+				},
+			},
+			expectedErr: true,
+		},
+		{
+			name: "empty check name",
+			config: []InvalidCommitMsg{
+				{
+					Repos: []string{"kubernetes"},
+					Checks: []InvalidCommitMsgCheck{
+						{Name: ""},
+					},
+				},
+			},
+			expectedErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateInvalidCommitMsg(test.config)
+			if test.expectedErr && err == nil {
+				t.Errorf("expected error but got none")
+			}
+			if !test.expectedErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestInvalidCommitMsgFor(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   Configuration
+		org      string
+		repo     string
+		expected InvalidCommitMsg
+	}{
+		{
+			name: "repo level config",
+			config: Configuration{
+				InvalidCommitMsg: []InvalidCommitMsg{
+					{
+						Repos: []string{"kubernetes/test-infra"},
+						Checks: []InvalidCommitMsgCheck{
+							{Name: "fixupPrefix", Disabled: false},
+						},
+					},
+					{
+						Repos: []string{"kubernetes"},
+						Checks: []InvalidCommitMsgCheck{
+							{Name: "fixupPrefix", Disabled: true},
+						},
+					},
+				},
+			},
+			org:  "kubernetes",
+			repo: "test-infra",
+			expected: InvalidCommitMsg{
+				Repos: []string{"kubernetes/test-infra"},
+				Checks: []InvalidCommitMsgCheck{
+					{Name: "fixupPrefix", Disabled: false},
+				},
+			},
+		},
+		{
+			name: "org level config",
+			config: Configuration{
+				InvalidCommitMsg: []InvalidCommitMsg{
+					{
+						Repos: []string{"kubernetes"},
+						Checks: []InvalidCommitMsgCheck{
+							{Name: "fixupPrefix", Disabled: false},
+						},
+					},
+				},
+			},
+			org:  "kubernetes",
+			repo: "community",
+			expected: InvalidCommitMsg{
+				Repos: []string{"kubernetes"},
+				Checks: []InvalidCommitMsgCheck{
+					{Name: "fixupPrefix", Disabled: false},
+				},
+			},
+		},
+		{
+			name: "no config",
+			config: Configuration{
+				InvalidCommitMsg: []InvalidCommitMsg{
+					{
+						Repos: []string{"other-org"},
+						Checks: []InvalidCommitMsgCheck{
+							{Name: "fixupPrefix", Disabled: false},
+						},
+					},
+				},
+			},
+			org:      "kubernetes",
+			repo:     "test-infra",
+			expected: InvalidCommitMsg{},
+		},
+		{
+			name: "repo config takes precedence over org config",
+			config: Configuration{
+				InvalidCommitMsg: []InvalidCommitMsg{
+					{
+						Repos: []string{"kubernetes"},
+						Checks: []InvalidCommitMsgCheck{
+							{Name: "fixupPrefix", Disabled: true},
+						},
+					},
+					{
+						Repos: []string{"kubernetes/test-infra"},
+						Checks: []InvalidCommitMsgCheck{
+							{Name: "fixupPrefix", Disabled: false},
+						},
+					},
+				},
+			},
+			org:  "kubernetes",
+			repo: "test-infra",
+			expected: InvalidCommitMsg{
+				Repos: []string{"kubernetes/test-infra"},
+				Checks: []InvalidCommitMsgCheck{
+					{Name: "fixupPrefix", Disabled: false},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := test.config.InvalidCommitMsgFor(test.org, test.repo)
+			if !reflect.DeepEqual(*result, test.expected) {
+				t.Errorf("expected %+v, got %+v", test.expected, *result)
 			}
 		})
 	}

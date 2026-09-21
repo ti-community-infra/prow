@@ -297,7 +297,7 @@ func TestCombineMetadata(t *testing.T) {
 	cases := []struct {
 		name     string
 		pieces   []string
-		expected map[string]interface{}
+		expected map[string]any
 	}{
 		{
 			name:   "no problem when metadata file is not there",
@@ -306,7 +306,7 @@ func TestCombineMetadata(t *testing.T) {
 		{
 			name:   "simple metadata",
 			pieces: []string{`{"hello": "world"}`},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"hello": "world",
 			},
 		},
@@ -316,7 +316,7 @@ func TestCombineMetadata(t *testing.T) {
 				`{"hello": "hello", "world": "world", "first": 1}`,
 				`{"hello": "hola", "world": "world", "second": 2}`,
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"hello":  "hola",
 				"world":  "world",
 				"first":  1.0,
@@ -332,7 +332,7 @@ func TestCombineMetadata(t *testing.T) {
 				"json-error", // this is invalid json
 				`{"world": "thanks"}`,
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"hello": "there",
 				"world": "thanks",
 				errorKey: map[string]error{
@@ -373,11 +373,11 @@ func TestCombineMetadata(t *testing.T) {
 			delete(tc.expected, errorKey)
 			delete(actual, errorKey)
 			if !equality.Semantic.DeepEqual(tc.expected, actual) {
-				t.Errorf("maps do not match:\n%s", diff.ObjectReflectDiff(tc.expected, actual))
+				t.Errorf("maps do not match:\n%s", diff.Diff(tc.expected, actual))
 			}
 
 			if !equality.Semantic.DeepEqual(sets.KeySet[string](expectedErrors), sets.KeySet[string](actualErrors)) { // ignore the error values
-				t.Errorf("errors do not match:\n%s", diff.ObjectReflectDiff(expectedErrors, actualErrors))
+				t.Errorf("errors do not match:\n%s", diff.Diff(expectedErrors, actualErrors))
 			}
 		})
 	}
@@ -504,7 +504,7 @@ func TestLogReaders(t *testing.T) {
 			}
 
 			if !equality.Semantic.DeepEqual(tc.expected, actual) {
-				t.Errorf("maps do not match:\n%s", diff.ObjectReflectDiff(tc.expected, actual))
+				t.Errorf("maps do not match:\n%s", diff.Diff(tc.expected, actual))
 			}
 		})
 	}

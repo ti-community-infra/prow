@@ -22,7 +22,7 @@ import (
 	"fmt"
 	stdio "io"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,8 +45,9 @@ import (
 )
 
 const (
-	statusContext = "tide"
-	statusInPool  = "In merge pool."
+	statusContext              = "tide"
+	statusInPool               = "In merge pool."
+	statusInPoolDespiteBlocked = "In merge pool (despite BLOCKED)."
 	// statusNotInPool is a format string used when a PR is not in a tide pool.
 	// The '%s' field is populated with the reason why the PR is not in a
 	// tide pool or the empty string if the reason is unknown. See requirementDiff.
@@ -125,7 +126,7 @@ func (sc *statusController) shutdown() {
 // Note: an empty diff can be returned if the reason that the PR does not match
 // the TideQuery is unknown. This can happen if this function's logic
 // does not match GitHub's and does not indicate that the PR matches the query.
-func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker) (string, int) {
+func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker, mergeBlocksPolicy config.GitHubMergeBlocksPolicy) (string, int) {
 	const maxLabelChars = 50
 	var desc string
 	var diff int
@@ -204,7 +205,7 @@ func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker) (s
 	}
 	diff += len(missingLabels)
 	if desc == "" && len(missingLabels) > 0 {
-		sort.Strings(missingLabels)
+		slices.Sort(missingLabels)
 		trunced := truncate(missingLabels)
 		if len(trunced) == 1 {
 			desc = fmt.Sprintf(" Needs %s label.", trunced[0])
@@ -224,7 +225,7 @@ func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker) (s
 	}
 	diff += len(presentLabels)
 	if desc == "" && len(presentLabels) > 0 {
-		sort.Strings(presentLabels)
+		slices.Sort(presentLabels)
 		trunced := truncate(presentLabels)
 		if len(trunced) == 1 {
 			desc = fmt.Sprintf(" Should not have %s label.", trunced[0])
@@ -238,14 +239,21 @@ func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker) (s
 	log := logrus.WithFields(pr.logFields())
 	for _, commit := range pr.Commits.Nodes {
 		if commit.Commit.OID == pr.HeadRefOID {
-			for _, ctx := range unsuccessfulContexts(append(commit.Commit.Status.Contexts, checkRunNodesToContexts(log, commit.Commit.StatusCheckRollup.Contexts.Nodes)...), cc, log) {
+			headContexts := append(commit.Commit.Status.Contexts, checkRunNodesToContexts(log, commit.Commit.StatusCheckRollup.Contexts.Nodes)...)
+			for _, ctx := range unsuccessfulContexts(headContexts, cc, log) {
 				contexts = append(contexts, string(ctx.Context))
 			}
+			presentContexts := sets.New[string]()
+			for _, ctx := range headContexts {
+				presentContexts.Insert(string(ctx.Context))
+			}
+			contexts = append(contexts, cc.MissingRequiredContexts(presentContexts.UnsortedList())...)
 		}
 	}
 	diff += len(contexts)
 	if desc == "" && len(contexts) > 0 {
-		sort.Strings(contexts)
+		slices.Sort(contexts)
+		contexts = slices.Compact(contexts)
 		trunced := truncate(contexts)
 		if len(trunced) == 1 {
 			desc = fmt.Sprintf(" Job %s has not succeeded.", trunced[0])
@@ -258,6 +266,12 @@ func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker) (s
 		diff += 50
 		if desc == "" {
 			desc = " PullRequest is missing sufficient approving GitHub review(s)"
+		}
+	}
+	if mergeBlocksPolicy == config.GitHubMergeBlocksBlock && pr.MergeStateStatus == MergeStateStatusBlocked {
+		diff += 100
+		if desc == "" {
+			desc = " Blocked by GitHub (branch rulesets or protection)"
 		}
 	}
 	return desc, diff
@@ -278,6 +292,7 @@ func (sc *statusController) expectedStatus(log *logrus.Entry, queryMap *config.Q
 	}
 
 	repo := config.OrgRepo{Org: crc.Org, Repo: crc.Repo}
+	mergeBlocksPolicy := sc.config().Tide.GitHubMergeBlocksPolicy(repo)
 
 	if reason, err := sc.ghProvider.isAllowedToMerge(crc); err != nil {
 		return "", "", fmt.Errorf("error checking if merge is allowed: %w", err)
@@ -315,7 +330,7 @@ func (sc *statusController) expectedStatus(log *logrus.Entry, queryMap *config.Q
 		minDiffCount := -1
 		var minDiff string
 		for _, q := range queryMap.ForRepo(repo) {
-			diff, diffCount := requirementDiff(pr, &q, cc)
+			diff, diffCount := requirementDiff(pr, &q, cc, mergeBlocksPolicy)
 			if diffCount == 0 {
 				hasFulfilledQuery = true
 				break
@@ -347,7 +362,7 @@ func (sc *statusController) expectedStatus(log *logrus.Entry, queryMap *config.Q
 	if err := sc.pjClient.List(context.Background(), passingUpToDatePJs, ctrlruntimeclient.MatchingFields{indexNamePassingJobs: indexKey}); err != nil {
 		// Just log the error and return success, as the PR is in the merge pool
 		log.WithError(err).Error("Failed to list ProwJobs.")
-		return github.StatusSuccess, statusInPool, nil
+		return github.StatusSuccess, poolStatus(pr, mergeBlocksPolicy, log), nil
 	}
 
 	var passingUpToDateContexts []string
@@ -357,11 +372,28 @@ func (sc *statusController) expectedStatus(log *logrus.Entry, queryMap *config.Q
 	if diff := cc.MissingRequiredContexts(passingUpToDateContexts); len(diff) > 0 {
 		return github.StatePending, retestingStatus(diff), nil
 	}
-	return github.StatusSuccess, statusInPool, nil
+	return github.StatusSuccess, poolStatus(pr, mergeBlocksPolicy, log), nil
+}
+
+// poolStatus returns the appropriate status message for a PR that is in the merge pool.
+// If the PR has BLOCKED merge state and the policy is "permit", it returns a warning message.
+// This also logs a warning for monitoring purposes.
+func poolStatus(pr *PullRequest, mergeBlocksPolicy config.GitHubMergeBlocksPolicy, log *logrus.Entry) string {
+	if mergeBlocksPolicy == config.GitHubMergeBlocksPermit && pr.MergeStateStatus == MergeStateStatusBlocked {
+		log.WithFields(logrus.Fields{
+			"org":         string(pr.Repository.Owner.Login),
+			"repo":        string(pr.Repository.Name),
+			"pr":          pr.Number,
+			"merge_state": pr.MergeStateStatus,
+			"policy":      config.GitHubMergeBlocksPermit,
+		}).Warning("PR is in merge pool despite GitHub BLOCKED status (policy: permit)")
+		return statusInPoolDespiteBlocked
+	}
+	return statusInPool
 }
 
 func retestingStatus(retested []string) string {
-	sort.Strings(retested)
+	slices.Sort(retested)
 	all := fmt.Sprintf(statusNotInPool, fmt.Sprintf(" Retesting: %s", strings.Join(retested, " ")))
 	if len(all) > maxStatusDescriptionLength {
 		s := ""
@@ -394,7 +426,11 @@ func targetURL(c *config.Config, crc *CodeReviewCommon, log *logrus.Entry) strin
 		if err != nil {
 			log.WithError(err).Error("Failed to parse PR status base URL")
 		} else {
-			prQuery := fmt.Sprintf("is:pr repo:%s author:%s head:%s", pr.Repository.NameWithOwner, crc.AuthorLogin, crc.HeadRefName)
+			authorLogin := crc.AuthorLogin
+			if string(pr.AuthorMetadata.TypeName) == github.UserTypeBot && !strings.HasPrefix(authorLogin, "app/") {
+				authorLogin = "app/" + authorLogin
+			}
+			prQuery := fmt.Sprintf("is:pr repo:%s author:%s head:%s", pr.Repository.NameWithOwner, authorLogin, crc.HeadRefName)
 			values := parseURL.Query()
 			values.Set("query", prQuery)
 			parseURL.RawQuery = values.Encode()
@@ -562,12 +598,7 @@ func (sc *statusController) run() {
 	ticks := time.NewTicker(time.Hour)
 	defer ticks.Stop()
 	go sc.save(ticks)
-	for {
-		// wait for a new pool
-		if !<-sc.newPoolPending {
-			// chan was closed
-			break
-		}
+	for <-sc.newPoolPending {
 		sc.waitSync()
 	}
 	close(sc.shutDown)
@@ -629,12 +660,12 @@ func (sc *statusController) search() []CodeReviewCommon {
 		for org := range queries {
 			orgs = append(orgs, org)
 		}
-		sort.Strings(orgs)
-		var query string
+		slices.Sort(orgs)
+		var query strings.Builder
 		for _, org := range orgs {
-			query += " " + queries[org]
+			query.WriteString(" " + queries[org])
 		}
-		queries = map[string]string{"": query}
+		queries = map[string]string{"": query.String()}
 	}
 
 	if sc.storedState == nil {
@@ -647,11 +678,8 @@ func (sc *statusController) search() []CodeReviewCommon {
 	var wg sync.WaitGroup
 
 	for org, query := range queries {
-		org, query := org, query
-		wg.Add(1)
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			now := time.Now()
 			log := sc.logger.WithField("query", query)
 
@@ -692,11 +720,10 @@ func (sc *statusController) search() []CodeReviewCommon {
 			defer lock.Unlock()
 
 			for _, pr := range result {
-				pr := pr
 				prs = append(prs, *CodeReviewCommonFromPullRequest(&pr))
 			}
 			errs = append(errs, err)
-		}()
+		})
 
 	}
 	wg.Wait()
@@ -772,7 +799,9 @@ func contextCheckerGetterFactory(cfg *config.Config, gc git.ClientFactory, org, 
 		if err != nil {
 			return nil, err
 		}
-		contextPolicy.RequiredContexts = requiredContexts
+		if len(requiredContexts) > 0 {
+			contextPolicy.RequiredContexts = append(contextPolicy.RequiredContexts, requiredContexts...)
+		}
 		return contextPolicy, nil
 	}
 }

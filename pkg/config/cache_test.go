@@ -156,8 +156,8 @@ func TestGetProwYAMLCached(t *testing.T) {
 
 	// goodValConstructorForInitialState is used for warming up the cache for
 	// tests that need it.
-	goodValConstructorForInitialState := func(val ProwYAML) func() (interface{}, error) {
-		return func() (interface{}, error) {
+	goodValConstructorForInitialState := func(val ProwYAML) func() (any, error) {
+		return func() (any, error) {
 			return &val, nil
 		}
 	}
@@ -409,7 +409,7 @@ func TestGetProwYAMLCached(t *testing.T) {
 					if err != nil {
 						t.Errorf("Expected error 'nil' got '%v'", err.Error())
 					}
-					_, _, _ = cache.GetOrAdd(k, func() (interface{}, error) { return "<wrong-type>", nil })
+					_, _, _ = cache.GetOrAdd(k, func() (any, error) { return "<wrong-type>", nil })
 				}
 			}
 
@@ -488,7 +488,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 			DefaultOrg:   "org",
 			DefaultRepo:  "repo",
 		},
-		GCSCredentialsSecret: pStr("service-account-secret"),
+		GCSCredentialsSecret: new("service-account-secret"),
 		UtilityImages: &prowapi.UtilityImages{
 			CloneRefs:  "clonerefs:default-BEFORE",
 			InitUpload: "initupload:default-BEFORE",
@@ -504,7 +504,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 			DefaultOrg:   "org",
 			DefaultRepo:  "repo",
 		},
-		GCSCredentialsSecret: pStr("service-account-secret"),
+		GCSCredentialsSecret: new("service-account-secret"),
 		UtilityImages: &prowapi.UtilityImages{
 			CloneRefs:  "clonerefs:default-AFTER",
 			InitUpload: "initupload:default-AFTER",
@@ -526,7 +526,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 				Name:           "presubmitFoo",
 				Agent:          "kubernetes",
 				Cluster:        "clusterFoo",
-				Namespace:      pStr("default"),
+				Namespace:      new("default"),
 				ProwJobDefault: &prowapi.ProwJobDefault{TenantID: "GlobalDefaultID"},
 				Spec: &v1.PodSpec{
 					Containers: []v1.Container{
@@ -558,7 +558,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 				Name:           "postsubmitFoo",
 				Agent:          "kubernetes",
 				Cluster:        "clusterFoo",
-				Namespace:      pStr("default"),
+				Namespace:      new("default"),
 				ProwJobDefault: &prowapi.ProwJobDefault{TenantID: "GlobalDefaultID"},
 				Spec: &v1.PodSpec{
 					Containers: []v1.Container{
@@ -594,7 +594,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 			JobBase: JobBase{
 				Name:      "presubmitFoo",
 				Cluster:   "clusterFoo",
-				Namespace: pStr("default"),
+				Namespace: new("default"),
 				Spec: &v1.PodSpec{
 					Containers: []v1.Container{
 						{
@@ -610,7 +610,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 			JobBase: JobBase{
 				Name:      "postsubmitFoo",
 				Cluster:   "clusterFoo",
-				Namespace: pStr("default"),
+				Namespace: new("default"),
 				Spec: &v1.PodSpec{
 					Containers: []v1.Container{
 						{
@@ -733,7 +733,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 							Name:           "presubmitFoo",
 							Agent:          "kubernetes",
 							Cluster:        "clusterFoo",
-							Namespace:      pStr("default"),
+							Namespace:      new("default"),
 							ProwJobDefault: &prowapi.ProwJobDefault{TenantID: "GlobalDefaultID"},
 							Spec: &v1.PodSpec{
 								Containers: []v1.Container{
@@ -765,7 +765,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 							Name:           "postsubmitFoo",
 							Agent:          "kubernetes",
 							Cluster:        "clusterFoo",
-							Namespace:      pStr("default"),
+							Namespace:      new("default"),
 							ProwJobDefault: &prowapi.ProwJobDefault{TenantID: "GlobalDefaultID"},
 							Spec: &v1.PodSpec{
 								Containers: []v1.Container{
@@ -809,7 +809,7 @@ func TestGetProwYAMLCachedAndDefaulted(t *testing.T) {
 			// initial Config.
 			// Make sure that this runs concurrently without problem.
 			var errGroup errgroup.Group
-			for i := 0; i < 1000; i++ {
+			for range 1000 {
 				errGroup.Go(func() error {
 					presubmits, err := cache.GetPresubmits(identifier, baseBranch, baseSHAGetter, headSHAGetters...)
 					if err != nil {

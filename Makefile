@@ -29,11 +29,33 @@ go-unit:
 	hack/make-rules/go-test/unit.sh
 .PHONY: go-unit
 # integration tests
-# integration:
-#	hack/make-rules/go-test/integration.sh
+integration:
+	test/integration/integration-test.sh
 # all tests
 test: unit
 .PHONY: test
+################################################################################
+# ============================== Development ===================================
+# local development environment (kind cluster with fake external services)
+.PHONY: dev
+dev:
+	hack/dev-env.sh $(if $(strip $(KIND_CONFIG)),-kind-config="$(KIND_CONFIG)")
+# full dev environment with all Prow components (heavier, matches integration tests)
+.PHONY: dev-full
+dev-full:
+	hack/dev-env.sh -profile=full $(if $(strip $(KIND_CONFIG)),-kind-config="$(KIND_CONFIG)")
+# Tilt inner loop - run 'make dev' once first, then use this for auto-rebuild
+.PHONY: dev-tilt
+dev-tilt:
+	@command -v tilt >/dev/null 2>&1 || { \
+		echo "ERROR: tilt not found. Install it from https://docs.tilt.dev/install.html"; exit 1; }
+	@docker inspect -f '{{.State.Running}}' kind-prow-integration-control-plane \
+		>/dev/null 2>&1 || { \
+		echo "ERROR: kind cluster not running. Run 'make dev' first."; exit 1; }
+	tilt up
+.PHONY: dev-teardown
+dev-teardown:
+	hack/dev-env.sh -teardown
 ################################################################################
 # ================================= Cleanup ====================================
 # standard cleanup target
@@ -100,22 +122,21 @@ PROW_IMAGE ?=
 
 .PHONY: push-images
 push-images:
-	hack/make-rules/go-run/arbitrary.sh run ./hack/prowimagebuilder --prow-images-file=./.prow-images.yaml --ko-docker-repo="${REGISTRY}" --push=true
+	hack/make-rules/go-run/arbitrary.sh -C ./hack/tools run ./prowimagebuilder --prow-images-file=$(shell pwd)/.prow-images.yaml --ko-docker-repo="${REGISTRY}" --push=true
 
 .PHONY: build-images
 build-images:
-	hack/make-rules/go-run/arbitrary.sh run ./hack/prowimagebuilder --prow-images-file=./.prow-images.yaml --ko-docker-repo="ko.local" --push=false
-
+	hack/make-rules/go-run/arbitrary.sh -C ./hack/tools run ./prowimagebuilder --prow-images-file=$(shell pwd)/.prow-images.yaml --ko-docker-repo="ko.local" --push=false
 .PHONY: push-single-image
 push-single-image:
-	hack/make-rules/go-run/arbitrary.sh run ./hack/prowimagebuilder --prow-images-file=./.prow-images.yaml --ko-docker-repo="${REGISTRY}" --push=true --image=${PROW_IMAGE}
+	hack/make-rules/go-run/arbitrary.sh -C ./hack/tools run ./prowimagebuilder --prow-images-file=$(shell pwd)/.prow-images.yaml --ko-docker-repo="${REGISTRY}" --push=true --image=${PROW_IMAGE}
 
 .PHONY: build-single-image
 build-single-image:
-	hack/make-rules/go-run/arbitrary.sh run ./hack/prowimagebuilder --prow-images-file=./.prow-images.yaml --ko-docker-repo="ko.local" --push=false --image=${PROW_IMAGE}
+	hack/make-rules/go-run/arbitrary.sh -C ./hack/tools run ./prowimagebuilder --prow-images-file=$(shell pwd)/.prow-images.yaml --ko-docker-repo="ko.local" --push=false --image=${PROW_IMAGE}
 
 .PHONY: build-tarball
 build-tarball:
 # use --ko-docker-repo="something.not.exist" as ko skips writing `.tar` file if
 # it's `ko.local.
-	hack/make-rules/go-run/arbitrary.sh run ./hack/prowimagebuilder --prow-images-file=./.prow-images.yaml --ko-docker-repo="something.not.exist" --push=false --image=${PROW_IMAGE}
+	hack/make-rules/go-run/arbitrary.sh -C ./hack/tools run ./prowimagebuilder --prow-images-file=$(shell pwd)/.prow-images.yaml --ko-docker-repo="something.not.exist" --push=false --image=${PROW_IMAGE}

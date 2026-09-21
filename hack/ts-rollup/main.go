@@ -29,7 +29,7 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -202,7 +202,6 @@ func main() {
 	}
 
 	for _, pi := range pis.Packages {
-		pi := pi
 		wg.Add(1)
 		packageChan <- pi
 	}

@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/scheme"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/utils/ptr"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -63,7 +62,7 @@ type PodReport struct {
 type resourceGetter interface {
 	GetPod(ctx context.Context, cluster, namespace, name string) (*v1.Pod, error)
 	GetNode(ctx context.Context, cluster, name string) (*v1.Node, error)
-	GetEvents(cluster, namespace string, pod *v1.Pod) ([]v1.Event, error)
+	GetEvents(ctx context.Context, cluster, namespace string, pod *v1.Pod) ([]v1.Event, error)
 	PatchPod(ctx context.Context, cluster, namespace, name string, pt types.PatchType, data []byte) error
 }
 
@@ -98,11 +97,11 @@ func (rg k8sResourceGetter) PatchPod(ctx context.Context, cluster, namespace, na
 	return err
 }
 
-func (rg k8sResourceGetter) GetEvents(cluster, namespace string, pod *v1.Pod) ([]v1.Event, error) {
+func (rg k8sResourceGetter) GetEvents(ctx context.Context, cluster, namespace string, pod *v1.Pod) ([]v1.Event, error) {
 	if _, ok := rg.podClientSets[cluster]; !ok {
 		return nil, fmt.Errorf("couldn't find cluster %q", cluster)
 	}
-	events, err := rg.podClientSets[cluster].Events(namespace).Search(scheme.Scheme, pod)
+	events, err := rg.podClientSets[cluster].Events(namespace).SearchWithContext(ctx, scheme.Scheme, pod)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +193,7 @@ func (gr *gcsK8sReporter) reportPodInfo(ctx context.Context, log *logrus.Entry, 
 	var events []v1.Event
 	var node *v1.Node
 	if pod != nil {
-		events, err = gr.rg.GetEvents(pj.Spec.Cluster, gr.cfg().PodNamespace, pod)
+		events, err = gr.rg.GetEvents(ctx, pj.Spec.Cluster, gr.cfg().PodNamespace, pod)
 		if err != nil {
 			log.WithError(err).Info("Couldn't fetch events for pod")
 		}
@@ -233,7 +232,7 @@ func (gr *gcsK8sReporter) reportPodInfo(ctx context.Context, log *logrus.Entry, 
 		return nil
 	}
 
-	overWriteOpts := io.WriterOptions{PreconditionDoesNotExist: ptr.To(false)}
+	overWriteOpts := io.WriterOptions{PreconditionDoesNotExist: new(false)}
 	podInfoPath, err := providers.StoragePath(bucketName, path.Join(dir, "podinfo.json"))
 	if err != nil {
 		return fmt.Errorf("failed to resolve podinfo.json path: %v", err)

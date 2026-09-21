@@ -242,8 +242,7 @@ func (gi *GitHubProvider) prepareMergeDetails(commitTemplates config.TideMergeCo
 
 func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdateStatus *threadSafePRSet) ([]CodeReviewCommon, error) {
 	var merged []CodeReviewCommon
-	var failed []int
-	var errs []error
+	var errs []mergeErr
 	log := sp.log.WithField("merge-targets", prNumbers(prs))
 	tideConfig := gi.cfg().Tide
 	tideContextPolicy := config.ParseTideContextPolicyOptions(sp.org, sp.repo, sp.branch, tideConfig.ContextOptions)
@@ -255,8 +254,7 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 		if mergeMethod == nil {
 			err := fmt.Errorf("multiple merge method labels found for %s/%s#%d", sp.org, sp.repo, pr.Number)
 			log.WithError(err).Error("Multiple merge method labels are not supported.")
-			errs = append(errs, err)
-			failed = append(failed, pr.Number)
+			errs = append(errs, mergeErr{err: err, pr: pr.Number, userFacing: true, operatorFacing: true})
 			continue
 		}
 
@@ -265,8 +263,7 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 		dontUpdateStatus.insert(sp.org, sp.repo, pr.Number)
 		if err := setTideStatusSuccess(pr, gi.ghc, gi.cfg(), log); err != nil {
 			log.WithError(err).Error("Unable to set tide context to SUCCESS.")
-			errs = append(errs, err)
-			failed = append(failed, pr.Number)
+			errs = append(errs, mergeErr{err: err, pr: pr.Number, operatorFacing: true})
 			continue
 		}
 
@@ -275,8 +272,7 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 			log.Infof("%d Contexts of pending presubmit jobs will be overwritten", i)
 			if err := gi.overwriteProwJobContextsWithStatusSuccess(pr, prowJobsForPRs[pr.Number], log); err != nil {
 				log.WithError(err).Error("Unable to set contexts of pending presubmit jobs to SUCCESS.")
-				errs = append(errs, err)
-				failed = append(failed, pr.Number)
+				errs = append(errs, mergeErr{err: err, pr: pr.Number, operatorFacing: true})
 				continue
 			}
 		}
@@ -287,13 +283,13 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 			return gi.ghc.Merge(sp.org, sp.repo, pr.Number, ghMergeDetails)
 		})
 		if err != nil {
-			// These are user errors, shouldn't be printed as tide errors
 			log.WithError(err).Debug("Merge failed.")
 			// Keep merge failures visible: without this they would only be
 			// retried silently on every sync.
 			reason := mergeFailureReason(err)
 			tideMetrics.mergeFailures.WithLabelValues(sp.org, sp.repo, sp.branch, reason).Inc()
 			log.WithField("reason", reason).WithError(err).Warn("Merge failed.")
+			errs = append(errs, mergeErr{err: err, pr: pr.Number, userFacing: true})
 		} else {
 			log.Info("Merged.")
 			merged = append(merged, pr)
@@ -312,7 +308,6 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 		return merged, nil
 	}
 
-	// Construct a more informative error.
 	var batch string
 	if len(prs) > 1 {
 		batch = fmt.Sprintf(" from batch %v", prNumbers(prs))
@@ -320,7 +315,7 @@ func (gi *GitHubProvider) mergePRs(sp subpool, prs []CodeReviewCommon, dontUpdat
 			batch = fmt.Sprintf("%s, partial merge %v", batch, prNumbers(merged))
 		}
 	}
-	return merged, fmt.Errorf("failed merging %v%s: %w", failed, batch, utilerrors.NewAggregate(errs))
+	return merged, &mergeFailure{errs: errs, batch: batch}
 }
 
 // mergeFailureReason classifies a merge error for the tide merge failure metric.
@@ -438,21 +433,32 @@ func (gi *GitHubProvider) GetChangedFiles(org, repo string, number int) ([]strin
 }
 
 func (gi *GitHubProvider) refsForJob(sp subpool, prs []CodeReviewCommon) (prowapi.Refs, error) {
+	// Get the configured GitHub host URL (defaults to https://github.com if not set)
+	githubHost := "https://" + github.DefaultHost
+	if gi.cfg().GitHubOptions.LinkURL != nil {
+		githubHost = gi.cfg().GitHubOptions.LinkURL.String()
+	}
+
 	refs := prowapi.Refs{
-		Org:     sp.org,
-		Repo:    sp.repo,
-		BaseRef: sp.branch,
-		BaseSHA: sp.sha,
+		Org:      sp.org,
+		Repo:     sp.repo,
+		BaseRef:  sp.branch,
+		BaseSHA:  sp.sha,
+		RepoLink: fmt.Sprintf("%s/%s/%s", githubHost, sp.org, sp.repo),
+		BaseLink: fmt.Sprintf("%s/%s/%s/tree/%s", githubHost, sp.org, sp.repo, sp.sha),
 	}
 	for _, pr := range prs {
 		refs.Pulls = append(
 			refs.Pulls,
 			prowapi.Pull{
-				Number:  pr.Number,
-				Title:   pr.Title,
-				Author:  string(pr.AuthorLogin),
-				SHA:     pr.HeadRefOID,
-				HeadRef: pr.HeadRefName,
+				Number:     pr.Number,
+				Title:      pr.Title,
+				Author:     string(pr.AuthorLogin),
+				SHA:        pr.HeadRefOID,
+				HeadRef:    pr.HeadRefName,
+				Link:       fmt.Sprintf("%s/%s/%s/pull/%d", githubHost, sp.org, sp.repo, pr.Number),
+				CommitLink: fmt.Sprintf("%s/%s/%s/commit/%s", githubHost, sp.org, sp.repo, pr.HeadRefOID),
+				AuthorLink: fmt.Sprintf("%s/%s", githubHost, pr.AuthorLogin),
 			},
 		)
 	}
@@ -650,6 +656,18 @@ func (m *mergeChecker) isAllowedToMerge(crc *CodeReviewCommon) (string, error) {
 		return "", fmt.Errorf("Programmer error! PR requested the unrecognized merge type %q", *mergeMethod)
 	} else if !allowed {
 		return fmt.Sprintf("Merge type %q disallowed by repo settings", *mergeMethod), nil
+	}
+	if pr.MergeStateStatus == MergeStateStatusBlocked {
+		switch policy := m.config().Tide.GitHubMergeBlocksPolicy(orgRepo); policy {
+		case config.GitHubMergeBlocksBlock:
+			return "PR is blocked from merging by GitHub (check branch protection, required reviews, or rulesets)", nil
+		case config.GitHubMergeBlocksPermit:
+			// Allow merge but the warning will be surfaced in PR status by requirementDiff
+		case config.GitHubMergeBlocksIgnore:
+			// Ignore BLOCKED status entirely
+		default:
+			return "", fmt.Errorf("unexpected github_merge_blocks_policy value %q", policy)
+		}
 	}
 	return "", nil
 }

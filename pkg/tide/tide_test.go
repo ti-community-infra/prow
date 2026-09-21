@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,7 +47,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
@@ -277,7 +277,7 @@ func TestAccumulateBatch(t *testing.T) {
 
 			inrepoconfig := config.InRepoConfig{}
 			if test.prowYAMLGetter != nil {
-				inrepoconfig.Enabled = map[string]*bool{"*": ptr.To(true)}
+				inrepoconfig.Enabled = map[string]*bool{"*": new(true)}
 			}
 			cfg := func() *config.Config {
 				return &config.Config{
@@ -696,6 +696,102 @@ func TestAccumulate(t *testing.T) {
 	}
 }
 
+type githubClientFuncs struct {
+	GetRepo                    func(ghc githubClient, o, r string) (github.FullRepo, error)
+	GetRef                     func(ghc githubClient, o, r, ref string) (string, error)
+	QueryWithGitHubAppsSupport func(ghc githubClient, ctx context.Context, q any, vars map[string]any, org string) error
+	Merge                      func(ghc githubClient, org, repo string, number int, details github.MergeDetails) error
+	CreateStatus               func(ghc githubClient, org, repo, ref string, s github.Status) error
+	GetCombinedStatus          func(ghc githubClient, org, repo, ref string) (*github.CombinedStatus, error)
+	ListCheckRuns              func(ghc githubClient, org, repo, ref string) (*github.CheckRunList, error)
+	GetPullRequestChanges      func(ghc githubClient, org, repo string, number int) ([]github.PullRequestChange, error)
+	ListIssueComments          func(ghc githubClient, org, repo string, number int) ([]github.IssueComment, error)
+	BotUserChecker             func(ghc githubClient) (func(candidate string) bool, error)
+	DeleteComment              func(ghc githubClient, org, repo string, id int) error
+}
+
+type ghcInterceptor struct {
+	c            githubClient
+	interceptors githubClientFuncs
+}
+
+func (f *ghcInterceptor) GetRepo(o, r string) (github.FullRepo, error) {
+	if f.interceptors.GetRepo != nil {
+		return f.interceptors.GetRepo(f.c, o, r)
+	}
+	return f.c.GetRepo(o, r)
+}
+
+func (f *ghcInterceptor) GetRef(o, r, ref string) (string, error) {
+	if f.interceptors.GetRef != nil {
+		return f.interceptors.GetRef(f.c, o, r, ref)
+	}
+	return f.c.GetRef(o, r, ref)
+}
+
+func (f *ghcInterceptor) QueryWithGitHubAppsSupport(ctx context.Context, q any, vars map[string]any, org string) error {
+	if f.interceptors.QueryWithGitHubAppsSupport != nil {
+		return f.interceptors.QueryWithGitHubAppsSupport(f.c, ctx, q, vars, org)
+	}
+	return f.c.QueryWithGitHubAppsSupport(ctx, q, vars, org)
+}
+
+func (f *ghcInterceptor) Merge(org, repo string, number int, details github.MergeDetails) error {
+	if f.interceptors.Merge != nil {
+		return f.interceptors.Merge(f.c, org, repo, number, details)
+	}
+	return f.c.Merge(org, repo, number, details)
+}
+
+func (f *ghcInterceptor) CreateStatus(org, repo, ref string, s github.Status) error {
+	if f.interceptors.CreateStatus != nil {
+		return f.interceptors.CreateStatus(f.c, org, repo, ref, s)
+	}
+	return f.c.CreateStatus(org, repo, ref, s)
+}
+
+func (f *ghcInterceptor) GetCombinedStatus(org, repo, ref string) (*github.CombinedStatus, error) {
+	if f.interceptors.GetCombinedStatus != nil {
+		return f.interceptors.GetCombinedStatus(f.c, org, repo, ref)
+	}
+	return f.c.GetCombinedStatus(org, repo, ref)
+}
+
+func (f *ghcInterceptor) ListCheckRuns(org, repo, ref string) (*github.CheckRunList, error) {
+	if f.interceptors.ListCheckRuns != nil {
+		return f.interceptors.ListCheckRuns(f.c, org, repo, ref)
+	}
+	return f.c.ListCheckRuns(org, repo, ref)
+}
+
+func (f *ghcInterceptor) GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error) {
+	if f.interceptors.GetPullRequestChanges != nil {
+		return f.interceptors.GetPullRequestChanges(f.c, org, repo, number)
+	}
+	return f.c.GetPullRequestChanges(org, repo, number)
+}
+
+func (f *ghcInterceptor) ListIssueComments(org, repo string, number int) ([]github.IssueComment, error) {
+	if f.interceptors.ListIssueComments != nil {
+		return f.interceptors.ListIssueComments(f.c, org, repo, number)
+	}
+	return f.c.ListIssueComments(org, repo, number)
+}
+
+func (f *ghcInterceptor) BotUserChecker() (func(candidate string) bool, error) {
+	if f.interceptors.BotUserChecker != nil {
+		return f.interceptors.BotUserChecker(f.c)
+	}
+	return f.c.BotUserChecker()
+}
+
+func (f *ghcInterceptor) DeleteComment(org, repo string, id int) error {
+	if f.interceptors.DeleteComment != nil {
+		return f.interceptors.DeleteComment(f.c, org, repo, id)
+	}
+	return f.c.DeleteComment(org, repo, id)
+}
+
 type fgc struct {
 	err  error
 	lock sync.Mutex
@@ -733,7 +829,7 @@ func (f *fgc) GetRef(o, r, ref string) (string, error) {
 	return f.refs[o+"/"+r+" "+ref], f.err
 }
 
-func (f *fgc) QueryWithGitHubAppsSupport(ctx context.Context, q interface{}, vars map[string]interface{}, org string) error {
+func (f *fgc) QueryWithGitHubAppsSupport(ctx context.Context, q any, vars map[string]any, org string) error {
 	sq, ok := q.(*searchQuery)
 	if !ok {
 		return errors.New("unexpected query type")
@@ -823,8 +919,8 @@ func (f *fgc) BotUserChecker() (func(candidate string) bool, error) {
 
 func (f *fgc) DeleteComment(org, repo string, id int) error {
 	for issue, ics := range f.issueComments {
-		for j := len(ics) - 1; j >= 0; j-- {
-			if ics[j].ID == id {
+		for j, v := range slices.Backward(ics) {
+			if v.ID == id {
 				f.issueComments[issue] = append(ics[:j], ics[j+1:]...)
 			}
 		}
@@ -1176,7 +1272,7 @@ func testPickBatch(clients localgit.Clients, t *testing.T) {
 		t.Fatalf("Error from pickBatch: %v", err)
 	}
 	if !apiequality.Semantic.DeepEqual(presubmits, ca.Config().PresubmitsStatic["o/r"]) {
-		t.Errorf("resolving presubmits failed, diff:\n%v\n", diff.ObjectReflectDiff(presubmits, ca.Config().PresubmitsStatic["o/r"]))
+		t.Errorf("resolving presubmits failed, diff:\n%v\n", diff.Diff(presubmits, ca.Config().PresubmitsStatic["o/r"]))
 	}
 	for _, testpr := range testprs {
 		var found bool
@@ -1427,6 +1523,185 @@ func TestRebaseMergeMethodIsAllowed(t *testing.T) {
 	}
 }
 
+func TestIsAllowedToMerge_ReviewDecision(t *testing.T) {
+	orgName := "test-org"
+	repoName := "test-repo"
+
+	testCases := []struct {
+		name                 string
+		mergeStateStatus     string
+		policyConfig         map[string]config.GitHubMergeBlocksPolicy
+		expectedMergeOutput  string
+		expectedMergeAllowed bool
+	}{
+		{
+			name:             "BLOCKED status with block policy globally",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				"*": config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "PR is blocked from merging by GitHub (check branch protection, required reviews, or rulesets)",
+			expectedMergeAllowed: false,
+		},
+		{
+			name:             "BLOCKED status with permit policy globally",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				"*": config.GitHubMergeBlocksPermit,
+			},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+		{
+			name:             "BLOCKED status with ignore policy globally",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				"*": config.GitHubMergeBlocksIgnore,
+			},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+		{
+			name:                 "BLOCKED status with policy not configured (default to permit)",
+			mergeStateStatus:     "BLOCKED",
+			policyConfig:         map[string]config.GitHubMergeBlocksPolicy{},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+		{
+			name:             "BLOCKED status with block policy for specific org",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				orgName: config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "PR is blocked from merging by GitHub (check branch protection, required reviews, or rulesets)",
+			expectedMergeAllowed: false,
+		},
+		{
+			name:             "BLOCKED status with block policy for different org",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				"other-org": config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+		{
+			name:             "BLOCKED status with block policy for specific repo",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				fmt.Sprintf("%s/%s", orgName, repoName): config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "PR is blocked from merging by GitHub (check branch protection, required reviews, or rulesets)",
+			expectedMergeAllowed: false,
+		},
+		{
+			name:             "BLOCKED status with block policy for different repo",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				fmt.Sprintf("%s/other-repo", orgName): config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+		{
+			name:             "BLOCKED status - repo config overrides org config (ignore)",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				orgName:                                 config.GitHubMergeBlocksBlock,
+				fmt.Sprintf("%s/%s", orgName, repoName): config.GitHubMergeBlocksIgnore,
+			},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+		{
+			name:             "BLOCKED status - repo config overrides org config (block)",
+			mergeStateStatus: "BLOCKED",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				orgName:                                 config.GitHubMergeBlocksPermit,
+				fmt.Sprintf("%s/%s", orgName, repoName): config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "PR is blocked from merging by GitHub (check branch protection, required reviews, or rulesets)",
+			expectedMergeAllowed: false,
+		},
+		{
+			name:             "CLEAN status with block policy",
+			mergeStateStatus: "CLEAN",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				"*": config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+		{
+			name:             "BEHIND status with block policy",
+			mergeStateStatus: "BEHIND",
+			policyConfig: map[string]config.GitHubMergeBlocksPolicy{
+				"*": config.GitHubMergeBlocksBlock,
+			},
+			expectedMergeOutput:  "",
+			expectedMergeAllowed: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tideConfig := config.Tide{
+				TideGitHubConfig: config.TideGitHubConfig{
+					MergeType: map[string]config.TideOrgMergeType{
+						fmt.Sprintf("%s/%s", orgName, repoName): {MergeType: types.MergeMerge},
+					},
+				},
+				GitHubMergeBlocksPolicyMap: tc.policyConfig,
+			}
+			cfg := func() *config.Config { return &config.Config{ProwConfig: config.ProwConfig{Tide: tideConfig}} }
+			mmc := newMergeChecker(cfg, &fgc{})
+			mmc.cache = map[config.OrgRepo]map[types.PullRequestMergeType]bool{
+				{Org: orgName, Repo: repoName}: {
+					types.MergeMerge: true,
+				},
+			}
+
+			pr := &PullRequest{
+				Repository: struct {
+					Name          githubql.String
+					NameWithOwner githubql.String
+					Owner         struct {
+						Login githubql.String
+					}
+				}{
+					Name: githubql.String(repoName),
+					Owner: struct {
+						Login githubql.String
+					}{
+						Login: githubql.String(orgName),
+					},
+				},
+				Labels: struct {
+					Nodes []struct{ Name githubql.String }
+				}{
+					Nodes: []struct{ Name githubql.String }{},
+				},
+				MergeStateStatus: githubql.String(tc.mergeStateStatus),
+			}
+
+			mergeOutput, err := mmc.isAllowedToMerge(CodeReviewCommonFromPullRequest(pr))
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+
+			if mergeOutput != tc.expectedMergeOutput {
+				t.Errorf("Expected merge output %q but got %q", tc.expectedMergeOutput, mergeOutput)
+			}
+
+			isAllowed := mergeOutput == ""
+			if isAllowed != tc.expectedMergeAllowed {
+				t.Errorf("Expected merge allowed=%v but got %v (output: %q)", tc.expectedMergeAllowed, isAllowed, mergeOutput)
+			}
+		})
+	}
+}
+
 func TestTakeActionV2(t *testing.T) {
 	testTakeAction(localgit.NewV2, t)
 }
@@ -1453,6 +1728,7 @@ func testTakeAction(clients localgit.Clients, t *testing.T) {
 		triggered        int
 		triggeredBatches int
 		action           Action
+		expectErr        bool
 	}{
 		{
 			name: "no prs to test, should do nothing",
@@ -1807,6 +2083,7 @@ func testTakeAction(clients localgit.Clients, t *testing.T) {
 			merged:      2,
 			triggered:   0,
 			action:      MergeBatch,
+			expectErr:   true,
 		},
 		{
 			name: "batch merge errors but continues if a PR has changed",
@@ -1816,6 +2093,7 @@ func testTakeAction(clients localgit.Clients, t *testing.T) {
 			merged:      2,
 			triggered:   0,
 			action:      MergeBatch,
+			expectErr:   true,
 		},
 		{
 			name: "batch merge errors but continues on unknown error",
@@ -1825,6 +2103,7 @@ func testTakeAction(clients localgit.Clients, t *testing.T) {
 			merged:      2,
 			triggered:   0,
 			action:      MergeBatch,
+			expectErr:   true,
 		},
 		{
 			name: "batch merge stops on auth error",
@@ -1834,6 +2113,7 @@ func testTakeAction(clients localgit.Clients, t *testing.T) {
 			merged:      1,
 			triggered:   0,
 			action:      MergeBatch,
+			expectErr:   true,
 		},
 		{
 			name: "batch merge stops on invalid merge method error",
@@ -1843,6 +2123,7 @@ func testTakeAction(clients localgit.Clients, t *testing.T) {
 			merged:      1,
 			triggered:   0,
 			action:      MergeBatch,
+			expectErr:   true,
 		},
 		{
 			name: "pending batch, should trigger serial in scheduling state",
@@ -2007,8 +2288,32 @@ func testTakeAction(clients localgit.Clients, t *testing.T) {
 			if tc.batchPending {
 				batchPending = []CodeReviewCommon{{}}
 			}
-			if act, _, _ := c.takeAction(sp, batchPending, genPulls(tc.successes), genPulls(tc.pendings), genPulls(tc.nones), genPulls(tc.batchMerges), sp.presubmits); act != tc.action {
+			act, _, err := c.takeAction(sp, batchPending, genPulls(tc.successes), genPulls(tc.pendings), genPulls(tc.nones), genPulls(tc.batchMerges), sp.presubmits)
+			if act != tc.action {
 				t.Errorf("Wrong action. Got %v, wanted %v.", act, tc.action)
+			}
+			if tc.expectErr && err == nil {
+				t.Error("Expected an error from takeAction, got nil.")
+			} else if !tc.expectErr && err != nil {
+				t.Errorf("Unexpected error from takeAction: %v", err)
+			}
+			if tc.expectErr && err != nil {
+				mf, ok := err.(*mergeFailure)
+				if !ok {
+					t.Errorf("Expected error to be *mergeFailure, got %T", err)
+				} else {
+					if mf.operatorError() != nil {
+						t.Errorf("Expected no operator errors for user merge errors, got: %v", mf.operatorError())
+					}
+					if mf.historyMessage() == "" {
+						t.Error("Expected non-empty history message")
+					}
+					for _, me := range mf.errs {
+						if !me.userFacing {
+							t.Errorf("Expected all merge errors to be user-facing, PR #%d is not", me.pr)
+						}
+					}
+				}
 			}
 
 			prowJobs := &prowapi.ProwJobList{}
@@ -2148,6 +2453,13 @@ func testPRWithLabels(org, repo, branch string, number int, mergeable githubql.M
 }
 
 func TestSync(t *testing.T) {
+	isBlockersSearchQueryType := func(iface any) bool {
+		ifaceType := reflect.TypeOf(iface)
+		return ifaceType.Kind().String() == "ptr" &&
+			ifaceType.Elem().PkgPath() == "sigs.k8s.io/prow/pkg/tide/blockers" &&
+			ifaceType.Elem().Name() == "searchQuery"
+	}
+
 	sleep = func(time.Duration) {}
 	defer func() { sleep = time.Sleep }()
 
@@ -2155,21 +2467,25 @@ func TestSync(t *testing.T) {
 	unmergeableA := *testPR("org", "repo", "A", 6, githubql.MergeableStateConflicting)
 	unmergeableB := *testPR("org", "repo", "B", 7, githubql.MergeableStateConflicting)
 	unknownA := *testPR("org", "repo", "A", 8, githubql.MergeableStateUnknown)
+	faultyOrg := *testPR("faulty-org", "repo", "A", 8, githubql.MergeableStateUnknown)
 
 	testcases := []struct {
-		name string
-		prs  []PullRequest
+		name               string
+		prs                map[string][]PullRequest
+		ghcFuncs           githubClientFuncs
+		tideConfig         *config.Tide
+		usesGitHubAppsAuth bool
 
 		expectedPools []Pool
 	}{
 		{
 			name:          "no PRs",
-			prs:           []PullRequest{},
+			prs:           map[string][]PullRequest{},
 			expectedPools: []Pool{},
 		},
 		{
 			name: "1 mergeable PR",
-			prs:  []PullRequest{mergeableA},
+			prs:  map[string][]PullRequest{"": {mergeableA}},
 			expectedPools: []Pool{{
 				Org:        "org",
 				Repo:       "repo",
@@ -2182,12 +2498,12 @@ func TestSync(t *testing.T) {
 		},
 		{
 			name:          "1 unmergeable PR",
-			prs:           []PullRequest{unmergeableA},
+			prs:           map[string][]PullRequest{"": {unmergeableA}},
 			expectedPools: []Pool{},
 		},
 		{
 			name: "1 unknown PR",
-			prs:  []PullRequest{unknownA},
+			prs:  map[string][]PullRequest{"": {unknownA}},
 			expectedPools: []Pool{{
 				Org:        "org",
 				Repo:       "repo",
@@ -2200,7 +2516,7 @@ func TestSync(t *testing.T) {
 		},
 		{
 			name: "1 mergeable, 1 unmergeable (different pools)",
-			prs:  []PullRequest{mergeableA, unmergeableB},
+			prs:  map[string][]PullRequest{"": {mergeableA, unmergeableB}},
 			expectedPools: []Pool{{
 				Org:        "org",
 				Repo:       "repo",
@@ -2213,7 +2529,7 @@ func TestSync(t *testing.T) {
 		},
 		{
 			name: "1 mergeable, 1 unmergeable (same pool)",
-			prs:  []PullRequest{mergeableA, unmergeableA},
+			prs:  map[string][]PullRequest{"": {mergeableA, unmergeableA}},
 			expectedPools: []Pool{{
 				Org:        "org",
 				Repo:       "repo",
@@ -2226,7 +2542,46 @@ func TestSync(t *testing.T) {
 		},
 		{
 			name: "1 mergeable PR (satisfies multiple queries)",
-			prs:  []PullRequest{mergeableA, mergeableA},
+			prs:  map[string][]PullRequest{"": {mergeableA, mergeableA}},
+			expectedPools: []Pool{{
+				Org:        "org",
+				Repo:       "repo",
+				Branch:     "A",
+				SuccessPRs: []CodeReviewCommon{*CodeReviewCommonFromPullRequest(&mergeableA)},
+				Action:     Merge,
+				Target:     []CodeReviewCommon{*CodeReviewCommonFromPullRequest(&mergeableA)},
+				TenantIDs:  []string{},
+			}},
+		},
+		{
+			name: "PR gets removed from the list because blockers query failed",
+			prs: map[string][]PullRequest{
+				string(mergeableA.Repository.Owner.Login): {mergeableA},
+				string(faultyOrg.Repository.Owner.Login):  {faultyOrg},
+			},
+			ghcFuncs: githubClientFuncs{
+				QueryWithGitHubAppsSupport: func(c githubClient, ctx context.Context, q any, vars map[string]any, org string) error {
+					if isBlockersSearchQueryType(q) {
+						if org == string(faultyOrg.Repository.Owner.Login) {
+							return errors.New("gh app is not installed on this organization")
+						}
+						return nil
+					}
+					return c.QueryWithGitHubAppsSupport(ctx, q, vars, org)
+				},
+			},
+			tideConfig: &config.Tide{
+				MaxGoroutines: 4,
+				TideGitHubConfig: config.TideGitHubConfig{
+					Queries: []config.TideQuery{{
+						Orgs:  []string{string(mergeableA.Repository.Owner.Login), string(faultyOrg.Repository.Owner.Login)},
+						Repos: []string{string(mergeableA.Repository.Name), string(faultyOrg.Repository.Name)},
+					}},
+					StatusUpdatePeriod: &metav1.Duration{Duration: time.Second * 0},
+					BlockerLabel:       "merge-blocker",
+				},
+			},
+			usesGitHubAppsAuth: true,
 			expectedPools: []Pool{{
 				Org:        "org",
 				Repo:       "repo",
@@ -2241,39 +2596,45 @@ func TestSync(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			fgc := &fgc{
-				prs: map[string][]PullRequest{"": tc.prs},
-				refs: map[string]string{
-					"org/repo heads/A": "SHA",
-					"org/repo A":       "SHA",
-					"org/repo heads/B": "SHA",
-					"org/repo B":       "SHA",
-				},
-			}
-			ca := &config.Agent{}
-			ca.Set(&config.Config{
-				ProwConfig: config.ProwConfig{
-					Tide: config.Tide{
-						MaxGoroutines: 4,
-						TideGitHubConfig: config.TideGitHubConfig{
-							Queries:            []config.TideQuery{{}},
-							StatusUpdatePeriod: &metav1.Duration{Duration: time.Second * 0},
-						},
+			ghc := &ghcInterceptor{
+				interceptors: tc.ghcFuncs,
+				c: &fgc{
+					prs: tc.prs,
+					refs: map[string]string{
+						"org/repo heads/A": "SHA",
+						"org/repo A":       "SHA",
+						"org/repo heads/B": "SHA",
+						"org/repo B":       "SHA",
 					},
 				},
-			})
+			}
+
+			tideConfig := config.Tide{
+				MaxGoroutines: 4,
+				TideGitHubConfig: config.TideGitHubConfig{
+					Queries:            []config.TideQuery{{}},
+					StatusUpdatePeriod: &metav1.Duration{Duration: time.Second * 0},
+					BlockerLabel:       "merge-blocker",
+				},
+			}
+			if tc.tideConfig != nil {
+				tideConfig = *tc.tideConfig
+			}
+
+			ca := &config.Agent{}
+			ca.Set(&config.Config{ProwConfig: config.ProwConfig{Tide: tideConfig}})
 			hist, err := history.New(100, nil, "")
 			if err != nil {
 				t.Fatalf("Failed to create history client: %v", err)
 			}
-			mergeChecker := newMergeChecker(ca.Config, fgc)
+			mergeChecker := newMergeChecker(ca.Config, ghc)
 
 			ctx := context.Background()
 			mgr := newFakeManager(t, ctx)
 			sc := &statusController{
 				pjClient: mgr.GetClient(),
 				logger:   logrus.WithField("controller", "status-update"),
-				ghc:      fgc,
+				ghc:      ghc,
 				gc:       nil,
 				config:   ca.Config,
 				shutDown: make(chan bool),
@@ -2285,7 +2646,7 @@ func TestSync(t *testing.T) {
 			go sc.run()
 			defer sc.shutdown()
 			log := logrus.WithField("controller", "sync")
-			ghProvider := newGitHubProvider(log, fgc, nil, ca.Config, mergeChecker, false)
+			ghProvider := newGitHubProvider(log, ghc, nil, ca.Config, mergeChecker, tc.usesGitHubAppsAuth)
 			c := &syncController{
 				config:        ca.Config,
 				provider:      ghProvider,
@@ -2765,6 +3126,7 @@ func TestFilterSubpool(t *testing.T) {
 			}
 			if filtered == nil {
 				t.Fatalf("Expected subpool to have %d prs, but it was pruned.", len(tc.expectedPRs))
+				return
 			}
 			if got := prNumbers(filtered.prs); !reflect.DeepEqual(got, tc.expectedPRs) {
 				t.Errorf("Expected filtered pool to have PRs %v, but got %v.", tc.expectedPRs, got)
@@ -2944,9 +3306,11 @@ func TestPresubmitsByPull(t *testing.T) {
 		presubmits         []config.Presubmit
 		prs                []CodeReviewCommon
 		prowYAMLGetter     config.ProwYAMLGetter
+		ghc                githubClient
 
 		expectedPresubmits           map[int][]config.Presubmit
 		expectedChangeCache          map[changeCacheKey][]string
+		expectedPRs                  []int
 		requireManuallyTriggeredJobs bool
 		fromBranchProtection         bool
 	}{
@@ -3277,10 +3641,54 @@ func TestPresubmitsByPull(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "changed files error excludes only the affected PR from the subpool",
+			presubmits: []config.Presubmit{
+				{
+					Reporter:  config.Reporter{Context: "always"},
+					AlwaysRun: true,
+				},
+				{
+					Reporter: config.Reporter{Context: "presubmit"},
+					RegexpChangeMatcher: config.RegexpChangeMatcher{
+						RunIfChanged: "^CHANGE.$",
+					},
+				},
+			},
+			ghc: &ghcInterceptor{
+				c: &fgc{},
+				interceptors: githubClientFuncs{
+					GetPullRequestChanges: func(ghc githubClient, org, repo string, number int) ([]github.PullRequestChange, error) {
+						if number == 1 {
+							return nil, errors.New("return code not 2XX: 422 Unprocessable Entity")
+						}
+						return ghc.GetPullRequestChanges(org, repo, number)
+					},
+				},
+			},
+			prs: []CodeReviewCommon{
+				{Number: 1, HeadRefOID: "1"},
+			},
+			expectedPresubmits: map[int][]config.Presubmit{
+				100: {
+					{
+						Reporter:  config.Reporter{Context: "always"},
+						AlwaysRun: true,
+					},
+					{
+						Reporter: config.Reporter{Context: "presubmit"},
+						RegexpChangeMatcher: config.RegexpChangeMatcher{
+							RunIfChanged: "^CHANGE.$",
+						},
+					},
+				},
+			},
+			expectedChangeCache: map[changeCacheKey][]string{{number: 100, sha: "sha"}: {"CHANGED"}},
+			expectedPRs:         []int{100},
+		},
 	}
 
 	for _, tc := range testcases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.initialChangeCache == nil {
 				tc.initialChangeCache = map[changeCacheKey][]string{}
@@ -3313,7 +3721,7 @@ func TestPresubmitsByPull(t *testing.T) {
 				"foo/bar": {{Reporter: config.Reporter{Context: "wrong-repo"}, AlwaysRun: true}},
 			})
 			if tc.prowYAMLGetter != nil {
-				cfg.InRepoConfig.Enabled = map[string]*bool{"*": ptr.To(true)}
+				cfg.InRepoConfig.Enabled = map[string]*bool{"*": new(true)}
 				cfg.ProwYAMLGetterWithDefaults = tc.prowYAMLGetter
 			}
 			cfgAgent := &config.Agent{}
@@ -3324,7 +3732,11 @@ func TestPresubmitsByPull(t *testing.T) {
 				prs:    append(tc.prs, *CodeReviewCommonFromPullRequest(&samplePR)),
 			}
 			log := logrus.WithField("test", tc.name)
-			ghProvider := newGitHubProvider(log, &fgc{}, nil, cfgAgent.Config, newMergeChecker(cfgAgent.Config, &fgc{}), false)
+			var ghc githubClient = &fgc{}
+			if tc.ghc != nil {
+				ghc = tc.ghc
+			}
+			ghProvider := newGitHubProvider(log, ghc, nil, cfgAgent.Config, newMergeChecker(cfgAgent.Config, &fgc{}), false)
 			c := &syncController{
 				config:   cfgAgent.Config,
 				provider: ghProvider,
@@ -3345,10 +3757,19 @@ func TestPresubmitsByPull(t *testing.T) {
 				config.ClearCompiledRegexes(jobs)
 			}
 			if !apiequality.Semantic.DeepEqual(presubmits, tc.expectedPresubmits) {
-				t.Errorf("got incorrect presubmit mapping: %v\n", diff.ObjectReflectDiff(tc.expectedPresubmits, presubmits))
+				t.Errorf("got incorrect presubmit mapping: %v\n", diff.Diff(tc.expectedPresubmits, presubmits))
 			}
 			if got := c.changedFiles.changeCache; !reflect.DeepEqual(got, tc.expectedChangeCache) {
-				t.Errorf("got incorrect file change cache: %v", diff.ObjectReflectDiff(tc.expectedChangeCache, got))
+				t.Errorf("got incorrect file change cache: %v", diff.Diff(tc.expectedChangeCache, got))
+			}
+			if tc.expectedPRs != nil {
+				var gotPRs []int
+				for _, pr := range sp.prs {
+					gotPRs = append(gotPRs, pr.Number)
+				}
+				if !reflect.DeepEqual(gotPRs, tc.expectedPRs) {
+					t.Errorf("got incorrect PRs in subpool: %v", diff.Diff(tc.expectedPRs, gotPRs))
+				}
 			}
 		})
 	}
@@ -3885,7 +4306,7 @@ func TestPresubmitsForBatch(t *testing.T) {
 
 			inrepoconfig := config.InRepoConfig{}
 			if tc.prowYAMLGetter != nil {
-				inrepoconfig.Enabled = map[string]*bool{"*": ptr.To(true)}
+				inrepoconfig.Enabled = map[string]*bool{"*": new(true)}
 			}
 			cfg := func() *config.Config {
 				return &config.Config{
@@ -3932,7 +4353,7 @@ func TestPresubmitsForBatch(t *testing.T) {
 			// Clear regexes, otherwise DeepEqual comparison wont work
 			config.ClearCompiledRegexes(presubmits)
 			if !apiequality.Semantic.DeepEqual(tc.expected, presubmits) {
-				t.Errorf("returned presubmits do not match expected, diff: %v\n", diff.ObjectReflectDiff(tc.expected, presubmits))
+				t.Errorf("returned presubmits do not match expected, diff: %v\n", diff.Diff(tc.expected, presubmits))
 			}
 		})
 	}
@@ -3982,7 +4403,7 @@ func TestChangedFilesAgentBatchChanges(t *testing.T) {
 				t.Fatalf("fauked to get changed files: %v", err)
 			}
 			if !apiequality.Semantic.DeepEqual(result, tc.expected) {
-				t.Errorf("returned changes do not match expected; diff: %v\n", diff.ObjectReflectDiff(tc.expected, result))
+				t.Errorf("returned changes do not match expected; diff: %v\n", diff.Diff(tc.expected, result))
 			}
 		})
 	}
@@ -4208,6 +4629,42 @@ func TestNonFailedBatchByBaseAndPullsIndexFunc(t *testing.T) {
 	}
 }
 
+// TestNonFailedBatchByNameBaseAndPullsIndexKeyDoesNotMutateRefs verifies that
+// computing the index key leaves its input alone. The index func is handed the
+// ProwJob that lives in the cache, so sorting the pulls in place would mutate
+// shared state underneath every other reader of that cache.
+func TestNonFailedBatchByNameBaseAndPullsIndexKeyDoesNotMutateRefs(t *testing.T) {
+	unsorted := []prowapi.Pull{{Number: 3, SHA: "three"}, {Number: 1, SHA: "one"}, {Number: 2, SHA: "two"}}
+	refs := &prowapi.Refs{
+		Org:     "org",
+		Repo:    "repo",
+		BaseRef: "master",
+		BaseSHA: "base-sha",
+		Pulls:   slices.Clone(unsorted),
+	}
+
+	key := nonFailedBatchByNameBaseAndPullsIndexKey("some-job", refs)
+
+	// The key is still sorted by pull number, ...
+	if expected := "some-job|org|repo|master|base-sha|1|one|2|two|3|three"; key != expected {
+		t.Errorf("expected key %q, got %q", expected, key)
+	}
+	// ... but the refs we got handed are untouched.
+	if diff := cmp.Diff(unsorted, refs.Pulls); diff != "" {
+		t.Errorf("the pulls were reordered in place: %s", diff)
+	}
+
+	// The same must hold when it is reached through the index func.
+	pj := getProwJob(prowapi.BatchJob, "org", "repo", "master", "base-sha", prowapi.SuccessState, slices.Clone(unsorted))
+	pj.Spec.Job = "some-job"
+	if result := nonFailedBatchByNameBaseAndPullsIndexFunc(pj); !slices.Equal(result, []string{key}) {
+		t.Errorf("expected the index func to yield %v, got %v", []string{key}, result)
+	}
+	if diff := cmp.Diff(unsorted, pj.Spec.Refs.Pulls); diff != "" {
+		t.Errorf("the index func reordered the pulls of the indexed prowjob in place: %s", diff)
+	}
+}
+
 func TestCheckRunNodesToContexts(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -4328,7 +4785,7 @@ func TestDeduplicateContestsDoesntLoseData(t *testing.T) {
 	// Print the seed so failures can easily be reproduced
 	t.Logf("Seed: %d", seed)
 	fuzzer := fuzz.NewWithSeed(seed)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			context := Context{}
 			fuzzer.Fuzz(&context)

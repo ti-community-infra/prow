@@ -23,11 +23,13 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	klabels "k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 	"sigs.k8s.io/prow/pkg/config"
@@ -88,14 +90,14 @@ func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) err
 				return draftMsg(c.GitHubClient, pr.PullRequest)
 			}
 			c.Logger.Info("Starting all jobs for new PR.")
-			return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits)
+			return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits, true)
 		}
 		c.Logger.Infof("Welcome message to PR author %q.", author)
-		if err := welcomeMsg(c.GitHubClient, trigger, pr.PullRequest); err != nil {
+		if err := welcomeMsg(c, trigger, pr.PullRequest); err != nil {
 			return fmt.Errorf("could not welcome non-org member %q: %w", author, err)
 		}
 	case github.PullRequestActionReopened:
-		return buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits)
+		return buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits, true)
 	case github.PullRequestActionEdited:
 		// if someone changes the base of their PR, we will get this
 		// event and the changes field will list that the base SHA and
@@ -116,14 +118,14 @@ func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) err
 			return nil
 		} else if changes.Base.Ref.From != "" || changes.Base.Sha.From != "" {
 			// the base of the PR changed and we need to re-test it
-			return buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits)
+			return buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits, false)
 		}
 	case github.PullRequestActionSynchronize:
 		var errs []error
 		if err := abortAllJobs(c, &pr.PullRequest); err != nil {
 			errs = append(errs, fmt.Errorf("failed to abort jobs: %w", err))
 		}
-		return utilerrors.NewAggregate(append(errs, buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits)))
+		return utilerrors.NewAggregate(append(errs, buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits, true)))
 	case github.PullRequestActionLabeled:
 		// When a PR is LGTMd, if it is untrusted then build it once.
 		if pr.Label.Name == labels.LGTM {
@@ -132,7 +134,7 @@ func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) err
 				return fmt.Errorf("could not validate PR: %s", err)
 			} else if !trusted {
 				c.Logger.Info("Starting all jobs for untrusted PR with LGTM.")
-				return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits)
+				return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits, true)
 			}
 		}
 		if pr.Label.Name == labels.OkToTest {
@@ -147,7 +149,7 @@ func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) err
 				c.Logger.Debug("Label added by the bot, skipping.")
 				return nil
 			}
-			return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits)
+			return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits, true)
 		}
 	case github.PullRequestActionClosed:
 		if err := abortAllJobs(c, &pr.PullRequest); err != nil {
@@ -155,7 +157,7 @@ func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) err
 			return err
 		}
 	case github.PullRequestActionReadyForReview:
-		return buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits)
+		return buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits, true)
 	case github.PullRequestActionConvertedToDraft:
 		if err := abortAllJobs(c, &pr.PullRequest); err != nil {
 			c.Logger.WithError(err).Error("Failed to abort jobs for pull request converted to draft")
@@ -223,7 +225,7 @@ func orgRepoAuthor(pr github.PullRequest) (string, string, login) {
 	return org, repo, login(author)
 }
 
-func buildAllIfTrusted(c Client, trigger plugins.Trigger, pr github.PullRequestEvent, baseSHA string, presubmits []config.Presubmit) error {
+func buildAllIfTrusted(c Client, trigger plugins.Trigger, pr github.PullRequestEvent, baseSHA string, presubmits []config.Presubmit, skipPassing bool) error {
 	// When a PR is updated, check that the user is in the org or that an org
 	// member has said "/ok-to-test" before building. There's no need to ask
 	// for "/ok-to-test" because we do that once when the PR is created.
@@ -242,26 +244,26 @@ func buildAllIfTrusted(c Client, trigger plugins.Trigger, pr github.PullRequestE
 			}
 		}
 		c.Logger.Info("Starting all jobs for updated PR.")
-		return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits)
+		return buildAllButDrafts(c, &pr.PullRequest, pr.GUID, baseSHA, presubmits, skipPassing)
 	}
 	return nil
 }
 
-func welcomeMsg(ghc githubClient, trigger plugins.Trigger, pr github.PullRequest) error {
+func welcomeMsg(c Client, trigger plugins.Trigger, pr github.PullRequest) error {
 	var errors []error
 	org, repo, a := orgRepoAuthor(pr)
 	author := string(a)
 	encodedRepoFullName := url.QueryEscape(pr.Base.Repo.FullName)
 	var more string
 	if trigger.TrustedOrg != "" && trigger.TrustedOrg != org {
-		more = fmt.Sprintf("or [%s](https://github.com/orgs/%s/people) ", trigger.TrustedOrg, trigger.TrustedOrg)
+		more = fmt.Sprintf("or [%s](https://%s/orgs/%s/people) ", trigger.TrustedOrg, github.DefaultHost, trigger.TrustedOrg)
 	}
 
 	var joinOrgURL string
 	if trigger.JoinOrgURL != "" {
 		joinOrgURL = trigger.JoinOrgURL
 	} else {
-		joinOrgURL = fmt.Sprintf("https://github.com/orgs/%s/people", org)
+		joinOrgURL = fmt.Sprintf("https://%s/orgs/%s/people", github.DefaultHost, org)
 	}
 
 	var comment string
@@ -278,9 +280,12 @@ I understand the commands that are listed [here](https://go.k8s.io/bot-commands?
 </details>
 `, author, encodedRepoFullName, plugins.AboutThisBotWithoutCommands)
 	} else {
+		membershipGuidance := orgInvitationGuidance(c, org, pr.User, joinOrgURL, trigger.OrgInvite)
 		comment = fmt.Sprintf(`Hi @%s. Thanks for your PR.
 
-I'm waiting for a [%s](https://github.com/orgs/%s/people) %smember to verify that this patch is reasonable to test. If it is, they should reply with `+"`/ok-to-test`"+` on its own line. Until that is done, I will not automatically test new commits in this PR, but the usual testing commands by org members will still work. Regular contributors should [join the org](%s) to skip this step.
+I'm waiting for a [%s](https://%s/orgs/%s/people) %smember to verify that this patch is reasonable to test. If it is, they should reply with `+"`/ok-to-test`"+` on its own line. Until that is done, I will not automatically test new commits in this PR, but the usual testing commands by org members will still work.
+
+%s
 
 Once the patch is verified, the new status will be reflected by the `+"`%s`"+` label.
 
@@ -290,22 +295,22 @@ I understand the commands that are listed [here](https://go.k8s.io/bot-commands?
 
 %s
 </details>
-`, author, org, org, more, joinOrgURL, labels.OkToTest, encodedRepoFullName, plugins.AboutThisBotWithoutCommands)
+`, author, org, github.DefaultHost, org, more, membershipGuidance, labels.OkToTest, encodedRepoFullName, plugins.AboutThisBotWithoutCommands)
 
-		l, err := ghc.GetIssueLabels(org, repo, pr.Number)
+		l, err := c.GitHubClient.GetIssueLabels(org, repo, pr.Number)
 		if err != nil {
 			errors = append(errors, err)
 		} else if !github.HasLabel(labels.OkToTest, l) {
 			// It is possible for bots and other automations to automatically
 			// add the ok-to-test label. If that's the case, then we will not
 			// add the needs-ok-to-test-label any more.
-			if err := ghc.AddLabel(org, repo, pr.Number, labels.NeedsOkToTest); err != nil {
+			if err := c.GitHubClient.AddLabel(org, repo, pr.Number, labels.NeedsOkToTest); err != nil {
 				errors = append(errors, err)
 			}
 		}
 	}
 
-	if err := ghc.CreateComment(org, repo, pr.Number, comment); err != nil {
+	if err := c.GitHubClient.CreateComment(org, repo, pr.Number, comment); err != nil {
 		errors = append(errors, err)
 	}
 
@@ -313,6 +318,39 @@ I understand the commands that are listed [here](https://go.k8s.io/bot-commands?
 		return utilerrors.NewAggregate(errors)
 	}
 	return nil
+}
+
+func orgInvitationGuidance(c Client, org string, author github.User, joinOrgURL string, cfg plugins.OrgInviteConfig) string {
+	if cfg.Prominent.Disabled {
+		return fmt.Sprintf("Regular contributors should [join the org](%s) to skip this step.", joinOrgURL)
+	}
+
+	if shouldHighlightJoinOrgMessage(c, org, author, cfg) {
+		if cfg.Prominent.Message != "" {
+			return strings.ReplaceAll(cfg.Prominent.Message, "{join_org_url}", joinOrgURL)
+		}
+		return fmt.Sprintf(">[!TIP]\n>**We noticed you've done this a few times! Consider [joining the org](%s) to skip this step and gain `/lgtm` and other bot rights.** We recommend asking approvers on your previous PRs to sponsor you.", joinOrgURL)
+	}
+
+	return fmt.Sprintf("Regular contributors should [join the org](%s) to skip this step.", joinOrgURL)
+}
+
+func shouldHighlightJoinOrgMessage(c Client, org string, author github.User, cfg plugins.OrgInviteConfig) bool {
+	if author.Type == github.UserTypeBot {
+		return false
+	}
+
+	query := fmt.Sprintf("type:pr is:merged org:%s author:%s", org, author.Login)
+	issues, err := c.GitHubClient.FindIssuesWithOrg(org, query, "", false)
+	if err != nil {
+		// Search failures should not block the welcome message; fall back to the default copy.
+		if c.Logger != nil {
+			c.Logger.WithError(err).WithField("author", author.Login).WithField("org", org).Debug("Failed to query merged PRs for join-org guidance")
+		}
+		return false
+	}
+
+	return len(issues) >= cfg.Prominent.EffectiveMergedPRThreshold()
 }
 
 func draftMsg(ghc githubClient, pr github.PullRequest) error {
@@ -344,19 +382,44 @@ func TrustedPullRequest(tprc trustedPullRequestClient, trigger plugins.Trigger, 
 }
 
 // buildAllButDrafts ensures that all builds that should run and will be required are built, but skips draft PRs
-func buildAllButDrafts(c Client, pr *github.PullRequest, eventGUID string, baseSHA string, presubmits []config.Presubmit) error {
+func buildAllButDrafts(c Client, pr *github.PullRequest, eventGUID string, baseSHA string, presubmits []config.Presubmit, skipPassing bool) error {
 	if pr.Draft {
 		c.Logger.Info("Skipping all jobs for draft PR.")
 		return nil
 	}
-	return buildAll(c, pr, eventGUID, baseSHA, presubmits)
+	return buildAll(c, pr, eventGUID, baseSHA, presubmits, skipPassing)
 }
 
-// buildAll ensures that all builds that should run and will be required are built
-func buildAll(c Client, pr *github.PullRequest, eventGUID string, baseSHA string, presubmits []config.Presubmit) error {
+// buildAll ensures that all builds that should run and will be required are built.
+// When skipPassing is true, it skips presubmits whose context already has a
+// successful GitHub status to avoid redundantly re-running jobs that have already passed.
+func buildAll(c Client, pr *github.PullRequest, eventGUID string, baseSHA string, presubmits []config.Presubmit, skipPassing bool) error {
 	org, repo, number, branch := pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, pr.Base.Ref
 	changes := config.NewGitHubDeferredChangedFilesProvider(c.GitHubClient, org, repo, number)
-	toTest, err := pjutil.FilterPresubmits(pjutil.NewTestAllFilter(), changes, branch, presubmits, c.Logger)
+
+	var filter pjutil.Filter
+	if skipPassing {
+		successContexts := sets.New[string]()
+		combinedStatus, err := c.GitHubClient.GetCombinedStatus(org, repo, pr.Head.SHA)
+		if err != nil {
+			c.Logger.WithError(err).Warn("Failed to get combined status; running all presubmits")
+		} else if combinedStatus != nil {
+			for _, status := range combinedStatus.Statuses {
+				if status.State == github.StatusSuccess {
+					successContexts.Insert(status.Context)
+				}
+			}
+		}
+		if successContexts.Len() > 0 {
+			filter = pjutil.NewTestAllWithExistingStatusFilter(successContexts)
+		} else {
+			filter = pjutil.NewTestAllFilter()
+		}
+	} else {
+		filter = pjutil.NewTestAllFilter()
+	}
+
+	toTest, err := pjutil.FilterPresubmits(filter, changes, branch, presubmits, c.Logger)
 	if err != nil {
 		return err
 	}

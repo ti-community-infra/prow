@@ -21,17 +21,20 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	klabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	prowapi "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 	"sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/github"
+	"sigs.k8s.io/prow/pkg/kube"
 	"sigs.k8s.io/prow/pkg/layeredsets"
 	"sigs.k8s.io/prow/pkg/plugins"
 	"sigs.k8s.io/prow/pkg/plugins/ownersconfig"
@@ -44,9 +47,17 @@ const (
 	fakePR      = 33
 	fakeSHA     = "deadbeef"
 	fakeBaseRef = "fake-branch"
-	fakeBaseSHA = "fffffff"
+	fakeBaseSHA = "fffffffffffffffffffffffffffffffffffffff0"
 	adminUser   = "admin-user"
 )
+
+func statusDescription(user string) string {
+	return config.ContextDescriptionWithBaseSha(description(user), fakeBaseSHA)
+}
+
+func stickyStatusDescription(user string) string {
+	return config.ContextDescriptionWithBaseSha(stickyDescription(user), fakeBaseSHA)
+}
 
 type fakeRepoownersClient struct {
 	foc *fakeOwnersClient
@@ -134,6 +145,7 @@ type fakeClient struct {
 	branchProtection *github.BranchProtection
 	ps               []config.Presubmit
 	jobs             sets.Set[string]
+	prowJobs         []prowapi.ProwJob
 	owners           ownersClient
 	checkruns        *github.CheckRunList
 	usesAppsAuth     bool
@@ -162,15 +174,12 @@ func (c *fakeClient) CreateStatus(org, repo, ref string, s github.Status) error 
 		return fmt.Errorf("bad ref: %s", ref)
 	}
 	for i, status := range c.statuses {
-		if status.State != github.StatusSuccess && status.Context == s.Context {
+		if status.Context == s.Context {
 			c.statuses[i] = s
 			return nil
 		}
 	}
-	//handle branch protection case
-	if len(c.statuses) == 0 {
-		c.statuses = append(c.statuses, s)
-	}
+	c.statuses = append(c.statuses, s)
 	return nil
 }
 
@@ -317,6 +326,34 @@ func (c *fakeClient) Create(_ context.Context, pj *prowapi.ProwJob, _ metav1.Cre
 	return pj, nil
 }
 
+func (c *fakeClient) List(_ context.Context, opts metav1.ListOptions) (*prowapi.ProwJobList, error) {
+	selector := klabels.Everything()
+	if opts.LabelSelector != "" {
+		var err error
+		selector, err = klabels.Parse(opts.LabelSelector)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var items []prowapi.ProwJob
+	for _, pj := range c.prowJobs {
+		if selector.Matches(klabels.Set(pj.Labels)) {
+			items = append(items, *pj.DeepCopy())
+		}
+	}
+	return &prowapi.ProwJobList{Items: items}, nil
+}
+
+func (c *fakeClient) Update(_ context.Context, pj *prowapi.ProwJob, _ metav1.UpdateOptions) (*prowapi.ProwJob, error) {
+	for i, existing := range c.prowJobs {
+		if existing.Name == pj.Name {
+			c.prowJobs[i] = *pj.DeepCopy()
+			return pj, nil
+		}
+	}
+	return nil, fmt.Errorf("prowjob %s not found", pj.Name)
+}
+
 func (c *fakeClient) LoadRepoOwners(org, repo, base string) (repoowners.RepoOwner, error) {
 	return c.owners.LoadRepoOwners(org, repo, base)
 }
@@ -390,7 +427,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "broken-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -462,12 +499,12 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "broken-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 				{
 					Context:     "hung-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -553,7 +590,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "hung-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -641,12 +678,12 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "broken-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 				{
 					Context:     "hung-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -668,12 +705,12 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "broken-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 				{
 					Context:     "hung-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -692,7 +729,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "broken-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -863,7 +900,7 @@ func TestHandle(t *testing.T) {
 				{
 					Context:     "prow-job",
 					State:       github.StatusSuccess,
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 				},
 			},
 		},
@@ -892,7 +929,7 @@ func TestHandle(t *testing.T) {
 				{
 					Context:     "ci/prow/pkg-job",
 					State:       github.StatusSuccess,
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 				},
 			},
 		},
@@ -926,12 +963,12 @@ func TestHandle(t *testing.T) {
 				{
 					Context:     "ci/prow/context",
 					State:       github.StatusSuccess,
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 				},
 				{
 					Context:     "ci/prow/pkg-job",
 					State:       github.StatusSuccess,
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 				},
 			},
 		},
@@ -960,7 +997,7 @@ func TestHandle(t *testing.T) {
 				{
 					Context:     "ci/prow/pkg-job",
 					State:       github.StatusSuccess,
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 				},
 			},
 		},
@@ -977,7 +1014,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "job",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -998,7 +1035,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "job",
-					Description: description("code_owner"),
+					Description: statusDescription("code_owner"),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -1019,7 +1056,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "job",
-					Description: description("Code_owner"),
+					Description: statusDescription("Code_owner"),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -1063,7 +1100,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "job",
-					Description: description("user1"),
+					Description: statusDescription("user1"),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -1087,7 +1124,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "job",
-					Description: description("user1"),
+					Description: statusDescription("user1"),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -1115,7 +1152,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "job",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -1136,7 +1173,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "job",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 			},
@@ -1173,7 +1210,7 @@ func TestHandle(t *testing.T) {
 			expected: []github.Status{
 				{
 					Context:     "problematic-test",
-					Description: description(adminUser),
+					Description: statusDescription(adminUser),
 					State:       github.StatusSuccess,
 				},
 				{
@@ -1244,7 +1281,7 @@ func TestHandle(t *testing.T) {
 				tc.jobs = sets.Set[string]{}
 			}
 
-			err := handle(&fc, log, &event, tc.options)
+			err := handle(&fc, log, &event, tc.options, false)
 			switch {
 			case err != nil:
 				if !tc.err {
@@ -1313,10 +1350,14 @@ func TestHelpProvider(t *testing.T) {
 		switch {
 		case help == nil:
 			t.Errorf("%s: expected a valid plugin help object, got nil", tc.name)
-		case len(help.Commands) != 1:
-			t.Errorf("%s: expected a single command from plugin help, got: %v", tc.name, help.Commands)
-		case help.Commands[0].WhoCanUse != tc.expectedWho:
-			t.Errorf("%s: expected a single command with WhoCanUse set to %s, got %s instead", tc.name, tc.expectedWho, help.Commands[0].WhoCanUse)
+		case len(help.Commands) != 3:
+			t.Errorf("%s: expected 3 commands from plugin help, got %d: %v", tc.name, len(help.Commands), help.Commands)
+		default:
+			for _, cmd := range help.Commands {
+				if cmd.WhoCanUse != tc.expectedWho {
+					t.Errorf("%s: expected command %q with WhoCanUse set to %s, got %s instead", tc.name, cmd.Usage, tc.expectedWho, cmd.WhoCanUse)
+				}
+			}
 		}
 	}
 }
@@ -1427,5 +1468,335 @@ func TestValidateGitHubTeamSlugs(t *testing.T) {
 		if !reflect.DeepEqual(err, tc.err) {
 			t.Errorf("%s: actual: %v != expected %v", tc.name, err, tc.err)
 		}
+	}
+}
+
+func TestIsSkipRetest(t *testing.T) {
+	cases := []struct {
+		description string
+		expected    bool
+	}{
+		{"Overridden by admin-user [prow:skip-retest]", true},
+		{"Overridden by bot [prow:skip-retest]", true},
+		{"something [prow:skip-retest] else", true},
+		{stickyStatusDescription("admin-user"), true},
+		{"Overridden by admin-user", false},
+		{"Build succeeded", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := config.IsSkipRetest(tc.description); got != tc.expected {
+			t.Errorf("IsSkipRetest(%q) = %v, want %v", tc.description, got, tc.expected)
+		}
+	}
+}
+
+func TestHandleStickyOverride(t *testing.T) {
+	log := logrus.WithField("plugin", pluginName)
+
+	cases := []struct {
+		name     string
+		body     string
+		sticky   bool
+		statuses []github.Status
+		expected []github.Status
+	}{
+		{
+			name:   "/override-sticky sets sticky description",
+			body:   "/override-sticky job-a",
+			sticky: true,
+			statuses: []github.Status{
+				{Context: "job-a", State: github.StatusFailure, Description: "Build failed"},
+			},
+			expected: []github.Status{
+				{Context: "job-a", State: github.StatusSuccess, Description: stickyStatusDescription(adminUser)},
+			},
+		},
+		{
+			name:   "/override sets regular description",
+			body:   "/override job-a",
+			sticky: false,
+			statuses: []github.Status{
+				{Context: "job-a", State: github.StatusFailure, Description: "Build failed"},
+			},
+			expected: []github.Status{
+				{Context: "job-a", State: github.StatusSuccess, Description: statusDescription(adminUser)},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeClient{
+				statuses: tc.statuses,
+				jobs:     sets.New[string](),
+			}
+			event := github.GenericCommentEvent{
+				IsPR:       true,
+				IssueState: "open",
+				Action:     github.GenericCommentActionCreated,
+				Body:       tc.body,
+				Number:     fakePR,
+				User:       github.User{Login: adminUser},
+				Repo:       github.Repo{Owner: github.User{Login: fakeOrg}, Name: fakeRepo},
+			}
+
+			err := handle(fc, log, &event, plugins.Override{}, tc.sticky)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tc.expected, fc.statuses); diff != "" {
+				t.Errorf("statuses mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestHandleStickyCancel(t *testing.T) {
+	log := logrus.WithField("plugin", pluginName)
+
+	cases := []struct {
+		name             string
+		body             string
+		statuses         []github.Status
+		expectedStatuses []github.Status
+		expectedComment  string
+	}{
+		{
+			name: "cancel specific override",
+			body: "/override-cancel job-a",
+			statuses: []github.Status{
+				{Context: "job-a", State: github.StatusSuccess, Description: "Overridden by admin-user [prow:skip-retest]"},
+				{Context: "job-b", State: github.StatusSuccess, Description: "Overridden by admin-user [prow:skip-retest]"},
+			},
+			expectedStatuses: []github.Status{
+				{Context: "job-a", State: github.StatusFailure, Description: "Override cancelled by admin-user"},
+				{Context: "job-b", State: github.StatusSuccess, Description: "Overridden by admin-user [prow:skip-retest]"},
+			},
+			expectedComment: "Cancelled overrides",
+		},
+		{
+			name: "cancel all overrides",
+			body: "/override-cancel",
+			statuses: []github.Status{
+				{Context: "job-a", State: github.StatusSuccess, Description: "Overridden by admin-user [prow:skip-retest]"},
+				{Context: "job-b", State: github.StatusSuccess, Description: "Overridden by admin-user [prow:skip-retest]"},
+			},
+			expectedStatuses: []github.Status{
+				{Context: "job-a", State: github.StatusFailure, Description: "Override cancelled by admin-user"},
+				{Context: "job-b", State: github.StatusFailure, Description: "Override cancelled by admin-user"},
+			},
+			expectedComment: "Cancelled overrides",
+		},
+		{
+			name: "cancel also affects regular overrides",
+			body: "/override-cancel",
+			statuses: []github.Status{
+				{Context: "job-a", State: github.StatusSuccess, Description: "Overridden by admin-user"},
+			},
+			expectedStatuses: []github.Status{
+				{Context: "job-a", State: github.StatusFailure, Description: "Override cancelled by admin-user"},
+			},
+			expectedComment: "Cancelled overrides",
+		},
+		{
+			name: "cancel does not affect non-override statuses",
+			body: "/override-cancel",
+			statuses: []github.Status{
+				{Context: "job-a", State: github.StatusSuccess, Description: "Build succeeded"},
+			},
+			expectedStatuses: []github.Status{
+				{Context: "job-a", State: github.StatusSuccess, Description: "Build succeeded"},
+			},
+			expectedComment: "No overrides found to cancel",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeClient{
+				statuses: tc.statuses,
+				jobs:     sets.New[string](),
+			}
+			event := github.GenericCommentEvent{
+				IsPR:       true,
+				IssueState: "open",
+				Action:     github.GenericCommentActionCreated,
+				Body:       tc.body,
+				Number:     fakePR,
+				User:       github.User{Login: adminUser},
+				Repo:       github.Repo{Owner: github.User{Login: fakeOrg}, Name: fakeRepo},
+			}
+
+			err := handleOverrideCancel(fc, log, &event, plugins.Override{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tc.expectedStatuses, fc.statuses); diff != "" {
+				t.Errorf("statuses mismatch (-want +got):\n%s", diff)
+			}
+			if len(fc.comments) == 0 {
+				t.Fatal("expected a comment")
+			}
+			if !strings.Contains(fc.comments[len(fc.comments)-1], tc.expectedComment) {
+				t.Errorf("expected comment containing %q, got %q", tc.expectedComment, fc.comments[len(fc.comments)-1])
+			}
+		})
+	}
+}
+
+func TestStickyDescriptionFitsGitHubLimit(t *testing.T) {
+	maxUsername := strings.Repeat("x", 39)
+	desc := stickyDescription(maxUsername)
+	full := config.ContextDescriptionWithBaseSha(desc, strings.Repeat("f", 40))
+	if len(full) > 140 {
+		t.Errorf("sticky description with max-length username exceeds 140 chars: got %d (%q)", len(full), full)
+	}
+	if !strings.Contains(full, config.SkipRetestSentinel) {
+		t.Errorf("sticky description lost sentinel after ContextDescriptionWithBaseSha: %q", full)
+	}
+}
+
+func testPresubmitJob(name, context, sha string, state prowapi.ProwJobState, complete, report bool, pull int) prowapi.ProwJob {
+	pj := prowapi.ProwJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name + "-pj",
+			Labels: map[string]string{
+				kube.OrgLabel:         fakeOrg,
+				kube.RepoLabel:        fakeRepo,
+				kube.PullLabel:        strconv.Itoa(pull),
+				kube.ProwJobTypeLabel: string(prowapi.PresubmitJob),
+			},
+		},
+		Spec: prowapi.ProwJobSpec{
+			Type:    prowapi.PresubmitJob,
+			Job:     name,
+			Context: context,
+			Report:  report,
+			Refs: &prowapi.Refs{
+				Org:  fakeOrg,
+				Repo: fakeRepo,
+				Pulls: []prowapi.Pull{{
+					Number: pull,
+					SHA:    sha,
+				}},
+			},
+		},
+		Status: prowapi.ProwJobStatus{
+			State: state,
+		},
+	}
+	if complete {
+		now := metav1.Now()
+		pj.Status.CompletionTime = &now
+	}
+	return pj
+}
+
+func aborted(pj prowapi.ProwJob) prowapi.ProwJob {
+	pj.Spec.Report = false
+	pj.Status.State = prowapi.AbortedState
+	pj.Status.Description = abortedByOverrideDescription
+	return pj
+}
+
+func TestAbortJobsOnOverride(t *testing.T) {
+	log := logrus.WithField("plugin", pluginName)
+	jobPresubmit := config.Presubmit{
+		JobBase: config.JobBase{
+			Name: "job-a",
+		},
+		Reporter: config.Reporter{
+			Context: "job-a",
+		},
+	}
+
+	jobA := testPresubmitJob("job-a", "job-a", fakeSHA, prowapi.PendingState, false, true, fakePR)
+	jobB := testPresubmitJob("job-b", "job-b", fakeSHA, prowapi.PendingState, false, true, fakePR)
+	completeA := testPresubmitJob("job-a", "job-a", fakeSHA, prowapi.FailureState, true, true, fakePR)
+
+	cases := []struct {
+		name         string
+		body         string
+		prowJobs     []prowapi.ProwJob
+		wantProwJobs []prowapi.ProwJob
+	}{
+		{
+			name:         "aborts running job on /override",
+			body:         "/override job-a",
+			prowJobs:     []prowapi.ProwJob{jobA},
+			wantProwJobs: []prowapi.ProwJob{aborted(jobA)},
+		},
+		{
+			name:         "aborts running job on /override-sticky",
+			body:         "/override-sticky job-a",
+			prowJobs:     []prowapi.ProwJob{jobA},
+			wantProwJobs: []prowapi.ProwJob{aborted(jobA)},
+		},
+		{
+			name:         "leaves running job for a different context alone",
+			body:         "/override job-a",
+			prowJobs:     []prowapi.ProwJob{jobA, jobB},
+			wantProwJobs: []prowapi.ProwJob{aborted(jobA), jobB},
+		},
+		{
+			name:         "leaves already-complete matching job alone",
+			body:         "/override job-a",
+			prowJobs:     []prowapi.ProwJob{completeA},
+			wantProwJobs: []prowapi.ProwJob{completeA},
+		},
+		{
+			name: "no matching prowjob still overrides",
+			body: "/override job-a",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var prowJobs []prowapi.ProwJob
+			for _, pj := range tc.prowJobs {
+				prowJobs = append(prowJobs, *pj.DeepCopy())
+			}
+			fc := &fakeClient{
+				statuses: []github.Status{
+					{Context: "job-a", State: github.StatusFailure, Description: "Build failed"},
+				},
+				ps:       []config.Presubmit{jobPresubmit},
+				jobs:     sets.New[string](),
+				prowJobs: prowJobs,
+			}
+			event := github.GenericCommentEvent{
+				IsPR:       true,
+				IssueState: "open",
+				Action:     github.GenericCommentActionCreated,
+				Body:       tc.body,
+				Number:     fakePR,
+				User:       github.User{Login: adminUser},
+				Repo:       github.Repo{Owner: github.User{Login: fakeOrg}, Name: fakeRepo},
+			}
+
+			sticky := strings.Contains(tc.body, "/override-sticky")
+			if err := handle(fc, log, &event, plugins.Override{}, sticky); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			wantDesc := statusDescription(adminUser)
+			if sticky {
+				wantDesc = stickyStatusDescription(adminUser)
+			}
+			if diff := cmp.Diff([]github.Status{{
+				Context:     "job-a",
+				State:       github.StatusSuccess,
+				Description: wantDesc,
+			}}, fc.statuses); diff != "" {
+				t.Errorf("statuses mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(sets.New("job-a"), fc.jobs); diff != "" {
+				t.Errorf("created jobs mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantProwJobs, fc.prowJobs); diff != "" {
+				t.Errorf("prowjobs mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

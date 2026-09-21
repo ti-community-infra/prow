@@ -69,7 +69,7 @@ type githubClient interface {
 // HelpProvider construct the pluginhelp.PluginHelp for this plugin.
 func HelpProvider(_ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	pluginHelp := &pluginhelp.PluginHelp{
-		Description: `The cherrypick plugin is used for cherrypicking PRs across branches. For every successful cherrypick invocation a new PR is opened against the target branch and assigned to the requester. If the parent PR contains a release note, it is copied to the cherrypick PR.`,
+		Description: `The cherrypick plugin is used for cherrypicking PRs across branches. For every successful cherrypick invocation a new PR is opened against the target branch and assigned to the requester. If the parent PR contains a release note, it is copied to the cherrypick PR. Kind labels (e.g. kind/bug, kind/cleanup) from the original PR are copied into the cherry-pick PR description as /kind commands so the bot can re-apply them.`,
 	}
 	pluginHelp.AddCommand(pluginhelp.Command{
 		Usage:       "/cherrypick [branch]",
@@ -296,7 +296,10 @@ func (s *Server) handleIssueComment(log logrus.FieldLogger, ic github.IssueComme
 		}
 	}
 
-	// Handle all other, valid immediate branches.
+	// A failure in one cherry-pick must NOT prevent processing of the remaining
+	// targets, so we collect errors and continue the loop.
+	var errs []error
+
 	for _, targetBranch := range sets.List(sets.KeySet(commands)) {
 		branchLog := log.WithFields(logrus.Fields{
 			"requester":     ic.Comment.User.Login,
@@ -305,11 +308,12 @@ func (s *Server) handleIssueComment(log logrus.FieldLogger, ic github.IssueComme
 		branchLog.Debug("Cherrypick request.")
 
 		if err := s.handle(branchLog, ic.Comment.User.Login, &ic.Comment, org, repo, targetBranch, baseBranch, commands[targetBranch], title, body, num); err != nil {
-			return log, fmt.Errorf("failed to handle cherrypick for %s: %w", targetBranch, err)
+			errs = append(errs, fmt.Errorf("failed to handle cherrypick for %s: %w", targetBranch, err))
+			continue
 		}
 	}
 
-	return log, nil
+	return log, utilerrors.NewAggregate(errs)
 }
 
 type cherrypickCommands map[string][]string
@@ -328,11 +332,82 @@ func parseComment(comment github.IssueComment) cherrypickCommands {
 }
 
 func (s *Server) handlePullRequest(log logrus.FieldLogger, pre github.PullRequestEvent) (logrus.FieldLogger, error) {
-	// Only consider newly merged PRs
-	if pre.Action != github.PullRequestActionClosed && pre.Action != github.PullRequestActionLabeled && pre.Action != github.PullRequestActionOpened {
+	switch pre.Action {
+	case github.PullRequestActionLabeled:
+		return s.handlePullRequestLabelAdded(log, pre)
+	case github.PullRequestActionClosed:
+		return s.handlePullRequestClosed(log, pre)
+	default:
 		return log, nil
 	}
+}
 
+func (s *Server) handlePullRequestLabelAdded(log logrus.FieldLogger, pre github.PullRequestEvent) (logrus.FieldLogger, error) {
+	pr := pre.PullRequest
+	// Ignore non cherrypick labels
+	if pre.Label.Name == "" || !strings.HasPrefix(pre.Label.Name, s.labelPrefix) {
+		return log, nil
+	}
+	org := pr.Base.Repo.Owner.Login
+	repo := pr.Base.Repo.Name
+	num := pr.Number
+	baseBranch := pr.Base.Ref
+	targetBranch := strings.TrimPrefix(pre.Label.Name, s.labelPrefix)
+	log = log.WithFields(logrus.Fields{
+		github.OrgLogField:  org,
+		github.RepoLogField: repo,
+		github.PrLogField:   num,
+	})
+	prAuthor := pr.User.Login
+
+	if !s.allowAll {
+		// Only org members should be able to do cherry-picks.
+		ok, err := s.ghc.IsMember(org, prAuthor)
+		if err != nil {
+			return log, err
+		}
+		if !ok {
+			resp := fmt.Sprintf(notOrgMemberMessageTemplate, org, org, org, prAuthor)
+			if err := s.createComment(log, org, repo, num, nil, resp); err != nil {
+				log.WithError(err).WithField("response", resp).Error("Failed to create comment.")
+			}
+			return log, nil
+		}
+	}
+	if targetBranch == baseBranch {
+		resp := fmt.Sprintf("base branch (%s) needs to differ from target branch (%s)", baseBranch, targetBranch)
+		return log, s.createComment(log, org, repo, num, nil, resp)
+	}
+
+	// Cherry-pick only merged PRs.
+	if !pr.Merged {
+		resp := fmt.Sprintf(
+			"@%s once the present PR merges, I will cherry-pick it on top of `%s` in a new PR and assign it to you.",
+			prAuthor,
+			targetBranch,
+		)
+		return log, s.createComment(log, org, repo, num, nil, resp)
+	}
+
+	return log, s.handle(
+		log.WithFields(logrus.Fields{
+			"requester":     prAuthor,
+			"target_branch": targetBranch,
+		}),
+		prAuthor,
+		nil,
+		org,
+		repo,
+		targetBranch,
+		baseBranch,
+		nil,
+		pr.Title,
+		pr.Body,
+		num,
+	)
+}
+
+func (s *Server) handlePullRequestClosed(log logrus.FieldLogger, pre github.PullRequestEvent) (logrus.FieldLogger, error) {
 	pr := pre.PullRequest
 	if !pr.Merged || pr.MergeSHA == nil {
 		return log, nil
@@ -382,35 +457,21 @@ func (s *Server) handlePullRequest(log logrus.FieldLogger, pre github.PullReques
 			}
 		}
 	}
-
-	foundCherryPickComments := len(requesterToComments) != 0
-
-	// now look for our special labels
 	labels, err := s.ghc.GetIssueLabels(org, repo, num)
 	if err != nil {
 		return log, fmt.Errorf("failed to get issue labels: %w", err)
 	}
-
-	if requesterToComments[pr.User.Login] == nil {
-		requesterToComments[pr.User.Login] = make(map[string]*github.IssueComment)
-	}
-
-	foundCherryPickLabels := false
 	for _, label := range labels {
 		if strings.HasPrefix(label.Name, s.labelPrefix) {
+			if requesterToComments[pr.User.Login] == nil {
+				requesterToComments[pr.User.Login] = make(map[string]*github.IssueComment)
+			}
 			requesterToComments[pr.User.Login][label.Name[len(s.labelPrefix):]] = nil // leave this nil which indicates a label-initiated cherry-pick
-			foundCherryPickLabels = true
 		}
 	}
-
-	if !foundCherryPickComments && !foundCherryPickLabels {
+	if len(requesterToComments) == 0 {
 		return log, nil
 	}
-
-	if !foundCherryPickLabels && pre.Action == github.PullRequestActionLabeled {
-		return log, nil
-	}
-
 	// Figure out membership.
 	if !s.allowAll {
 		// TODO: Possibly cache this.
@@ -580,11 +641,17 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	}
 
 	// Open a PR in GitHub.
+	var kindLabels []string
+	if labels, err := s.ghc.GetIssueLabels(org, repo, num); err != nil {
+		logger.WithError(err).Debug("Failed to get issue labels, omitting kind commands from cherry-pick PR body.")
+	} else {
+		kindLabels = kindLabelsFromIssueLabels(labels)
+	}
 	var cherryPickBody string
 	if s.prowAssignments {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches, kindLabels)
 	} else {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches, kindLabels)
 	}
 
 	head := fmt.Sprintf("%s:%s", pushOrg, newBranch)
@@ -642,6 +709,9 @@ func (s *Server) applyToBranch(r git.RepoClient, org, repo, localPath string, nu
 		pr, err := s.ghc.GetPullRequest(org, repo, num)
 		if err != nil {
 			return fmt.Errorf("[try 2] failed to get pull request %s/%s#%d: %w", org, repo, num, err)
+		}
+		if pr.MergeSHA == nil {
+			return utilerrors.NewAggregate(errs)
 		}
 		cherrypickCmd := exec.New().Command("git", "cherry-pick", "-m", "1", "--cleanup=verbatim", *pr.MergeSHA)
 		cherrypickCmd.SetDir(r.Directory())
@@ -749,4 +819,23 @@ func releaseNoteFromParentPR(body string) string {
 		return ""
 	}
 	return fmt.Sprintf("```release-note\n%s\n```", strings.TrimSpace(potentialMatch[1]))
+}
+
+const kindLabelPrefix = "kind/"
+
+// kindLabelsFromIssueLabels returns the kind names (without "kind/" prefix) from
+// the given labels, deduplicated and sorted. Labels that are not kind/* or have
+// an empty name after stripping the prefix are skipped.
+func kindLabelsFromIssueLabels(labels []github.Label) []string {
+	kindSet := sets.New[string]()
+	for _, label := range labels {
+		if !strings.HasPrefix(label.Name, kindLabelPrefix) {
+			continue
+		}
+		name := strings.TrimPrefix(label.Name, kindLabelPrefix)
+		if name != "" {
+			kindSet.Insert(name)
+		}
+	}
+	return sets.List(kindSet)
 }
