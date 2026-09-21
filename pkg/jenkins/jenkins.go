@@ -747,6 +747,9 @@ func (c *Client) GetBuilds(job string) (map[string]Build, error) {
 		if prowJobID == "" {
 			continue
 		}
+		if jb.Number == 0 {
+			jb.enqueued = true
+		}
 		jenkinsBuilds[prowJobID] = jb
 	}
 	return jenkinsBuilds, nil

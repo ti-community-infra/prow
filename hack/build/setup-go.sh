@@ -35,6 +35,9 @@ export GIMME_SILENT_ENV=y
 # go version go1.14.5 darwin/amd64
 if ! ([ -n "${FORCE_HOST_GO:-}" ] || \
       (command -v go >/dev/null && [ "$(go version | cut -d' ' -f3)" = "go${GO_VERSION}" ])); then
+    # gimme defaults to the legacy GCS bucket, which no longer serves Go
+    # binaries (it returns HTTP 403), so point it at the official download host.
+    export GIMME_DOWNLOAD_BASE=https://dl.google.com/go
     # eval because the output of this is shell to set PATH etc.
     eval "$(hack/third_party/gimme/gimme "${GO_VERSION}")"
 fi

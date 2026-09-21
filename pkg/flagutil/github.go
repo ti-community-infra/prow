@@ -53,6 +53,10 @@ type GitHubOptions struct {
 	ThrottleHourlyTokens int
 	ThrottleAllowBurst   int
 
+	// MergeMode controls how the GitHub client merges pull requests. Only
+	// components that merge pull requests (Tide) act on it.
+	MergeMode github.MergeMode
+
 	OrgThrottlers       Strings
 	parsedOrgThrottlers map[string]throttlerSettings
 
@@ -121,6 +125,7 @@ func (o *GitHubOptions) addFlags(fs *flag.FlagSet, paramFuncs ...FlagParameter) 
 			Host:            github.DefaultHost,
 			endpoint:        NewStrings(github.DefaultAPIEndpoint),
 			graphqlEndpoint: github.DefaultGraphQLEndpoint,
+			MergeMode:       github.DefaultMergeMode,
 		},
 	}
 
@@ -149,6 +154,9 @@ func (o *GitHubOptions) addFlags(fs *flag.FlagSet, paramFuncs ...FlagParameter) 
 	fs.DurationVar(&o.maxSleepTime, "github-client.backoff-timeout", github.DefaultMaxSleepTime, "Largest allowable Retry-After time for requests to the GitHub API.")
 	fs.DurationVar(&o.initialDelay, "github-client.initial-delay", github.DefaultInitialDelay, "Initial delay before retries begin for requests to the GitHub API.")
 	fs.StringVar(&o.SigningKeyPath, "git-signing-key-path", "", "Path to an SSH private key for signing git commits. When set, all commits made by the git client are signed using SSH.")
+
+	o.MergeMode = defaults.MergeMode
+	fs.Var(&o.MergeMode, "merge-mode", fmt.Sprintf("How pull requests are merged, one of %v. 'sync' only uses the synchronous merge endpoint, 'async' only uses the asynchronous one and 'auto' falls back to the asynchronous endpoint for stacked pull requests. Only components that merge pull requests (Tide) act on it.", github.ValidMergeModes))
 }
 
 func (o *GitHubOptions) parseOrgThrottlers() error {
@@ -228,6 +236,10 @@ func (o *GitHubOptions) Validate(bool) error {
 		o.graphqlEndpoint = github.DefaultGraphQLEndpoint
 	} else if _, err := url.Parse(o.graphqlEndpoint); err != nil {
 		return fmt.Errorf("invalid -github-graphql-endpoint URI: %q", o.graphqlEndpoint)
+	}
+
+	if o.MergeMode != "" && !o.MergeMode.IsValid() {
+		return fmt.Errorf("invalid --merge-mode %q, must be one of %v", o.MergeMode, github.ValidMergeModes)
 	}
 
 	if (o.ThrottleHourlyTokens > 0) != (o.ThrottleAllowBurst > 0) {
@@ -316,6 +328,7 @@ func (o *GitHubOptions) baseClientOptions() github.ClientOptions {
 		MaxSleepTime:    o.maxSleepTime,
 		MaxRetries:      o.maxRetries,
 		Max404Retries:   o.max404Retries,
+		MergeMode:       o.MergeMode,
 	}
 }
 

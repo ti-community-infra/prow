@@ -173,6 +173,12 @@ require (
 )
 
 require (
+	github.com/pkoukk/tiktoken-go v0.1.6
+	github.com/sashabaranov/go-openai v1.9.3
+	gopkg.in/yaml.v3 v3.0.1
+)
+
+require (
 	cel.dev/expr v0.25.3 // indirect
 	cloud.google.com/go/monitoring v1.30.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.36.0 // indirect
@@ -195,6 +201,7 @@ require (
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
+	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.39.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/fatih/color v1.18.0 // indirect

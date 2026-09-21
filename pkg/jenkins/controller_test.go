@@ -189,6 +189,7 @@ func (f *fghc) EditCommentWithContext(_ context.Context, org, repo string, ID in
 
 func TestSyncTriggeredJobs(t *testing.T) {
 	fakeClock := clocktesting.NewFakeClock(time.Now().Truncate(1 * time.Second))
+	referenceTime := fakeClock.Now()
 
 	var testcases = []struct {
 		name           string
@@ -294,6 +295,75 @@ func TestSyncTriggeredJobs(t *testing.T) {
 			expectedState:       prowapi.TriggeredState,
 			expectedEnqueued:    true,
 			expectedPendingTime: nil,
+		},
+		{
+			name: "fast-failing job - failure state",
+			pj: prowapi.ProwJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fast-fail",
+					Namespace: "prowjobs",
+				},
+				Spec: prowapi.ProwJobSpec{
+					Type: prowapi.PostsubmitJob,
+					Job:  "test-job",
+				},
+				Status: prowapi.ProwJobStatus{
+					State: prowapi.TriggeredState,
+				},
+			},
+			builds: map[string]Build{
+				"fast-fail": {Result: pState(failure), Number: 42},
+			},
+			expectedState:       prowapi.FailureState,
+			expectedComplete:    true,
+			expectedReport:      true,
+			expectedPendingTime: &metav1.Time{Time: referenceTime},
+		},
+		{
+			name: "fast-failing job - success state",
+			pj: prowapi.ProwJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fast-success",
+					Namespace: "prowjobs",
+				},
+				Spec: prowapi.ProwJobSpec{
+					Type: prowapi.PostsubmitJob,
+					Job:  "test-job",
+				},
+				Status: prowapi.ProwJobStatus{
+					State: prowapi.TriggeredState,
+				},
+			},
+			builds: map[string]Build{
+				"fast-success": {Result: pState(success), Number: 43},
+			},
+			expectedState:       prowapi.SuccessState,
+			expectedComplete:    true,
+			expectedReport:      true,
+			expectedPendingTime: &metav1.Time{Time: referenceTime},
+		},
+		{
+			name: "fast-failing job - aborted state",
+			pj: prowapi.ProwJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fast-abort",
+					Namespace: "prowjobs",
+				},
+				Spec: prowapi.ProwJobSpec{
+					Type: prowapi.PostsubmitJob,
+					Job:  "test-job",
+				},
+				Status: prowapi.ProwJobStatus{
+					State: prowapi.TriggeredState,
+				},
+			},
+			builds: map[string]Build{
+				"fast-abort": {Result: pState(aborted), Number: 44},
+			},
+			expectedState:       prowapi.AbortedState,
+			expectedComplete:    true,
+			expectedReport:      true,
+			expectedPendingTime: &metav1.Time{Time: referenceTime},
 		},
 	}
 	for _, tc := range testcases {

@@ -17,14 +17,15 @@ limitations under the License.
 package approvers
 
 import (
+	"fmt"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sirupsen/logrus"
-
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"sigs.k8s.io/prow/pkg/plugins/ownersconfig"
@@ -798,6 +799,7 @@ func TestGetMessage(t *testing.T) {
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Approved">Bill</a>*
 **Once this PR has been reviewed and has the lgtm label**, please assign [alice](https://github.com/alice) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).
+**Please ensure that each of them provides their approval before proceeding.**
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
@@ -837,6 +839,7 @@ Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a commen
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Approved">Bill</a>*
 **Once this PR has been reviewed and has the lgtm label**, please assign [alice](https://github.com/alice), [bob](https://github.com/bob) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).
+**Please ensure that each of them provides their approval before proceeding.**
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
@@ -858,6 +861,113 @@ Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a commen
 	} else if *got != want {
 		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)
 	}
+}
+
+func TestGetMessageMDSuggestedCCAssignedCC(t *testing.T) {
+	linkURL, _ := url.Parse("https://github.com")
+	commandHelpLink := "https://commandHelpLink"
+	prProcessLink := "https://prProcessLink"
+	org := "org"
+	repo := "repo"
+	branch := "branch"
+
+	ap := NewApprovers(
+		Owners{
+			filenames: []string{"a/a.go", "b/b.go", "c/c.go", "d/d.go"},
+			repo: createFakeRepo(map[string]sets.Set[string]{
+				"a": sets.New[string]("Alice"),
+				"b": sets.New[string]("Bill"),
+				"c": sets.New[string]("Cathy"),
+				"d": sets.New[string]("Diana"),
+			}),
+			log: logrus.WithField("plugin", "some_plugin"),
+		},
+	)
+
+	ap.RequireIssue = true
+	// ap.AddApprover("Bill", "REFERENCE", false)
+	ap.AddAssignees("Cathy")
+	ap.AddAssignees("Diana")
+
+	fmt.Println(len(ap.SuggestedCCs()))
+	fmt.Println(len(ap.AssignedCCs()))
+
+	expectedOutput := "**Once this PR has been reviewed and has the lgtm label**, please ask for approval from [cathy](https://github.com/cathy), [diana](https://github.com/diana) and additionally assign [alice](https://github.com/alice), [bill](https://github.com/bill) for approval."
+
+	got := GetMessage(ap, linkURL, commandHelpLink, prProcessLink, org, repo, branch)
+	if got != nil && !strings.Contains(*got, expectedOutput) {
+		t.Errorf("GetMessage() = %v, want %v", *got, expectedOutput)
+	}
+
+}
+
+func TestGetMessageMDSuggestedCCNoAssignedCC(t *testing.T) {
+	linkURL, _ := url.Parse("https://github.com")
+	commandHelpLink := "https://commandHelpLink"
+	prProcessLink := "https://prProcessLink"
+	org := "org"
+	repo := "repo"
+	branch := "branch"
+
+	ap := NewApprovers(
+		Owners{
+			filenames: []string{"a/a.go", "b/b.go", "c/c.go", "d/d.go"},
+			repo: createFakeRepo(map[string]sets.Set[string]{
+				"a": sets.New[string]("Alice"),
+				"b": sets.New[string]("Bill"),
+				"c": sets.New[string]("Cathy"),
+				"d": sets.New[string]("Diana"),
+			}),
+			log: logrus.WithField("plugin", "some_plugin"),
+		},
+	)
+
+	ap.RequireIssue = true
+	ap.AddApprover("Bill", "REFERENCE", false)
+
+	expectedOutput := "**Once this PR has been reviewed and has the lgtm label**, please assign [alice](https://github.com/alice), [cathy](https://github.com/cathy), [diana](https://github.com/diana) for approval."
+
+	got := GetMessage(ap, linkURL, commandHelpLink, prProcessLink, org, repo, branch)
+	if got != nil && !strings.Contains(*got, expectedOutput) {
+		t.Errorf("GetMessage() = %v, want %v", *got, expectedOutput)
+	}
+
+}
+
+func TestGetMessageNoSuggestedCCMDAssignedCC(t *testing.T) {
+	linkURL, _ := url.Parse("https://github.com")
+	commandHelpLink := "https://commandHelpLink"
+	prProcessLink := "https://prProcessLink"
+	org := "org"
+	repo := "repo"
+	branch := "branch"
+
+	ap := NewApprovers(
+		Owners{
+			filenames: []string{"a/a.go", "b/b.go", "c/c.go", "d/d.go"},
+			repo: createFakeRepo(map[string]sets.Set[string]{
+				"a": sets.New[string]("Alice"),
+				"b": sets.New[string]("Bill"),
+				"c": sets.New[string]("Cathy"),
+				"d": sets.New[string]("Diana"),
+			}),
+			log: logrus.WithField("plugin", "some_plugin"),
+		},
+	)
+
+	ap.RequireIssue = true
+	ap.AddApprover("Bill", "REFERENCE", false)
+	ap.AddAssignees("Alice")
+	ap.AddAssignees("Cathy")
+	ap.AddAssignees("Diana")
+
+	expectedOutput := "**Once this PR has been reviewed and has the lgtm label**, please ask for approval from [alice](https://github.com/alice), [cathy](https://github.com/cathy), [diana](https://github.com/diana). For more information see [the Code Review Process](https://prProcessLink)."
+
+	got := GetMessage(ap, linkURL, commandHelpLink, prProcessLink, org, repo, branch)
+	if got != nil && !strings.Contains(*got, expectedOutput) {
+		t.Errorf("GetMessage() = %v, want %v", *got, expectedOutput)
+	}
+
 }
 
 func TestGetMessageAllApproved(t *testing.T) {
@@ -920,6 +1030,7 @@ func TestGetMessageNotFullyApprovedAndAssigneeIsUsefulApprover(t *testing.T) {
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Approved">Alice</a>*
 **Once this PR has been reviewed and has the lgtm label**, please ask for approval from [bill](https://github.com/bill). For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).
+**Please ensure that each of them provides their approval before proceeding.**
 
 The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
 
@@ -957,6 +1068,7 @@ func TestGetMessageNoneApproved(t *testing.T) {
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Author self-approved">John</a>*
 **Once this PR has been reviewed and has the lgtm label**, please assign [alice](https://github.com/alice), [bill](https://github.com/bill) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).
+**Please ensure that each of them provides their approval before proceeding.**
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
@@ -1084,6 +1196,7 @@ func TestGetMessageMDOwners(t *testing.T) {
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Author self-approved">John</a>*
 **Once this PR has been reviewed and has the lgtm label**, please assign [alice](https://github.com/alice), [doctor](https://github.com/doctor) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).
+**Please ensure that each of them provides their approval before proceeding.**
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
@@ -1124,6 +1237,7 @@ func TestGetMessageDifferentGitHubLink(t *testing.T) {
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Author self-approved">John</a>*
 **Once this PR has been reviewed and has the lgtm label**, please assign [alice](https://github.com/alice), [doctor](https://github.com/doctor) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).
+**Please ensure that each of them provides their approval before proceeding.**
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
