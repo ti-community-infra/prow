@@ -159,7 +159,7 @@ func handleGenericComment(c Client, cp commentPruner, trigger plugins.Trigger, g
 		return err
 	}
 	if needsHelp, note := pjutil.ShouldRespondWithHelp(textToCheck, len(toTest)); needsHelp {
-		return addHelpComment(c.GitHubClient, gc.Body, org, repo, pr.Base.Ref, pr.Number, presubmits, gc.HTMLURL, commentAuthor, note, c.Logger)
+		return addHelpComment(c.GitHubClient, gc.Body, org, repo, baseRefForPresubmitFilter(pr), pr.Number, presubmits, gc.HTMLURL, commentAuthor, note, c.Logger)
 	}
 	// we want to be able to track re-tests separately from the general body of tests
 	additionalLabels := map[string]string{}
@@ -284,7 +284,7 @@ func FilterPresubmits(honorOkToTest bool, gitHubClient GitHubClient, body string
 		return nil, err
 	}
 
-	number, branch := pr.Number, pr.Base.Ref
+	number, branch := pr.Number, baseRefForPresubmitFilter(pr)
 	changes := config.NewGitHubDeferredChangedFilesProvider(gitHubClient, org, repo, number)
 	return pjutil.FilterPresubmits(filter, changes, branch, presubmits, logger)
 }

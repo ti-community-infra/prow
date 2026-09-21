@@ -163,6 +163,11 @@ func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) err
 			c.Logger.WithError(err).Error("Failed to abort jobs for pull request converted to draft")
 			return err
 		}
+	case github.PullRequestActionStacked:
+		// A PR that just joined a stack must be (re)evaluated against the stack
+		// base: its direct base may be another feature branch, but GitHub evaluates
+		// CI and required checks against the stack base.
+		return buildAllIfTrusted(c, trigger, pr, baseSHA, presubmits, true)
 	}
 
 	return nil
@@ -390,11 +395,25 @@ func buildAllButDrafts(c Client, pr *github.PullRequest, eventGUID string, baseS
 	return buildAll(c, pr, eventGUID, baseSHA, presubmits, skipPassing)
 }
 
+// baseRefForPresubmitFilter returns the ref that presubmit branch filters are
+// evaluated against. Stacked pull requests are evaluated against the stack's
+// base branch, mirroring GitHub's behavior for GitHub Actions and required
+// status checks.
+//
+// Note that this only affects branch filtering (branches/skip_branches). The
+// ProwJob's base_ref/base_sha keep using the PR's direct base branch.
+func baseRefForPresubmitFilter(pr *github.PullRequest) string {
+	if pr.Stack != nil && pr.Stack.Base.Ref != "" {
+		return pr.Stack.Base.Ref
+	}
+	return pr.Base.Ref
+}
+
 // buildAll ensures that all builds that should run and will be required are built.
 // When skipPassing is true, it skips presubmits whose context already has a
 // successful GitHub status to avoid redundantly re-running jobs that have already passed.
 func buildAll(c Client, pr *github.PullRequest, eventGUID string, baseSHA string, presubmits []config.Presubmit, skipPassing bool) error {
-	org, repo, number, branch := pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, pr.Base.Ref
+	org, repo, number, branch := pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, baseRefForPresubmitFilter(pr)
 	changes := config.NewGitHubDeferredChangedFilesProvider(c.GitHubClient, org, repo, number)
 
 	var filter pjutil.Filter

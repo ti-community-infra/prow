@@ -661,6 +661,193 @@ func TestAbortAllJobs(t *testing.T) {
 	}
 }
 
+func stackWithBase(ref string) *github.PullRequestStack {
+	s := &github.PullRequestStack{
+		ID:       1,
+		Number:   1,
+		Size:     3,
+		Position: 2,
+	}
+	s.Base.Ref = ref
+	s.Base.SHA = "stackbasesha"
+	return s
+}
+
+func TestBaseRefForPresubmitFilter(t *testing.T) {
+	t.Parallel()
+
+	testcases := []struct {
+		name    string
+		pr      *github.PullRequest
+		wantRef string
+	}{
+		{
+			name:    "regular PR uses its direct base",
+			pr:      &github.PullRequest{Base: github.PullRequestBranch{Ref: "main"}},
+			wantRef: "main",
+		},
+		{
+			name: "stacked PR uses the stack base",
+			pr: &github.PullRequest{
+				Base:  github.PullRequestBranch{Ref: "feat/parent"},
+				Stack: stackWithBase("main"),
+			},
+			wantRef: "main",
+		},
+		{
+			name: "stacked PR with empty stack base falls back to the direct base",
+			pr: &github.PullRequest{
+				Base:  github.PullRequestBranch{Ref: "feat/parent"},
+				Stack: stackWithBase(""),
+			},
+			wantRef: "feat/parent",
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := baseRefForPresubmitFilter(tc.pr); got != tc.wantRef {
+				t.Errorf("baseRefForPresubmitFilter() = %q, want %q", got, tc.wantRef)
+			}
+		})
+	}
+}
+
+func TestHandlePullRequestStackedBranchFilter(t *testing.T) {
+	t.Parallel()
+
+	testcases := []struct {
+		name        string
+		baseRef     string
+		stack       *github.PullRequestStack
+		action      github.PullRequestEventAction
+		brancher    config.Brancher
+		shouldBuild bool
+	}{
+		{
+			name:        "stacked upper PR is filtered against the stack base",
+			baseRef:     "feat/parent",
+			stack:       stackWithBase("main"),
+			action:      github.PullRequestActionOpened,
+			brancher:    config.Brancher{Branches: []string{"^main$"}},
+			shouldBuild: true,
+		},
+		{
+			name:        "non-stacked PR keeps using its direct base",
+			baseRef:     "feat/parent",
+			action:      github.PullRequestActionOpened,
+			brancher:    config.Brancher{Branches: []string{"^main$"}},
+			shouldBuild: false,
+		},
+		{
+			name:        "stacked action re-evaluates against the stack base",
+			baseRef:     "feat/parent",
+			stack:       stackWithBase("main"),
+			action:      github.PullRequestActionStacked,
+			brancher:    config.Brancher{Branches: []string{"^main$"}},
+			shouldBuild: true,
+		},
+		{
+			name:        "skip_branches is evaluated against the stack base",
+			baseRef:     "feat/parent",
+			stack:       stackWithBase("main"),
+			action:      github.PullRequestActionOpened,
+			brancher:    config.Brancher{SkipBranches: []string{"^main$"}},
+			shouldBuild: false,
+		},
+		{
+			name:        "stacked PR already on trunk behaves as before",
+			baseRef:     "main",
+			stack:       stackWithBase("main"),
+			action:      github.PullRequestActionOpened,
+			brancher:    config.Brancher{Branches: []string{"^main$"}},
+			shouldBuild: true,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Logf("running scenario %q", tc.name)
+		t.Run(tc.name, func(t *testing.T) {
+			g := fakegithub.NewFakeClient()
+			g.IssueComments = map[int][]github.IssueComment{}
+			g.OrgMembers = map[string][]string{"org": {"t"}}
+			g.PullRequests = map[int]*github.PullRequest{
+				0: {
+					Number: 0,
+					User:   github.User{Login: "t"},
+					Base: github.PullRequestBranch{
+						Ref: tc.baseRef,
+						Repo: github.Repo{
+							Owner: github.User{Login: "org"},
+							Name:  "repo",
+						},
+					},
+				},
+			}
+			fakeProwJobClient := fake.NewSimpleClientset()
+			c := Client{
+				GitHubClient:  g,
+				ProwJobClient: fakeProwJobClient.ProwV1().ProwJobs("namespace"),
+				Config:        &config.Config{},
+				Logger:        logrus.WithField("plugin", PluginName),
+			}
+
+			presubmits := map[string][]config.Presubmit{
+				"org/repo": {
+					{
+						JobBase: config.JobBase{
+							Name: "trunk-only",
+						},
+						AlwaysRun: true,
+						Brancher:  tc.brancher,
+					},
+				},
+			}
+			if err := c.Config.SetPresubmits(presubmits); err != nil {
+				t.Fatalf("failed to set presubmits: %v", err)
+			}
+
+			pr := github.PullRequestEvent{
+				Action: tc.action,
+				PullRequest: github.PullRequest{
+					Number: 0,
+					User:   github.User{Login: "t"},
+					Base: github.PullRequestBranch{
+						Ref: tc.baseRef,
+						Repo: github.Repo{
+							Owner:    github.User{Login: "org"},
+							Name:     "repo",
+							FullName: "org/repo",
+						},
+					},
+					Stack: tc.stack,
+				},
+				Sender: github.User{Login: "t"},
+			}
+			trigger := plugins.Trigger{
+				TrustedOrg:     "org",
+				OnlyOrgMembers: true,
+			}
+			trigger.SetDefaults()
+			if err := handlePR(c, trigger, pr); err != nil {
+				t.Fatalf("didn't expect error: %s", err)
+			}
+
+			var numStarted int
+			for _, action := range fakeProwJobClient.Actions() {
+				if _, ok := action.(clienttesting.CreateActionImpl); ok {
+					numStarted++
+				}
+			}
+			if numStarted > 0 && !tc.shouldBuild {
+				t.Errorf("built %d jobs but should not have: %+v", numStarted, tc)
+			} else if numStarted == 0 && tc.shouldBuild {
+				t.Errorf("not built but should have: %+v", tc)
+			}
+		})
+	}
+}
+
 func TestShouldHighlightJoinOrgMessage(t *testing.T) {
 	t.Parallel()
 
