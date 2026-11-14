@@ -94,10 +94,10 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 	if event.Issue.PullRequest == nil || event.Issue.State == github.PullRequestStateClosed {
 		return nil
 	}
-	if h.isSelf(event.Comment.User.Login) {
-		return nil
-	}
-	if !isApprovalNotification(event.Comment) {
+	// An approval notification is written by this plugin's own app, so it must
+	// be accepted; every other comment of ours (the advisory comment in
+	// particular) is not and therefore cannot re-trigger the check.
+	if !isApprovalNotification(event.Comment, h.isSelf) {
 		return nil
 	}
 
@@ -248,7 +248,7 @@ func (h *handler) approvals(org, repo string, number int, whitelist []string) ([
 		return nil, nil, fmt.Errorf("failed to read the pull request comments: %w", err)
 	}
 
-	if approvers := whitelistedApprovers(approversFromNotifications(comments), whitelist); len(approvers) > 0 {
+	if approvers := whitelistedApprovers(approversFromNotifications(comments, h.isSelf), whitelist); len(approvers) > 0 {
 		return approvers, comments, nil
 	}
 

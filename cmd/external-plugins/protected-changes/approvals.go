@@ -35,11 +35,13 @@ const (
 // approvalLinkRegex matches the approver links an approval notification renders.
 var approvalLinkRegex = regexp.MustCompile(`<a[^>]*title="Approved"[^>]*>([^<]+)</a>`)
 
-// isApprovalNotification reports whether a comment is an approval notification,
-// whatever bot posted it: the author only has to be a bot account, no login is
-// hardcoded.
-func isApprovalNotification(comment github.IssueComment) bool {
-	if comment.User.Type != github.UserTypeBot {
+// isApprovalNotification reports whether a comment is an approval notification.
+//
+// Only this plugin's own app identity is trusted: the notification is posted by
+// the same app the plugin runs as, and no login is hardcoded — isSelf tells
+// whether a login belongs to that app. Any other author, bot or not, is ignored.
+func isApprovalNotification(comment github.IssueComment, isSelf func(login string) bool) bool {
+	if !isSelf(comment.User.Login) {
 		return false
 	}
 	return strings.HasPrefix(strings.TrimSpace(comment.Body), approvalNotificationPrefix)
@@ -47,12 +49,12 @@ func isApprovalNotification(comment github.IssueComment) bool {
 
 // approversFromNotifications extracts the approvers the approval notifications
 // report, in comment order and without duplicates.
-func approversFromNotifications(comments []github.IssueComment) []string {
+func approversFromNotifications(comments []github.IssueComment, isSelf func(login string) bool) []string {
 	var approvers []string
 	seen := map[string]bool{}
 
 	for _, comment := range comments {
-		if !isApprovalNotification(comment) {
+		if !isApprovalNotification(comment, isSelf) {
 			continue
 		}
 		if !strings.Contains(comment.Body, approvalDetailsPrefix) {

@@ -24,6 +24,8 @@ import (
 )
 
 func TestIsApprovalNotification(t *testing.T) {
+	isSelf := func(login string) bool { return login == selfLogin }
+
 	tests := []struct {
 		name string
 		user github.User
@@ -31,27 +33,33 @@ func TestIsApprovalNotification(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "bot notification",
-			user: github.User{Login: "ti-chi-bot", Type: github.UserTypeBot},
+			name: "notification from our own app",
+			user: github.User{Login: selfLogin, Type: github.UserTypeBot},
 			body: "[APPROVALNOTIFIER] This PR is **APPROVED**",
 			want: true,
 		},
 		{
-			name: "another bot notification",
-			user: github.User{Login: "some-other-bot", Type: github.UserTypeBot},
+			name: "leading whitespace",
+			user: github.User{Login: selfLogin, Type: github.UserTypeBot},
 			body: "  [APPROVALNOTIFIER] This PR is **NOT APPROVED**",
 			want: true,
 		},
 		{
-			// Anyone can paste that text; only a bot account is trusted.
-			name: "human with the same text",
+			// Another bot cannot speak for this app.
+			name: "notification from a different bot",
+			user: github.User{Login: "another-bot", Type: github.UserTypeBot},
+			body: "[APPROVALNOTIFIER] This PR is **APPROVED**",
+			want: false,
+		},
+		{
+			name: "notification text from a human",
 			user: github.User{Login: "someone", Type: github.UserTypeUser},
 			body: "[APPROVALNOTIFIER] This PR is **APPROVED**",
 			want: false,
 		},
 		{
-			name: "bot comment without the marker",
-			user: github.User{Login: "ti-chi-bot", Type: github.UserTypeBot},
+			name: "our own comment without the marker",
+			user: github.User{Login: selfLogin, Type: github.UserTypeBot},
 			body: "Welcome to the pull request!",
 			want: false,
 		},
@@ -60,7 +68,7 @@ func TestIsApprovalNotification(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			comment := github.IssueComment{User: tt.user, Body: tt.body}
-			if got := isApprovalNotification(comment); got != tt.want {
+			if got := isApprovalNotification(comment, isSelf); got != tt.want {
 				t.Errorf("isApprovalNotification(%q by %s) = %v, want %v", tt.body, tt.user.Login, got, tt.want)
 			}
 		})
@@ -68,14 +76,17 @@ func TestIsApprovalNotification(t *testing.T) {
 }
 
 func TestApproversFromNotifications(t *testing.T) {
+	isSelf := func(login string) bool { return login == selfLogin }
+
 	comments := []github.IssueComment{
 		notification("alice"),
 		notification("alice", "bob"),
 		{User: github.User{Login: "someone", Type: github.UserTypeUser}, Body: approvalDetailsPrefix + " <a title=\"Approved\">mallory</a>"},
-		{User: github.User{Login: "ti-chi-bot", Type: github.UserTypeBot}, Body: "[APPROVALNOTIFIER] This PR is **NOT APPROVED**"},
+		{User: github.User{Login: "another-bot", Type: github.UserTypeBot}, Body: "[APPROVALNOTIFIER] This PR is **APPROVED** " + approvalDetailsPrefix + " <a title=\"Approved\">mallory</a>"},
+		{User: github.User{Login: selfLogin, Type: github.UserTypeBot}, Body: "[APPROVALNOTIFIER] This PR is **NOT APPROVED**"},
 	}
 
-	got := approversFromNotifications(comments)
+	got := approversFromNotifications(comments, isSelf)
 	want := []string{"alice", "bob"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -86,6 +97,10 @@ func TestApproversFromNotifications(t *testing.T) {
 		}
 	}
 }
+
+// selfLogin is the identity the fake plugin runs as; the approval notification is
+// posted by that same app in this deployment.
+const selfLogin = "prow-protected-changes-bot"
 
 func TestApproversFromReviews(t *testing.T) {
 	now := time.Now()

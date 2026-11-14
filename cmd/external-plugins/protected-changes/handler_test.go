@@ -29,9 +29,6 @@ import (
 	"sigs.k8s.io/prow/pkg/github"
 )
 
-// selfLogin is the identity the fake plugin runs as.
-const selfLogin = "prow-protected-changes-bot"
-
 // fakeGitHub records what the plugin asks of GitHub.
 type fakeGitHub struct {
 	mu sync.Mutex
@@ -207,7 +204,7 @@ func notification(approvers ...string) github.IssueComment {
 		links = append(links, `<a href="https://github.com/tikv/pd/pull/1#pullrequestreview-1" title="Approved">`+approver+`</a>`)
 	}
 	return github.IssueComment{
-		User:      github.User{Login: "ti-chi-bot", Type: github.UserTypeBot},
+		User:      github.User{Login: selfLogin, Type: github.UserTypeBot},
 		Body:      approvalNotificationPrefix + " This PR is **APPROVED**\n\n" + approvalDetailsPrefix + " " + strings.Join(links, ", "),
 		CreatedAt: time.Now(),
 	}
@@ -375,22 +372,30 @@ func TestApprovalByUnlistedUserFails(t *testing.T) {
 	}
 }
 
-// Anyone can paste the notification text; only a bot account is trusted.
+// Anyone can paste the notification text, and another bot cannot speak for this
+// app: only comments authored by our own app identity count.
 func TestNotificationTextFromAHumanIsIgnored(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
-	forged := notification("reviewer-one")
-	forged.User = github.User{Login: "someone", Type: github.UserTypeUser}
-	fake.comments = []github.IssueComment{forged}
-	h := newTestPlugin(t, testPolicy, fake, false)
+	for _, author := range []github.User{
+		{Login: "someone", Type: github.UserTypeUser},
+		{Login: "another-bot", Type: github.UserTypeBot},
+	} {
+		fake := newFakeGitHub()
+		fake.changes = protectedChange()
+		forged := notification("reviewer-one")
+		forged.User = author
+		fake.comments = []github.IssueComment{forged}
+		h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
-		t.Fatalf("evaluate: %v", err)
-	}
+		if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+			t.Fatalf("evaluate: %v", err)
+		}
 
-	statuses := fake.recordedStatuses()
-	if len(statuses) != 1 || statuses[0].State != github.StatusFailure {
-		t.Fatalf("got statuses %+v, want one failure", statuses)
+		statuses := fake.recordedStatuses()
+		if len(statuses) != 1 || statuses[0].State != github.StatusFailure {
+			t.Fatalf("%s: got statuses %+v, want one failure", author.Login, statuses)
+		}
 	}
 }
 
@@ -556,11 +561,10 @@ func TestIrrelevantIssueCommentsAreIgnored(t *testing.T) {
 	}{
 		{name: "bot welcome message", comment: github.IssueComment{User: github.User{Login: "ti-chi-bot", Type: github.UserTypeBot}, Body: "Welcome to the pull request!"}},
 		{name: "human chatter", comment: commentFrom("someone", "looks good to me, thanks!", time.Now())},
-		{name: "our own notification", comment: func() github.IssueComment {
-			c := notification("reviewer-one")
-			c.User = github.User{Login: selfLogin, Type: github.UserTypeBot}
-			return c
-		}()},
+		{name: "our own advisory comment", comment: github.IssueComment{
+			User: github.User{Login: selfLogin, Type: github.UserTypeBot},
+			Body: commentMarker + "\n**Protected changes**\n\nold finding",
+		}},
 	}
 
 	for _, tt := range tests {

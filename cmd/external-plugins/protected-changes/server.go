@@ -60,7 +60,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	l := s.log.WithFields(logrus.Fields{"event-type": eventType, github.EventGUID: eventGUID})
 
-	org, repo, relevant, err := routeEvent(eventType, payload)
+	org, repo, relevant, err := routeEvent(eventType, payload, s.handler.isSelf)
 	if err != nil {
 		webhookEvents.WithLabelValues(eventType, "malformed").Inc()
 		l.WithError(err).Error("Failed to read the webhook payload.")
@@ -109,7 +109,7 @@ func (s *server) dispatch(l *logrus.Entry, eventType string, payload []byte) {
 
 // routeEvent decides, from the envelope alone, whether an event is worth a
 // goroutine and a GitHub call.
-func routeEvent(eventType string, payload []byte) (org, repo string, relevant bool, err error) {
+func routeEvent(eventType string, payload []byte, isSelf func(login string) bool) (org, repo string, relevant bool, err error) {
 	var envelope struct {
 		Action     string `json:"action"`
 		Repository struct {
@@ -118,7 +118,6 @@ func routeEvent(eventType string, payload []byte) (org, repo string, relevant bo
 		Comment struct {
 			User struct {
 				Login string `json:"login"`
-				Type  string `json:"type"`
 			} `json:"user"`
 			Body string `json:"body"`
 		} `json:"comment"`
@@ -152,9 +151,9 @@ func routeEvent(eventType string, payload []byte) (org, repo string, relevant bo
 		// other comment is acknowledged without any GitHub call.
 		comment := github.IssueComment{
 			Body: envelope.Comment.Body,
-			User: github.User{Login: envelope.Comment.User.Login, Type: envelope.Comment.User.Type},
+			User: github.User{Login: envelope.Comment.User.Login},
 		}
-		if envelope.Action == string(github.IssueCommentActionCreated) && isApprovalNotification(comment) {
+		if envelope.Action == string(github.IssueCommentActionCreated) && isApprovalNotification(comment, isSelf) {
 			return org, repo, true, nil
 		}
 	}

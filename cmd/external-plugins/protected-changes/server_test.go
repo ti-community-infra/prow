@@ -70,7 +70,7 @@ func TestRouteEvent(t *testing.T) {
 		{
 			name:         "approval notification from a bot",
 			eventType:    "issue_comment",
-			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"ti-chi-bot","type":"Bot"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,
+			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"prow-protected-changes-bot"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
 			wantRelevant: true,
@@ -81,14 +81,14 @@ func TestRouteEvent(t *testing.T) {
 			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"other-bot","type":"Bot"},"body":"[APPROVALNOTIFIER] This PR is **NOT APPROVED**"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
-			wantRelevant: true,
+			wantRelevant: false,
 		},
 		{
 			// The bot comments for the welcome message, command help and label
 			// churn too; none of that can change the approval state.
 			name:         "bot comment without the marker is ignored",
 			eventType:    "issue_comment",
-			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"ti-chi-bot","type":"Bot"},"body":"Welcome to the pull request!"}}`,
+			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"prow-protected-changes-bot"},"body":"Welcome to the pull request!"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
 			wantRelevant: false,
@@ -104,7 +104,7 @@ func TestRouteEvent(t *testing.T) {
 		{
 			name:         "edited issue comment is ignored",
 			eventType:    "issue_comment",
-			payload:      `{"action":"edited","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"ti-chi-bot","type":"Bot"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,
+			payload:      `{"action":"edited","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"prow-protected-changes-bot"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
 			wantRelevant: false,
@@ -157,7 +157,7 @@ func TestRouteEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			org, repo, relevant, err := routeEvent(tt.eventType, []byte(tt.payload))
+			org, repo, relevant, err := routeEvent(tt.eventType, []byte(tt.payload), func(login string) bool { return login == selfLogin })
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
 			}

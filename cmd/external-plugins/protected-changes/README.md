@@ -22,7 +22,7 @@ this plugin.
 | --- | --- | --- |
 | `pull_request` | `opened`, `synchronize`, `reopened` | recompute rules and approval |
 | `pull_request_review` | `submitted`, `dismissed` | recompute approval, reuse the rules computed for the current commit |
-| `issue_comment` | `created` by a bot account, body starts with `[APPROVALNOTIFIER]` | recompute approval, same reuse |
+| `issue_comment` | `created` by this plugin's own app, body starts with `[APPROVALNOTIFIER]` | recompute approval, same reuse |
 
 Every other event is acknowledged without a GitHub call: `hook` dispatches
 webhooks synchronously for the whole instance, so this handler must answer fast
@@ -32,9 +32,10 @@ not posted again.
 
 ## Approval sources
 
-No bot login is hardcoded. The plugin resolves its own identity from the GitHub
-App it runs as, and it accepts an approval notification from any account of type
-`Bot`.
+No login is hardcoded: the plugin resolves its own identity from the GitHub App it
+runs as, and only a notification authored by **that same app** is trusted (which is
+also the app that writes the notification). Another bot or a human posting the same
+text is ignored.
 
 1. **The approval notification is the primary source.** A comment starting with
    `[APPROVALNOTIFIER]` lists the approvers, which is exactly what the presubmit
