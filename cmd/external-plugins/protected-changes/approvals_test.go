@@ -23,6 +23,11 @@ import (
 	"sigs.k8s.io/prow/pkg/github"
 )
 
+var (
+	reviewStateOptions = approvalOptions{considerReviewState: true, lgtmActsAsApprove: false}
+	commandOptions     = approvalOptions{considerReviewState: true, lgtmActsAsApprove: true}
+)
+
 func TestHasApprovalCommand(t *testing.T) {
 	tests := []struct {
 		body string
@@ -47,18 +52,27 @@ func TestHasApprovalCommand(t *testing.T) {
 	}
 }
 
-func TestApprovalFromReviews(t *testing.T) {
+func TestApprovalState(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name    string
-		reviews []github.Review
-		want    map[string]bool
+		name     string
+		reviews  []github.Review
+		comments []github.IssueComment
+		opts     approvalOptions
+		want     map[string]bool
 	}{
 		{
-			name:    "approved review",
+			name:    "an approved review approves",
 			reviews: []github.Review{review("alice", github.ReviewStateApproved, now)},
+			opts:    reviewStateOptions,
 			want:    map[string]bool{"alice": true},
+		},
+		{
+			name:    "reviews are ignored when the approve plugin ignores them",
+			reviews: []github.Review{review("alice", github.ReviewStateApproved, now)},
+			opts:    approvalOptions{considerReviewState: false, lgtmActsAsApprove: true},
+			want:    map[string]bool{},
 		},
 		{
 			name: "a later change request withdraws",
@@ -66,6 +80,7 @@ func TestApprovalFromReviews(t *testing.T) {
 				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
 				review("alice", github.ReviewStateChangesRequested, now),
 			},
+			opts: reviewStateOptions,
 			want: map[string]bool{"alice": false},
 		},
 		{
@@ -74,92 +89,81 @@ func TestApprovalFromReviews(t *testing.T) {
 				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
 				review("alice", github.ReviewStateDismissed, now),
 			},
+			opts: reviewStateOptions,
 			want: map[string]bool{"alice": false},
 		},
 		{
-			name: "a plain comment does not change the state",
+			name: "a plain review comment changes nothing",
 			reviews: []github.Review{
 				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
 				review("alice", github.ReviewStateCommented, now),
 			},
+			opts: reviewStateOptions,
 			want: map[string]bool{"alice": true},
 		},
 		{
-			name: "re-approving after a change request approves again",
+			name:     "an approve command approves",
+			comments: []github.IssueComment{commentFrom("alice", "/approve", now)},
+			opts:     reviewStateOptions,
+			want:     map[string]bool{"alice": true},
+		},
+		{
+			name:     "lgtm approves where the approve plugin counts it",
+			comments: []github.IssueComment{commentFrom("alice", "/lgtm", now)},
+			opts:     commandOptions,
+			want:     map[string]bool{"alice": true},
+		},
+		{
+			name:     "lgtm does not approve where the approve plugin ignores it",
+			comments: []github.IssueComment{commentFrom("alice", "/lgtm", now)},
+			opts:     reviewStateOptions,
+			want:     map[string]bool{},
+		},
+		{
+			name: "a later cancel withdraws a command approval",
+			comments: []github.IssueComment{
+				commentFrom("alice", "/approve", now.Add(-time.Hour)),
+				commentFrom("alice", "/approve cancel", now),
+			},
+			opts: reviewStateOptions,
+			want: map[string]bool{"alice": false},
+		},
+		{
+			// The approve plugin treats /approve cancel as the equivalent of a
+			// review that withdraws, whichever came first.
+			name:     "a cancel after a review approval withdraws it",
+			reviews:  []github.Review{review("alice", github.ReviewStateApproved, now.Add(-time.Hour))},
+			comments: []github.IssueComment{commentFrom("alice", "/approve cancel", now)},
+			opts:     reviewStateOptions,
+			want:     map[string]bool{"alice": false},
+		},
+		{
+			name:     "a review approval after a cancel approves again",
+			reviews:  []github.Review{review("alice", github.ReviewStateApproved, now)},
+			comments: []github.IssueComment{commentFrom("alice", "/approve cancel", now.Add(-time.Hour))},
+			opts:     reviewStateOptions,
+			want:     map[string]bool{"alice": true},
+		},
+		{
+			name: "approvals of different people add up",
 			reviews: []github.Review{
-				review("alice", github.ReviewStateChangesRequested, now.Add(-time.Hour)),
 				review("alice", github.ReviewStateApproved, now),
 			},
-			want: map[string]bool{"alice": true},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := approvalFromReviews(tt.reviews)
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
-			}
-			for login, want := range tt.want {
-				if got[login] != want {
-					t.Errorf("%s: got %v, want %v", login, got[login], want)
-				}
-			}
-		})
-	}
-}
-
-func TestApprovalFromComments(t *testing.T) {
-	now := time.Now()
-
-	tests := []struct {
-		name     string
-		comments []github.IssueComment
-		want     map[string]bool
-	}{
-		{
-			name:     "approve command",
-			comments: []github.IssueComment{commentFrom("alice", "/approve", now)},
-			want:     map[string]bool{"alice": true},
-		},
-		{
-			name:     "lgtm command",
-			comments: []github.IssueComment{commentFrom("alice", "/lgtm", now)},
-			want:     map[string]bool{"alice": true},
-		},
-		{
-			name: "a later cancel withdraws",
-			comments: []github.IssueComment{
-				commentFrom("alice", "/approve", now.Add(-time.Hour)),
-				commentFrom("alice", "/approve cancel", now),
-			},
-			want: map[string]bool{"alice": false},
-		},
-		{
-			name: "comments are applied in chronological order",
-			comments: []github.IssueComment{
-				commentFrom("alice", "/approve cancel", now),
-				commentFrom("alice", "/approve", now.Add(-time.Hour)),
-			},
-			want: map[string]bool{"alice": false},
-		},
-		{
-			name: "several commands in one comment: the last one wins",
-			comments: []github.IssueComment{
-				commentFrom("alice", "/approve\n/lgtm cancel", now),
-			},
-			want: map[string]bool{"alice": false},
+			comments: []github.IssueComment{commentFrom("bob", "/approve", now)},
+			opts:     reviewStateOptions,
+			want:     map[string]bool{"alice": true, "bob": true},
 		},
 		{
 			name:     "a comment without a command changes nothing",
 			comments: []github.IssueComment{commentFrom("alice", "lgtm", now)},
+			opts:     commandOptions,
 			want:     map[string]bool{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := approvalFromComments(tt.comments)
+			got := approvalState(tt.reviews, tt.comments, tt.opts)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}

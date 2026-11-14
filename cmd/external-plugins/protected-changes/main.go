@@ -45,16 +45,18 @@ import (
 )
 
 const (
-	defaultConfigPath     = "/etc/protected-changes/config.yaml"
-	defaultCacheTTL       = 6 * time.Hour
-	defaultCacheSize      = 5000
-	defaultReloadInterval = 30 * time.Second
+	defaultConfigPath       = "/etc/protected-changes/config.yaml"
+	defaultPluginConfigPath = "/etc/prow-plugin/plugins.yaml"
+	defaultCacheTTL         = 6 * time.Hour
+	defaultCacheSize        = 5000
+	defaultReloadInterval   = 30 * time.Second
 )
 
 type options struct {
 	port              int
 	dryRun            bool
 	config            string
+	pluginConfig      string
 	reloadInterval    time.Duration
 	logLevel          string
 	webhookSecretFile string
@@ -87,6 +89,7 @@ func gatherOptions() options {
 	fs.IntVar(&o.port, "port", 8888, "Port to listen on.")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "Report to the log instead of posting statuses and comments. Set explicitly to true for local testing.")
 	fs.StringVar(&o.config, "config", defaultConfigPath, "Path to the protected-changes policy file.")
+	fs.StringVar(&o.pluginConfig, "plugin-config", defaultPluginConfigPath, "Path to the Prow plugin config; the approve plugin's settings decide whether a review or /lgtm counts as an approval. Missing file means the plugin defaults.")
 	fs.DurationVar(&o.reloadInterval, "config-reload-interval", defaultReloadInterval, "How often to re-read the policy file; a changed content is swapped in without a restart.")
 	fs.StringVar(&o.logLevel, "log-level", "info", fmt.Sprintf("Log level is one of %v.", logrus.AllLevels))
 	fs.StringVar(&o.webhookSecretFile, "hmac-secret-file", "/etc/webhook/hmac", "Path to the file containing the GitHub HMAC secret.")
@@ -135,6 +138,11 @@ func main() {
 		isSelf = func(string) bool { return false }
 	}
 
+	plugins, err := loadPluginConfig(o.pluginConfig)
+	if err != nil {
+		log.WithError(err).Fatal("Error loading the plugin config.")
+	}
+
 	configs, err := newConfigSource(o.config, log)
 	if err != nil {
 		log.WithError(err).Fatal("Error loading the protected-changes policy.")
@@ -147,7 +155,7 @@ func main() {
 	serv := &server{
 		tokenGenerator: secret.GetTokenGenerator(o.webhookSecretFile),
 		configs:        configs,
-		handler:        newHandler(configs, githubClient, newCache(defaultCacheTTL, defaultCacheSize), o.dryRun, isSelf, log),
+		handler:        newHandler(configs, githubClient, newCache(defaultCacheTTL, defaultCacheSize), o.dryRun, isSelf, plugins, log),
 		log:            log,
 	}
 

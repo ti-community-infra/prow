@@ -54,9 +54,12 @@ type handler struct {
 	// the GitHub App identity at startup, so nothing has to be configured and no
 	// bot login is hardcoded.
 	isSelf func(login string) bool
+	// plugins carries the approve plugin's settings, so /lgtm and the review
+	// state are interpreted the same way hook interprets them.
+	plugins *pluginConfigSource
 }
 
-func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, isSelf func(string) bool, log *logrus.Entry) *handler {
+func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, isSelf func(string) bool, plugins *pluginConfigSource, log *logrus.Entry) *handler {
 	return &handler{
 		configs: configs,
 		ghc:     ghc,
@@ -64,6 +67,7 @@ func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool,
 		dryRun:  dryRun,
 		log:     log,
 		isSelf:  isSelf,
+		plugins: plugins,
 	}
 }
 
@@ -222,11 +226,6 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 
 	if verdict.Approved {
 		evaluations.WithLabelValues("approved").Inc()
-		if comments == nil {
-			if comments, err = h.listComments(org, repo, number); err != nil {
-				return err
-			}
-		}
 		return h.clearCommentWith(comments, org, repo, number)
 	}
 
@@ -236,31 +235,21 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 		evaluations.WithLabelValues("unapproved").Inc()
 	}
 
-	if comments == nil {
-		if comments, err = h.listComments(org, repo, number); err != nil {
-			return err
-		}
-	}
 	return h.upsertComment(comments, org, repo, number, renderComment(verdict, config.Settings.Hint))
 }
 
-// approvals returns the whitelisted approvers of the pull request and, when the
-// fallback source had to be read, the pull request comments.
+// approvals returns the whitelisted approvers of the pull request and the pull
+// request comments.
 //
-// GitHub reviews come first: they are the native signal and work without any
-// approve plugin. Repositories that only ever receive /approve or /lgtm commands
-// produce no review at all, so when the reviews yield no listed approver the
-// commands are read instead. Comments are returned when they were read, so the
-// caller does not fetch them twice.
+// Reviews and comments feed one timeline, like they do for the approve plugin: a
+// review approval, an /approve command, an /lgtm command where the plugin counts
+// it, and their withdrawal forms. The comments are returned so the caller does
+// not fetch them a second time.
 func (h *handler) approvals(org, repo string, number int, whitelist []string) ([]string, []github.IssueComment, error) {
 	reviews, err := h.ghc.ListReviews(org, repo, number)
 	if err != nil {
 		githubErrors.WithLabelValues("list_reviews").Inc()
 		return nil, nil, fmt.Errorf("failed to read the pull request reviews: %w", err)
-	}
-
-	if approvers := whitelistedApprovers(approvalFromReviews(reviews), whitelist); len(approvers) > 0 {
-		return approvers, nil, nil
 	}
 
 	comments, err := h.ghc.ListIssueComments(org, repo, number)
@@ -269,16 +258,8 @@ func (h *handler) approvals(org, repo string, number int, whitelist []string) ([
 		return nil, nil, fmt.Errorf("failed to read the pull request comments: %w", err)
 	}
 
-	return whitelistedApprovers(approvalFromComments(comments), whitelist), comments, nil
-}
-
-func (h *handler) listComments(org, repo string, number int) ([]github.IssueComment, error) {
-	comments, err := h.ghc.ListIssueComments(org, repo, number)
-	if err != nil {
-		githubErrors.WithLabelValues("list_issue_comments").Inc()
-		return nil, fmt.Errorf("failed to read the pull request comments: %w", err)
-	}
-	return comments, nil
+	state := approvalState(reviews, comments, h.plugins.approvalOptions(org, repo))
+	return whitelistedApprovers(state, whitelist), comments, nil
 }
 
 // describe renders the status description and state for a verdict.

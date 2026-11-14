@@ -27,6 +27,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/prow/pkg/github"
+	pluginconfig "sigs.k8s.io/prow/pkg/plugins"
 )
 
 // selfLogin is the identity the fake plugin runs as.
@@ -206,6 +207,13 @@ func commentFrom(login, body string, at time.Time) github.IssueComment {
 
 func newTestPlugin(t *testing.T, policy string, fake *fakeGitHub, dryRun bool) *handler {
 	t.Helper()
+	return newTestPluginWithConfig(t, policy, fake, dryRun, &pluginconfig.Configuration{})
+}
+
+// newTestPluginWithConfig builds the plugin with the approve plugin settings of
+// the repository under test.
+func newTestPluginWithConfig(t *testing.T, policy string, fake *fakeGitHub, dryRun bool, approveConfig *pluginconfig.Configuration) *handler {
+	t.Helper()
 
 	path := writePolicy(t, policy)
 	log := logrus.NewEntry(logrus.New())
@@ -217,7 +225,15 @@ func newTestPlugin(t *testing.T, policy string, fake *fakeGitHub, dryRun bool) *
 	}
 
 	isSelf := func(login string) bool { return login == selfLogin }
-	return newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), dryRun, isSelf, log)
+	return newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), dryRun, isSelf, &pluginConfigSource{config: approveConfig}, log)
+}
+
+// lgtmCountsAsApprove is the approve plugin setting this fork uses for the tikv
+// and pingcap organizations.
+func lgtmCountsAsApprove() *pluginconfig.Configuration {
+	return &pluginconfig.Configuration{
+		Approve: []pluginconfig.Approve{{Repos: []string{"tikv", "pingcap"}, LgtmActsAsApprove: true}},
+	}
 }
 
 func writePolicy(t *testing.T, policy string) string {
@@ -305,7 +321,24 @@ func TestApprovedByCommandWithoutReviewsSucceeds(t *testing.T) {
 	}
 }
 
-func TestLGTMCommandAlsoApproves(t *testing.T) {
+func TestLGTMCommandAlsoApprovesWhereConfigured(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	fake.comments = []github.IssueComment{commentFrom("reviewer-two", "/lgtm", time.Now())}
+	h := newTestPluginWithConfig(t, testPolicy, fake, false, lgtmCountsAsApprove())
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 1 || statuses[0].State != github.StatusSuccess {
+		t.Fatalf("got statuses %+v, want one success", statuses)
+	}
+}
+
+// Where the approve plugin does not count /lgtm, neither does this check.
+func TestLGTMIsNotAnApprovalByDefault(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
 	fake.comments = []github.IssueComment{commentFrom("reviewer-two", "/lgtm", time.Now())}
@@ -316,8 +349,8 @@ func TestLGTMCommandAlsoApproves(t *testing.T) {
 	}
 
 	statuses := fake.recordedStatuses()
-	if len(statuses) != 1 || statuses[0].State != github.StatusSuccess {
-		t.Fatalf("got statuses %+v, want one success", statuses)
+	if len(statuses) != 1 || statuses[0].State != github.StatusFailure {
+		t.Fatalf("got statuses %+v, want one failure", statuses)
 	}
 }
 
@@ -379,11 +412,11 @@ func TestApprovalByUnlistedUserFails(t *testing.T) {
 	}
 }
 
-// When a review from a listed approver exists, the commands are not needed.
-func TestReviewApprovalIsPreferredOverCommands(t *testing.T) {
+// A review approval and a command approval of different people both count.
+func TestReviewAndCommandApprovalsAddUp(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
-	fake.reviews = []github.Review{review("reviewer-one", github.ReviewStateApproved, time.Now())}
+	fake.reviews = []github.Review{review("reviewer-one", github.ReviewStateApproved, time.Now().Add(-time.Hour))}
 	fake.comments = []github.IssueComment{commentFrom("reviewer-two", "/approve", time.Now())}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
@@ -395,8 +428,8 @@ func TestReviewApprovalIsPreferredOverCommands(t *testing.T) {
 	if len(statuses) != 1 || statuses[0].State != github.StatusSuccess {
 		t.Fatalf("got statuses %+v, want one success", statuses)
 	}
-	if !strings.Contains(statuses[0].Description, "reviewer-one") {
-		t.Errorf("description %q does not name the review approver", statuses[0].Description)
+	if !strings.Contains(statuses[0].Description, "reviewer-one") || !strings.Contains(statuses[0].Description, "reviewer-two") {
+		t.Errorf("description %q does not name both approvers", statuses[0].Description)
 	}
 }
 

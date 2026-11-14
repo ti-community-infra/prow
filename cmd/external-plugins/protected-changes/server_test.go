@@ -238,7 +238,7 @@ func newTestServer(t *testing.T, fake *fakeGitHub) *server {
 	return &server{
 		tokenGenerator: func() []byte { return []byte(webhookSecret) },
 		configs:        configs,
-		handler:        newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), false, func(login string) bool { return login == selfLogin }, log),
+		handler:        newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), false, func(login string) bool { return login == selfLogin }, &pluginConfigSource{config: lgtmCountsAsApprove()}, log),
 		log:            log,
 	}
 }

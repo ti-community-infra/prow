@@ -35,17 +35,24 @@ published for the commit is not posted again.
 No bot login is hardcoded. The plugin resolves its own identity from the GitHub
 App it runs as and only rewrites comments it wrote itself.
 
-An approval comes from, in this order:
+An approval is read from the same signals the `approve` plugin uses, so the
+verdict agrees with what that plugin reports:
 
-1. **GitHub reviews** — the latest review of each person wins, so a later
-   `CHANGES_REQUESTED` or a dismissal withdraws an approval.
-2. **`/approve` and `/lgtm` commands** — used when the reviews yield no approver
-   from the repository's list. That is the case in repositories that do not run
-   the `approve` plugin and never receive a review. `approve cancel` and
-   `lgtm cancel` withdraw, and the last command of a person wins.
+- a review with state `APPROVED` (and `CHANGES_REQUESTED` or a dismissal
+  withdraws it);
+- a `/approve` comment, or `/approve cancel`;
+- `/lgtm` and `/lgtm cancel`, where the approve plugin is configured to accept it
+  (`lgtm_acts_as_approve`).
 
-Either source is filtered by the repository's `approvers` list, so the plugin
-works with or without the approve/lgtm plugins installed.
+Reviews and commands feed one timeline, so the latest action of a person wins:
+`/approve cancel` after a review approval withdraws it, just as it does for the
+approve plugin. `--plugin-config` points at the plugin config hook already mounts
+(`/etc/prow-plugin/plugins.yaml`); the `approve` section of that file decides
+whether reviews and `/lgtm` count. Without the file the approve plugin's defaults
+apply (reviews count, `/lgtm` does not).
+
+The resulting approvers are filtered by the repository's `approvers` list, so who
+may approve does not change: only how an approval is detected.
 
 ## Policy
 
@@ -85,6 +92,7 @@ settings:
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--config` | `/etc/protected-changes/config.yaml` | policy file |
+| `--plugin-config` | `/etc/prow-plugin/plugins.yaml` | the `approve` settings that decide what counts as an approval |
 | `--config-reload-interval` | `30s` | how often the policy is re-read |
 | `--port` | `8888` | webhook listener |
 | `--hmac-secret-file` | `/etc/webhook/hmac` | webhook HMAC secret |

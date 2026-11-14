@@ -20,14 +20,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/prow/pkg/github"
 )
 
-// approvalCommandRegex matches the commands contributors and the approve/lgtm
-// plugins use to approve without the GitHub review UI, including the cancel
-// forms. Both are accepted: a repository that only runs one of the two plugins
-// still produces a signal.
+// approvalCommandRegex matches the commands contributors use to approve without
+// the GitHub review UI, including the cancel forms.
 var approvalCommandRegex = regexp.MustCompile(`(?m)^\s*/(approve|lgtm)(\s+cancel)?\s*$`)
 
 // hasApprovalCommand reports whether body carries an /approve or /lgtm command.
@@ -35,44 +34,62 @@ func hasApprovalCommand(body string) bool {
 	return approvalCommandRegex.MatchString(body)
 }
 
-// approvalFromReviews reduces reviews to the current approval state per reviewer.
-// The latest review wins, so a later CHANGES_REQUESTED or a dismissal withdraws
-// an earlier approval; a plain comment says nothing either way.
-func approvalFromReviews(reviews []github.Review) map[string]bool {
-	sorted := append([]github.Review(nil), reviews...)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].SubmittedAt.Before(sorted[j].SubmittedAt) })
-
-	approved := map[string]bool{}
-	for _, review := range sorted {
-		login := review.User.Login
-		if login == "" {
-			continue
-		}
-		switch review.State {
-		case github.ReviewStateApproved:
-			approved[login] = true
-		case github.ReviewStateChangesRequested, github.ReviewStateDismissed:
-			approved[login] = false
-		}
-	}
-	return approved
+// approvalAction is one decision about one person's approval, at a point in time.
+type approvalAction struct {
+	login    string
+	at       time.Time
+	approved bool
 }
 
-// approvalFromComments applies /approve and /lgtm commands in comment order: the
-// last command of a user wins and "cancel" withdraws the approval.
-func approvalFromComments(comments []github.IssueComment) map[string]bool {
-	sorted := append([]github.IssueComment(nil), comments...)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].CreatedAt.Before(sorted[j].CreatedAt) })
+// approvalState reduces reviews and comments to the current approval state per
+// reviewer, following the approve plugin: an APPROVE review is an approval and a
+// CHANGES_REQUESTED review (or a dismissal) is its withdrawal, /approve and
+// /approve cancel are the command equivalents, and /lgtm only counts where the
+// approve plugin is configured to accept it.
+//
+// Both sources feed one timeline, so the latest action of a person wins no matter
+// where it came from: an /approve cancel after a review approval withdraws it,
+// exactly as it does for the approve plugin.
+func approvalState(reviews []github.Review, comments []github.IssueComment, opts approvalOptions) map[string]bool {
+	var actions []approvalAction
 
-	approved := map[string]bool{}
-	for _, comment := range sorted {
+	if opts.considerReviewState {
+		for _, review := range reviews {
+			login := review.User.Login
+			if login == "" {
+				continue
+			}
+			switch review.State {
+			case github.ReviewStateApproved:
+				actions = append(actions, approvalAction{login: login, at: review.SubmittedAt, approved: true})
+			case github.ReviewStateChangesRequested, github.ReviewStateDismissed:
+				actions = append(actions, approvalAction{login: login, at: review.SubmittedAt, approved: false})
+			}
+		}
+	}
+
+	for _, comment := range comments {
 		login := comment.User.Login
 		if login == "" {
 			continue
 		}
 		for _, match := range approvalCommandRegex.FindAllStringSubmatch(comment.Body, -1) {
-			approved[login] = strings.TrimSpace(match[2]) == ""
+			if match[1] == "lgtm" && !opts.lgtmActsAsApprove {
+				continue
+			}
+			actions = append(actions, approvalAction{
+				login:    login,
+				at:       comment.CreatedAt,
+				approved: strings.TrimSpace(match[2]) == "",
+			})
 		}
+	}
+
+	sort.SliceStable(actions, func(i, j int) bool { return actions[i].at.Before(actions[j].at) })
+
+	approved := map[string]bool{}
+	for _, action := range actions {
+		approved[action.login] = action.approved
 	}
 	return approved
 }
