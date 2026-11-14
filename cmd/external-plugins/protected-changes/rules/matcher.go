@@ -98,7 +98,7 @@ func (c *Checker) CheckFileChanges(repoName string, changes []FileChange) ([]Mat
 // with "@@" and context/removed lines with " " and "-".
 func addedLines(patch string) []string {
 	var lines []string
-	for _, line := range strings.Split(patch, "\n") {
+	for line := range strings.SplitSeq(patch, "\n") {
 		if !strings.HasPrefix(line, "+") {
 			continue
 		}

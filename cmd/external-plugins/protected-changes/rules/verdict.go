@@ -16,7 +16,10 @@ limitations under the License.
 
 package rules
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // Verdict is the decision for one pull request.
 type Verdict struct {
@@ -62,12 +65,9 @@ func (c *Checker) Evaluate(repoName string, matches []Match, approvers []string)
 		if seen[approver] {
 			continue
 		}
-		for _, required := range repo.Approvers {
-			if approver == required {
-				seen[approver] = true
-				verdict.ApprovedBy = append(verdict.ApprovedBy, approver)
-				break
-			}
+		if slices.Contains(repo.Approvers, approver) {
+			seen[approver] = true
+			verdict.ApprovedBy = append(verdict.ApprovedBy, approver)
 		}
 	}
 
