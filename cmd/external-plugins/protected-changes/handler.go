@@ -32,6 +32,9 @@ const (
 	// statusContext is the commit status context; it is also the name tide uses
 	// if the check is ever made required.
 	statusContext = "protected-changes"
+	// noProtectedChanges is the description of a commit that touches nothing
+	// the policy protects.
+	noProtectedChanges = "No protected changes detected."
 	// commentMarker identifies the advisory comment, so it is updated in place.
 	commentMarker = "<!-- protected-changes -->"
 
@@ -47,15 +50,20 @@ type handler struct {
 	cache   *cache
 	dryRun  bool
 	log     *logrus.Entry
+	// isSelf tells whether a login belongs to this plugin. It is resolved from
+	// the GitHub App identity at startup, so nothing has to be configured and no
+	// bot login is hardcoded.
+	isSelf func(login string) bool
 }
 
-func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, log *logrus.Entry) *handler {
+func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, isSelf func(string) bool, log *logrus.Entry) *handler {
 	return &handler{
 		configs: configs,
 		ghc:     ghc,
 		cache:   cache,
 		dryRun:  dryRun,
 		log:     log,
+		isSelf:  isSelf,
 	}
 }
 
@@ -75,9 +83,10 @@ func (h *handler) handlePullRequestEvent(event *github.PullRequestEvent) error {
 
 // handleIssueCommentEvent re-evaluates the approval half of the verdict.
 //
-// Only ti-chi-bot comments matter: an approval or a withdrawn approval makes the
-// bot post a new notification. Re-checking every comment would turn the busiest
-// webhook event into a GitHub API consumer for no verdict change.
+// Only an approval notification can change the verdict: the approval bot posts
+// one whenever an approval is given or withdrawn. Every other comment would turn
+// the busiest webhook event into a GitHub API consumer for no verdict change, and
+// our own advisory comment must never re-trigger the check that wrote it.
 func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error {
 	if event.Action != github.IssueCommentActionCreated {
 		return nil
@@ -85,7 +94,10 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 	if event.Issue.PullRequest == nil || event.Issue.State == github.PullRequestStateClosed {
 		return nil
 	}
-	if login := event.Comment.User.Login; login != tiChiBotLogin && login != tiChiBotLoginBold {
+	// An approval notification is written by this plugin's own app, so it must
+	// be accepted; every other comment of ours (the advisory comment in
+	// particular) is not and therefore cannot re-trigger the check.
+	if !isApprovalNotification(event.Comment, h.isSelf) {
 		return nil
 	}
 
@@ -97,6 +109,22 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 	}
 
 	return h.evaluate(org, repo, number, pr.Head.SHA)
+}
+
+// handlePullRequestReviewEvent evaluates a review that approves or revokes its
+// approval. Reviews are the primary approval signal, so they must trigger even
+// when no approve plugin is installed.
+func (h *handler) handlePullRequestReviewEvent(event *github.ReviewEvent) error {
+	switch event.Action {
+	case github.ReviewActionSubmitted, github.ReviewActionDismissed:
+	default:
+		return nil
+	}
+	if event.PullRequest.State != github.PullRequestStateOpen {
+		return nil
+	}
+
+	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.PullRequest.Number, event.PullRequest.Head.SHA)
 }
 
 // evaluate computes the verdict for one commit of a pull request and publishes
@@ -151,26 +179,44 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 
 	if len(matches) == 0 {
 		evaluations.WithLabelValues("clean").Inc()
-		if err := h.postStatus(org, repo, sha, github.StatusSuccess, "No protected changes detected."); err != nil {
-			return err
+		if h.cache.statusPublished(key, github.StatusSuccess, noProtectedChanges) {
+			statusesSkipped.Inc()
+		} else {
+			if err := h.postStatus(org, repo, sha, github.StatusSuccess, noProtectedChanges); err != nil {
+				return err
+			}
+			if !h.dryRun {
+				h.cache.recordStatus(key, github.StatusSuccess, noProtectedChanges)
+			}
 		}
 		return h.clearComment(org, repo, number)
 	}
 
-	comments, err := h.ghc.ListIssueComments(org, repo, number)
+	repoConfig := config.GetRepository(fullName)
+
+	approvers, comments, err := h.approvals(org, repo, number, repoConfig.Approvers)
 	if err != nil {
-		githubErrors.WithLabelValues("list_issue_comments").Inc()
-		return h.reportFailure(org, repo, sha, "could not read the pull request comments", err)
+		return h.reportFailure(org, repo, sha, "could not read the approval state", err)
 	}
 
-	verdict, err := checker.Evaluate(fullName, matches, approversFromComments(comments))
+	verdict, err := checker.Evaluate(fullName, matches, approvers)
 	if err != nil {
 		return h.reportFailure(org, repo, sha, "could not evaluate the approval state", err)
 	}
 
 	description, state := h.describe(verdict)
-	if err := h.postStatus(org, repo, sha, state, description); err != nil {
-		return err
+	if h.cache.statusPublished(key, state, description) {
+		// The same commit, policy and verdict: a repeated event (an approval
+		// comment that changed nothing, a redelivered webhook) must not add a
+		// second identical status to the commit.
+		statusesSkipped.Inc()
+	} else {
+		if err := h.postStatus(org, repo, sha, state, description); err != nil {
+			return err
+		}
+		if !h.dryRun {
+			h.cache.recordStatus(key, state, description)
+		}
 	}
 
 	if verdict.Approved {
@@ -185,6 +231,34 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 	}
 
 	return h.upsertComment(comments, org, repo, number, renderComment(verdict, config.Settings.Hint))
+}
+
+// approvals returns the whitelisted approvers of the pull request and its
+// comments.
+//
+// The approval notification is the primary source, because it is what the
+// presubmit this plugin replaces read and what an approval bot maintains for the
+// repository. A repository that does not run such a bot never gets a
+// notification, so when none names an approver the GitHub review state is used
+// instead. Either way the result is filtered by the repository's approver list.
+func (h *handler) approvals(org, repo string, number int, whitelist []string) ([]string, []github.IssueComment, error) {
+	comments, err := h.ghc.ListIssueComments(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_issue_comments").Inc()
+		return nil, nil, fmt.Errorf("failed to read the pull request comments: %w", err)
+	}
+
+	if approvers := whitelistedApprovers(approversFromNotifications(comments, h.isSelf), whitelist); len(approvers) > 0 {
+		return approvers, comments, nil
+	}
+
+	reviews, err := h.ghc.ListReviews(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_reviews").Inc()
+		return nil, nil, fmt.Errorf("failed to read the pull request reviews: %w", err)
+	}
+
+	return whitelistedApprovers(approversFromReviews(reviews), whitelist), comments, nil
 }
 
 // describe renders the status description and state for a verdict.
@@ -260,7 +334,7 @@ func (h *handler) clearComment(org, repo string, number int) error {
 }
 
 func (h *handler) clearCommentWith(comments []github.IssueComment, org, repo string, number int) error {
-	existing := findMarkerComment(comments)
+	existing := h.findMarkerComment(comments)
 	if existing == nil {
 		return nil
 	}
@@ -279,7 +353,7 @@ func (h *handler) clearCommentWith(comments []github.IssueComment, org, repo str
 
 // upsertComment keeps exactly one advisory comment per pull request.
 func (h *handler) upsertComment(comments []github.IssueComment, org, repo string, number int, body string) error {
-	existing := findMarkerComment(comments)
+	existing := h.findMarkerComment(comments)
 
 	if h.dryRun {
 		h.log.WithFields(logrus.Fields{"comment-id": commentID(existing), "body": body}).Info("Dry run: would publish the advisory comment.")
@@ -287,6 +361,10 @@ func (h *handler) upsertComment(comments []github.IssueComment, org, repo string
 	}
 
 	if existing != nil {
+		if existing.Body == body {
+			// Rewriting an identical comment only adds a notification.
+			return nil
+		}
 		if err := h.ghc.EditComment(org, repo, existing.ID, body); err != nil {
 			githubErrors.WithLabelValues("edit_comment").Inc()
 			return fmt.Errorf("failed to update the advisory comment: %w", err)
@@ -301,9 +379,11 @@ func (h *handler) upsertComment(comments []github.IssueComment, org, repo string
 	return nil
 }
 
-func findMarkerComment(comments []github.IssueComment) *github.IssueComment {
+func (h *handler) findMarkerComment(comments []github.IssueComment) *github.IssueComment {
 	for i := range comments {
-		if strings.Contains(comments[i].Body, commentMarker) {
+		// Only edit what this plugin wrote: a contributor can paste the marker,
+		// and rewriting their comment would be wrong.
+		if strings.Contains(comments[i].Body, commentMarker) && h.isSelf(comments[i].User.Login) {
 			return &comments[i]
 		}
 	}

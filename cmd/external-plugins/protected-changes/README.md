@@ -21,11 +21,34 @@ this plugin.
 | Event | Action | Handling |
 | --- | --- | --- |
 | `pull_request` | `opened`, `synchronize`, `reopened` | recompute rules and approval |
-| `issue_comment` | `created` by `ti-chi-bot` | recompute approval, reuse the rules computed for the current commit |
+| `pull_request_review` | `submitted`, `dismissed` | recompute approval, reuse the rules computed for the current commit |
+| `issue_comment` | `created` by this plugin's own app, body starts with `[APPROVALNOTIFIER]` | recompute approval, same reuse |
 
 Every other event is acknowledged without a GitHub call: `hook` dispatches
 webhooks synchronously for the whole instance, so this handler must answer fast
-and does the work in the background.
+and does the work in the background. Only an approval notification can change the
+verdict, and a status identical to the one already published for the commit is
+not posted again.
+
+## Approval sources
+
+No login is hardcoded: the plugin resolves its own identity from the GitHub App it
+runs as, and only a notification authored by **that same app** is trusted (which is
+also the app that writes the notification). Another bot or a human posting the same
+text is ignored.
+
+1. **The approval notification is the primary source.** A comment starting with
+   `[APPROVALNOTIFIER]` lists the approvers, which is exactly what the presubmit
+   job this plugin replaces read; keeping it means the verdict still matches the
+   approve plugin, including `/approve`, `/approve cancel` and `/lgtm` where that
+   plugin accepts it.
+2. **GitHub reviews are the fallback.** A repository without an approval bot
+   never gets a notification, so when none names a listed approver the plugin
+   reads the review state: the latest review of each person wins, and a later
+   `CHANGES_REQUESTED` or a dismissal withdraws.
+
+Either way the result is filtered by the repository's `approvers` list, so who
+may approve does not change: only how an approval is detected.
 
 ## Policy
 

@@ -123,6 +123,18 @@ func main() {
 		log.WithError(err).Fatal("Error getting a GitHub client.")
 	}
 
+	// Resolve the identity this plugin runs as, instead of hardcoding a bot
+	// login: it decides which comments it may rewrite and which of its own
+	// comments must not re-trigger a check.
+	isSelf, err := githubClient.BotUserChecker()
+	if err != nil {
+		if !o.dryRun {
+			log.WithError(err).Fatal("Error resolving the plugin identity.")
+		}
+		log.WithError(err).Warn("Cannot resolve the plugin identity in a dry run; no comment will be considered the plugin's own.")
+		isSelf = func(string) bool { return false }
+	}
+
 	configs, err := newConfigSource(o.config, log)
 	if err != nil {
 		log.WithError(err).Fatal("Error loading the protected-changes policy.")
@@ -135,7 +147,7 @@ func main() {
 	serv := &server{
 		tokenGenerator: secret.GetTokenGenerator(o.webhookSecretFile),
 		configs:        configs,
-		handler:        newHandler(configs, githubClient, newCache(defaultCacheTTL, defaultCacheSize), o.dryRun, log),
+		handler:        newHandler(configs, githubClient, newCache(defaultCacheTTL, defaultCacheSize), o.dryRun, isSelf, log),
 		log:            log,
 	}
 
