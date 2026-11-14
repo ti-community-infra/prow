@@ -22,36 +22,31 @@ this plugin.
 | --- | --- | --- |
 | `pull_request` | `opened`, `synchronize`, `reopened` | recompute rules and approval |
 | `pull_request_review` | `submitted`, `dismissed` | recompute approval, reuse the rules computed for the current commit |
-| `issue_comment` | `created`, body carries `/approve` or `/lgtm` (or a `cancel` form) | recompute approval, same reuse |
+| `issue_comment` | `created` by a bot account, body starts with `[APPROVALNOTIFIER]` | recompute approval, same reuse |
 
 Every other event is acknowledged without a GitHub call: `hook` dispatches
 webhooks synchronously for the whole instance, so this handler must answer fast
-and does the work in the background. Only a comment that carries an approval
-command can change the verdict, and a status identical to the one already
-published for the commit is not posted again.
+and does the work in the background. Only an approval notification can change the
+verdict, and a status identical to the one already published for the commit is
+not posted again.
 
 ## Approval sources
 
 No bot login is hardcoded. The plugin resolves its own identity from the GitHub
-App it runs as and only rewrites comments it wrote itself.
+App it runs as, and it accepts an approval notification from any account of type
+`Bot`.
 
-An approval is read from the same signals the `approve` plugin uses, so the
-verdict agrees with what that plugin reports:
+1. **The approval notification is the primary source.** A comment starting with
+   `[APPROVALNOTIFIER]` lists the approvers, which is exactly what the presubmit
+   job this plugin replaces read; keeping it means the verdict still matches the
+   approve plugin, including `/approve`, `/approve cancel` and `/lgtm` where that
+   plugin accepts it.
+2. **GitHub reviews are the fallback.** A repository without an approval bot
+   never gets a notification, so when none names a listed approver the plugin
+   reads the review state: the latest review of each person wins, and a later
+   `CHANGES_REQUESTED` or a dismissal withdraws.
 
-- a review with state `APPROVED` (and `CHANGES_REQUESTED` or a dismissal
-  withdraws it);
-- a `/approve` comment, or `/approve cancel`;
-- `/lgtm` and `/lgtm cancel`, where the approve plugin is configured to accept it
-  (`lgtm_acts_as_approve`).
-
-Reviews and commands feed one timeline, so the latest action of a person wins:
-`/approve cancel` after a review approval withdraws it, just as it does for the
-approve plugin. `--plugin-config` points at the plugin config hook already mounts
-(`/etc/prow-plugin/plugins.yaml`); the `approve` section of that file decides
-whether reviews and `/lgtm` count. Without the file the approve plugin's defaults
-apply (reviews count, `/lgtm` does not).
-
-The resulting approvers are filtered by the repository's `approvers` list, so who
+Either way the result is filtered by the repository's `approvers` list, so who
 may approve does not change: only how an approval is detected.
 
 ## Policy
@@ -92,7 +87,6 @@ settings:
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--config` | `/etc/protected-changes/config.yaml` | policy file |
-| `--plugin-config` | `/etc/prow-plugin/plugins.yaml` | the `approve` settings that decide what counts as an approval |
 | `--config-reload-interval` | `30s` | how often the policy is re-read |
 | `--port` | `8888` | webhook listener |
 | `--hmac-secret-file` | `/etc/webhook/hmac` | webhook HMAC secret |

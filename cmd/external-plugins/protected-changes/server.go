@@ -118,6 +118,7 @@ func routeEvent(eventType string, payload []byte) (org, repo string, relevant bo
 		Comment struct {
 			User struct {
 				Login string `json:"login"`
+				Type  string `json:"type"`
 			} `json:"user"`
 			Body string `json:"body"`
 		} `json:"comment"`
@@ -147,9 +148,13 @@ func routeEvent(eventType string, payload []byte) (org, repo string, relevant bo
 			return org, repo, true, nil
 		}
 	case "issue_comment":
-		// Only a comment carrying an approval command can change the verdict;
-		// every other comment is acknowledged without any GitHub call.
-		if envelope.Action == string(github.IssueCommentActionCreated) && hasApprovalCommand(envelope.Comment.Body) {
+		// Only an approval notification from a bot can change the verdict; every
+		// other comment is acknowledged without any GitHub call.
+		comment := github.IssueComment{
+			Body: envelope.Comment.Body,
+			User: github.User{Login: envelope.Comment.User.Login, Type: envelope.Comment.User.Type},
+		}
+		if envelope.Action == string(github.IssueCommentActionCreated) && isApprovalNotification(comment) {
 			return org, repo, true, nil
 		}
 	}

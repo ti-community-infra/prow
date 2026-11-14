@@ -68,17 +68,17 @@ func TestRouteEvent(t *testing.T) {
 			wantRelevant: false,
 		},
 		{
-			name:         "issue comment with an approve command",
+			name:         "approval notification from a bot",
 			eventType:    "issue_comment",
-			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"someone"},"body":"/approve"}}`,
+			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"ti-chi-bot","type":"Bot"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
 			wantRelevant: true,
 		},
 		{
-			name:         "issue comment with an lgtm cancel command",
+			name:         "approval notification from another bot",
 			eventType:    "issue_comment",
-			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"someone"},"body":"/lgtm cancel"}}`,
+			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"other-bot","type":"Bot"},"body":"[APPROVALNOTIFIER] This PR is **NOT APPROVED**"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
 			wantRelevant: true,
@@ -86,9 +86,17 @@ func TestRouteEvent(t *testing.T) {
 		{
 			// The bot comments for the welcome message, command help and label
 			// churn too; none of that can change the approval state.
-			name:         "issue comment without an approval command is ignored",
+			name:         "bot comment without the marker is ignored",
 			eventType:    "issue_comment",
-			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"ti-chi-bot"},"body":"Welcome to the pull request!"}}`,
+			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"ti-chi-bot","type":"Bot"},"body":"Welcome to the pull request!"}}`,
+			wantOrg:      "tikv",
+			wantRepo:     "pd",
+			wantRelevant: false,
+		},
+		{
+			name:         "notification text from a human is ignored",
+			eventType:    "issue_comment",
+			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"someone","type":"User"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
 			wantRelevant: false,
@@ -96,7 +104,7 @@ func TestRouteEvent(t *testing.T) {
 		{
 			name:         "edited issue comment is ignored",
 			eventType:    "issue_comment",
-			payload:      `{"action":"edited","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"someone"},"body":"/approve"}}`,
+			payload:      `{"action":"edited","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"ti-chi-bot","type":"Bot"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,
 			wantOrg:      "tikv",
 			wantRepo:     "pd",
 			wantRelevant: false,
@@ -238,7 +246,7 @@ func newTestServer(t *testing.T, fake *fakeGitHub) *server {
 	return &server{
 		tokenGenerator: func() []byte { return []byte(webhookSecret) },
 		configs:        configs,
-		handler:        newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), false, func(login string) bool { return login == selfLogin }, &pluginConfigSource{config: lgtmCountsAsApprove()}, log),
+		handler:        newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), false, func(login string) bool { return login == selfLogin }, log),
 		log:            log,
 	}
 }

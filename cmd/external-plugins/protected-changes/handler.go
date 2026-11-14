@@ -54,12 +54,9 @@ type handler struct {
 	// the GitHub App identity at startup, so nothing has to be configured and no
 	// bot login is hardcoded.
 	isSelf func(login string) bool
-	// plugins carries the approve plugin's settings, so /lgtm and the review
-	// state are interpreted the same way hook interprets them.
-	plugins *pluginConfigSource
 }
 
-func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, isSelf func(string) bool, plugins *pluginConfigSource, log *logrus.Entry) *handler {
+func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, isSelf func(string) bool, log *logrus.Entry) *handler {
 	return &handler{
 		configs: configs,
 		ghc:     ghc,
@@ -67,7 +64,6 @@ func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool,
 		dryRun:  dryRun,
 		log:     log,
 		isSelf:  isSelf,
-		plugins: plugins,
 	}
 }
 
@@ -87,11 +83,10 @@ func (h *handler) handlePullRequestEvent(event *github.PullRequestEvent) error {
 
 // handleIssueCommentEvent re-evaluates the approval half of the verdict.
 //
-// A comment only matters when it carries an /approve or /lgtm command: that is
-// how approval is given in repositories that do not use the GitHub review UI.
-// Every other comment would turn the busiest webhook event into a GitHub API
-// consumer for no verdict change, and our own advisory comment must never
-// re-trigger the check that wrote it.
+// Only an approval notification can change the verdict: the approval bot posts
+// one whenever an approval is given or withdrawn. Every other comment would turn
+// the busiest webhook event into a GitHub API consumer for no verdict change, and
+// our own advisory comment must never re-trigger the check that wrote it.
 func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error {
 	if event.Action != github.IssueCommentActionCreated {
 		return nil
@@ -102,7 +97,7 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 	if h.isSelf(event.Comment.User.Login) {
 		return nil
 	}
-	if !hasApprovalCommand(event.Comment.Body) {
+	if !isApprovalNotification(event.Comment) {
 		return nil
 	}
 
@@ -238,28 +233,32 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 	return h.upsertComment(comments, org, repo, number, renderComment(verdict, config.Settings.Hint))
 }
 
-// approvals returns the whitelisted approvers of the pull request and the pull
-// request comments.
+// approvals returns the whitelisted approvers of the pull request and its
+// comments.
 //
-// Reviews and comments feed one timeline, like they do for the approve plugin: a
-// review approval, an /approve command, an /lgtm command where the plugin counts
-// it, and their withdrawal forms. The comments are returned so the caller does
-// not fetch them a second time.
+// The approval notification is the primary source, because it is what the
+// presubmit this plugin replaces read and what an approval bot maintains for the
+// repository. A repository that does not run such a bot never gets a
+// notification, so when none names an approver the GitHub review state is used
+// instead. Either way the result is filtered by the repository's approver list.
 func (h *handler) approvals(org, repo string, number int, whitelist []string) ([]string, []github.IssueComment, error) {
-	reviews, err := h.ghc.ListReviews(org, repo, number)
-	if err != nil {
-		githubErrors.WithLabelValues("list_reviews").Inc()
-		return nil, nil, fmt.Errorf("failed to read the pull request reviews: %w", err)
-	}
-
 	comments, err := h.ghc.ListIssueComments(org, repo, number)
 	if err != nil {
 		githubErrors.WithLabelValues("list_issue_comments").Inc()
 		return nil, nil, fmt.Errorf("failed to read the pull request comments: %w", err)
 	}
 
-	state := approvalState(reviews, comments, h.plugins.approvalOptions(org, repo))
-	return whitelistedApprovers(state, whitelist), comments, nil
+	if approvers := whitelistedApprovers(approversFromNotifications(comments), whitelist); len(approvers) > 0 {
+		return approvers, comments, nil
+	}
+
+	reviews, err := h.ghc.ListReviews(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_reviews").Inc()
+		return nil, nil, fmt.Errorf("failed to read the pull request reviews: %w", err)
+	}
+
+	return whitelistedApprovers(approversFromReviews(reviews), whitelist), comments, nil
 }
 
 // describe renders the status description and state for a verdict.

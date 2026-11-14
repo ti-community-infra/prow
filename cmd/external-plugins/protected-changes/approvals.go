@@ -20,86 +20,108 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"sigs.k8s.io/prow/pkg/github"
 )
 
-// approvalCommandRegex matches the commands contributors use to approve without
-// the GitHub review UI, including the cancel forms.
-var approvalCommandRegex = regexp.MustCompile(`(?m)^\s*/(approve|lgtm)(\s+cancel)?\s*$`)
+const (
+	// approvalNotificationPrefix marks the comment an approval bot posts when the
+	// approval state changes. It is what the presubmit this plugin replaces read,
+	// so the verdict keeps matching it.
+	approvalNotificationPrefix = "[APPROVALNOTIFIER]"
+	approvalDetailsPrefix      = "This pull-request has been approved by:"
+)
 
-// hasApprovalCommand reports whether body carries an /approve or /lgtm command.
-func hasApprovalCommand(body string) bool {
-	return approvalCommandRegex.MatchString(body)
+// approvalLinkRegex matches the approver links an approval notification renders.
+var approvalLinkRegex = regexp.MustCompile(`<a[^>]*title="Approved"[^>]*>([^<]+)</a>`)
+
+// isApprovalNotification reports whether a comment is an approval notification,
+// whatever bot posted it: the author only has to be a bot account, no login is
+// hardcoded.
+func isApprovalNotification(comment github.IssueComment) bool {
+	if comment.User.Type != github.UserTypeBot {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(comment.Body), approvalNotificationPrefix)
 }
 
-// approvalAction is one decision about one person's approval, at a point in time.
-type approvalAction struct {
-	login    string
-	at       time.Time
-	approved bool
-}
+// approversFromNotifications extracts the approvers the approval notifications
+// report, in comment order and without duplicates.
+func approversFromNotifications(comments []github.IssueComment) []string {
+	var approvers []string
+	seen := map[string]bool{}
 
-// approvalState reduces reviews and comments to the current approval state per
-// reviewer, following the approve plugin: an APPROVE review is an approval and a
-// CHANGES_REQUESTED review (or a dismissal) is its withdrawal, /approve and
-// /approve cancel are the command equivalents, and /lgtm only counts where the
-// approve plugin is configured to accept it.
-//
-// Both sources feed one timeline, so the latest action of a person wins no matter
-// where it came from: an /approve cancel after a review approval withdraws it,
-// exactly as it does for the approve plugin.
-func approvalState(reviews []github.Review, comments []github.IssueComment, opts approvalOptions) map[string]bool {
-	var actions []approvalAction
-
-	if opts.considerReviewState {
-		for _, review := range reviews {
-			login := review.User.Login
-			if login == "" {
+	for _, comment := range comments {
+		if !isApprovalNotification(comment) {
+			continue
+		}
+		if !strings.Contains(comment.Body, approvalDetailsPrefix) {
+			continue
+		}
+		for _, match := range approvalLinkRegex.FindAllStringSubmatch(comment.Body, -1) {
+			if len(match) < 2 {
 				continue
 			}
-			switch review.State {
-			case github.ReviewStateApproved:
-				actions = append(actions, approvalAction{login: login, at: review.SubmittedAt, approved: true})
-			case github.ReviewStateChangesRequested, github.ReviewStateDismissed:
-				actions = append(actions, approvalAction{login: login, at: review.SubmittedAt, approved: false})
+			login := strings.TrimSpace(match[1])
+			if login == "" || seen[login] {
+				continue
 			}
+			seen[login] = true
+			approvers = append(approvers, login)
 		}
 	}
 
-	for _, comment := range comments {
-		login := comment.User.Login
+	return approvers
+}
+
+// approversFromReviews falls back to the GitHub review state, for repositories
+// that do not run the approval bot. The latest review of each person wins, so a
+// later CHANGES_REQUESTED or a dismissal withdraws an earlier approval.
+func approversFromReviews(reviews []github.Review) []string {
+	sorted := append([]github.Review(nil), reviews...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].SubmittedAt.Before(sorted[j].SubmittedAt) })
+
+	state := map[string]bool{}
+	for _, review := range sorted {
+		login := review.User.Login
 		if login == "" {
 			continue
 		}
-		for _, match := range approvalCommandRegex.FindAllStringSubmatch(comment.Body, -1) {
-			if match[1] == "lgtm" && !opts.lgtmActsAsApprove {
-				continue
-			}
-			actions = append(actions, approvalAction{
-				login:    login,
-				at:       comment.CreatedAt,
-				approved: strings.TrimSpace(match[2]) == "",
-			})
+		switch review.State {
+		case github.ReviewStateApproved:
+			state[login] = true
+		case github.ReviewStateChangesRequested, github.ReviewStateDismissed:
+			state[login] = false
 		}
 	}
 
-	sort.SliceStable(actions, func(i, j int) bool { return actions[i].at.Before(actions[j].at) })
-
-	approved := map[string]bool{}
-	for _, action := range actions {
-		approved[action.login] = action.approved
+	// Report in the order the reviewers first appear, so the list is stable.
+	var approvers []string
+	seen := map[string]bool{}
+	for _, review := range sorted {
+		login := review.User.Login
+		if login == "" || seen[login] {
+			continue
+		}
+		seen[login] = true
+		if state[login] {
+			approvers = append(approvers, login)
+		}
 	}
-	return approved
+	return approvers
 }
 
 // whitelistedApprovers keeps the reviewers the policy lists, in policy order so
 // the reported approver list is stable.
-func whitelistedApprovers(state map[string]bool, whitelist []string) []string {
+func whitelistedApprovers(candidates []string, whitelist []string) []string {
+	approved := map[string]bool{}
+	for _, login := range candidates {
+		approved[login] = true
+	}
+
 	var approvers []string
 	for _, login := range whitelist {
-		if state[login] {
+		if approved[login] {
 			approvers = append(approvers, login)
 		}
 	}

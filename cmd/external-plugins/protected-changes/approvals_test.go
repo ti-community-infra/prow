@@ -23,165 +23,60 @@ import (
 	"sigs.k8s.io/prow/pkg/github"
 )
 
-var (
-	reviewStateOptions = approvalOptions{considerReviewState: true, lgtmActsAsApprove: false}
-	commandOptions     = approvalOptions{considerReviewState: true, lgtmActsAsApprove: true}
-)
-
-func TestHasApprovalCommand(t *testing.T) {
+func TestIsApprovalNotification(t *testing.T) {
 	tests := []struct {
+		name string
+		user github.User
 		body string
 		want bool
 	}{
-		{body: "/approve", want: true},
-		{body: "/approve\n", want: true},
-		{body: "  /approve  ", want: true},
-		{body: "/lgtm", want: true},
-		{body: "/approve cancel", want: true},
-		{body: "/lgtm cancel", want: true},
-		{body: "sounds good\n/approve\nthanks", want: true},
-		{body: "you need to /approve this", want: false},
-		{body: "/approved", want: false},
-		{body: "Welcome to the pull request!", want: false},
-	}
-
-	for _, tt := range tests {
-		if got := hasApprovalCommand(tt.body); got != tt.want {
-			t.Errorf("hasApprovalCommand(%q) = %v, want %v", tt.body, got, tt.want)
-		}
-	}
-}
-
-func TestApprovalState(t *testing.T) {
-	now := time.Now()
-
-	tests := []struct {
-		name     string
-		reviews  []github.Review
-		comments []github.IssueComment
-		opts     approvalOptions
-		want     map[string]bool
-	}{
 		{
-			name:    "an approved review approves",
-			reviews: []github.Review{review("alice", github.ReviewStateApproved, now)},
-			opts:    reviewStateOptions,
-			want:    map[string]bool{"alice": true},
+			name: "bot notification",
+			user: github.User{Login: "ti-chi-bot", Type: github.UserTypeBot},
+			body: "[APPROVALNOTIFIER] This PR is **APPROVED**",
+			want: true,
 		},
 		{
-			name:    "reviews are ignored when the approve plugin ignores them",
-			reviews: []github.Review{review("alice", github.ReviewStateApproved, now)},
-			opts:    approvalOptions{considerReviewState: false, lgtmActsAsApprove: true},
-			want:    map[string]bool{},
+			name: "another bot notification",
+			user: github.User{Login: "some-other-bot", Type: github.UserTypeBot},
+			body: "  [APPROVALNOTIFIER] This PR is **NOT APPROVED**",
+			want: true,
 		},
 		{
-			name: "a later change request withdraws",
-			reviews: []github.Review{
-				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
-				review("alice", github.ReviewStateChangesRequested, now),
-			},
-			opts: reviewStateOptions,
-			want: map[string]bool{"alice": false},
+			// Anyone can paste that text; only a bot account is trusted.
+			name: "human with the same text",
+			user: github.User{Login: "someone", Type: github.UserTypeUser},
+			body: "[APPROVALNOTIFIER] This PR is **APPROVED**",
+			want: false,
 		},
 		{
-			name: "a dismissal withdraws",
-			reviews: []github.Review{
-				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
-				review("alice", github.ReviewStateDismissed, now),
-			},
-			opts: reviewStateOptions,
-			want: map[string]bool{"alice": false},
-		},
-		{
-			name: "a plain review comment changes nothing",
-			reviews: []github.Review{
-				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
-				review("alice", github.ReviewStateCommented, now),
-			},
-			opts: reviewStateOptions,
-			want: map[string]bool{"alice": true},
-		},
-		{
-			name:     "an approve command approves",
-			comments: []github.IssueComment{commentFrom("alice", "/approve", now)},
-			opts:     reviewStateOptions,
-			want:     map[string]bool{"alice": true},
-		},
-		{
-			name:     "lgtm approves where the approve plugin counts it",
-			comments: []github.IssueComment{commentFrom("alice", "/lgtm", now)},
-			opts:     commandOptions,
-			want:     map[string]bool{"alice": true},
-		},
-		{
-			name:     "lgtm does not approve where the approve plugin ignores it",
-			comments: []github.IssueComment{commentFrom("alice", "/lgtm", now)},
-			opts:     reviewStateOptions,
-			want:     map[string]bool{},
-		},
-		{
-			name: "a later cancel withdraws a command approval",
-			comments: []github.IssueComment{
-				commentFrom("alice", "/approve", now.Add(-time.Hour)),
-				commentFrom("alice", "/approve cancel", now),
-			},
-			opts: reviewStateOptions,
-			want: map[string]bool{"alice": false},
-		},
-		{
-			// The approve plugin treats /approve cancel as the equivalent of a
-			// review that withdraws, whichever came first.
-			name:     "a cancel after a review approval withdraws it",
-			reviews:  []github.Review{review("alice", github.ReviewStateApproved, now.Add(-time.Hour))},
-			comments: []github.IssueComment{commentFrom("alice", "/approve cancel", now)},
-			opts:     reviewStateOptions,
-			want:     map[string]bool{"alice": false},
-		},
-		{
-			name:     "a review approval after a cancel approves again",
-			reviews:  []github.Review{review("alice", github.ReviewStateApproved, now)},
-			comments: []github.IssueComment{commentFrom("alice", "/approve cancel", now.Add(-time.Hour))},
-			opts:     reviewStateOptions,
-			want:     map[string]bool{"alice": true},
-		},
-		{
-			name: "approvals of different people add up",
-			reviews: []github.Review{
-				review("alice", github.ReviewStateApproved, now),
-			},
-			comments: []github.IssueComment{commentFrom("bob", "/approve", now)},
-			opts:     reviewStateOptions,
-			want:     map[string]bool{"alice": true, "bob": true},
-		},
-		{
-			name:     "a comment without a command changes nothing",
-			comments: []github.IssueComment{commentFrom("alice", "lgtm", now)},
-			opts:     commandOptions,
-			want:     map[string]bool{},
+			name: "bot comment without the marker",
+			user: github.User{Login: "ti-chi-bot", Type: github.UserTypeBot},
+			body: "Welcome to the pull request!",
+			want: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := approvalState(tt.reviews, tt.comments, tt.opts)
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
-			}
-			for login, want := range tt.want {
-				if got[login] != want {
-					t.Errorf("%s: got %v, want %v", login, got[login], want)
-				}
+			comment := github.IssueComment{User: tt.user, Body: tt.body}
+			if got := isApprovalNotification(comment); got != tt.want {
+				t.Errorf("isApprovalNotification(%q by %s) = %v, want %v", tt.body, tt.user.Login, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestWhitelistedApprovers(t *testing.T) {
-	state := map[string]bool{"alice": true, "bob": false, "carol": true}
-	whitelist := []string{"carol", "bob", "dave", "alice"}
+func TestApproversFromNotifications(t *testing.T) {
+	comments := []github.IssueComment{
+		notification("alice"),
+		notification("alice", "bob"),
+		{User: github.User{Login: "someone", Type: github.UserTypeUser}, Body: approvalDetailsPrefix + " <a title=\"Approved\">mallory</a>"},
+		{User: github.User{Login: "ti-chi-bot", Type: github.UserTypeBot}, Body: "[APPROVALNOTIFIER] This PR is **NOT APPROVED**"},
+	}
 
-	got := whitelistedApprovers(state, whitelist)
-	want := []string{"carol", "alice"}
+	got := approversFromNotifications(comments)
+	want := []string{"alice", "bob"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -189,5 +84,83 @@ func TestWhitelistedApprovers(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
+	}
+}
+
+func TestApproversFromReviews(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name    string
+		reviews []github.Review
+		want    []string
+	}{
+		{
+			name:    "approved review",
+			reviews: []github.Review{review("alice", github.ReviewStateApproved, now)},
+			want:    []string{"alice"},
+		},
+		{
+			name: "a later change request withdraws",
+			reviews: []github.Review{
+				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
+				review("alice", github.ReviewStateChangesRequested, now),
+			},
+			want: nil,
+		},
+		{
+			name: "a dismissal withdraws",
+			reviews: []github.Review{
+				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
+				review("alice", github.ReviewStateDismissed, now),
+			},
+			want: nil,
+		},
+		{
+			name: "a plain comment changes nothing",
+			reviews: []github.Review{
+				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
+				review("alice", github.ReviewStateCommented, now),
+			},
+			want: []string{"alice"},
+		},
+		{
+			name: "re-approving after a change request",
+			reviews: []github.Review{
+				review("alice", github.ReviewStateChangesRequested, now.Add(-time.Hour)),
+				review("alice", github.ReviewStateApproved, now),
+			},
+			want: []string{"alice"},
+		},
+		{
+			name: "several approvers",
+			reviews: []github.Review{
+				review("alice", github.ReviewStateApproved, now.Add(-time.Hour)),
+				review("bob", github.ReviewStateApproved, now),
+			},
+			want: []string{"alice", "bob"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := approversFromReviews(tt.reviews)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestWhitelistedApprovers(t *testing.T) {
+	got := whitelistedApprovers([]string{"alice", "mallory"}, []string{"carol", "alice", "bob"})
+	want := []string{"alice"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }
