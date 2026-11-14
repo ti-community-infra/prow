@@ -117,6 +117,12 @@ func (f *fakeGitHub) CreateComment(org, repo string, number int, body string) er
 	defer f.mu.Unlock()
 	f.calls["CreateComment"]++
 	f.createdComments = append(f.createdComments, body)
+	// Behave like GitHub: the comment is visible on the next list call.
+	f.comments = append(f.comments, github.IssueComment{
+		ID:   1000 + len(f.createdComments),
+		User: github.User{Login: "ti-community-bot"},
+		Body: body,
+	})
 	return nil
 }
 
@@ -417,6 +423,48 @@ func TestNewCommitInvalidatesCachedMatches(t *testing.T) {
 
 	if got := fake.count("GetPullRequestChanges"); got != 2 {
 		t.Errorf("GetPullRequestChanges calls = %d, want 2", got)
+	}
+}
+
+// A bot comment that is not an approval notification must not reach GitHub.
+func TestOtherBotCommentIsIgnored(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	event := &github.IssueCommentEvent{
+		Action:  github.IssueCommentActionCreated,
+		Repo:    github.Repo{Owner: github.User{Login: "tikv"}, Name: "pd"},
+		Issue:   github.Issue{Number: 1, State: github.PullRequestStateOpen, PullRequest: &struct{}{}},
+		Comment: github.IssueComment{User: github.User{Login: tiChiBotLogin}, Body: "Welcome to the pull request!"},
+	}
+	if err := h.handleIssueCommentEvent(event); err != nil {
+		t.Fatalf("handle comment: %v", err)
+	}
+
+	if len(fake.calls) != 0 {
+		t.Errorf("made GitHub calls for a non-approval comment: %v", fake.calls)
+	}
+}
+
+// A redelivered event with the same commit, policy and verdict must not add a
+// second identical status to the commit.
+func TestRepeatedEvaluationPublishesOneStatus(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	for i := range 3 {
+		if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+			t.Fatalf("evaluate %d: %v", i, err)
+		}
+	}
+
+	if got := fake.count("CreateStatus"); got != 1 {
+		t.Errorf("CreateStatus calls = %d, want 1", got)
+	}
+	if got := fake.count("CreateComment"); got != 1 {
+		t.Errorf("CreateComment calls = %d, want 1", got)
 	}
 }
 

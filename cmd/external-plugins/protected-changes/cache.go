@@ -40,6 +40,13 @@ type cacheEntry struct {
 	storedAt time.Time
 }
 
+// publishedStatus is the last status this process sent for a key. Re-posting it
+// would only add noise to the commit history.
+type publishedStatus struct {
+	state       string
+	description string
+}
+
 // cache remembers the rules a pull request commit matched, so an approval
 // comment only has to recompute the approval half of the verdict.
 //
@@ -50,9 +57,10 @@ type cache struct {
 	ttl        time.Duration
 	maxEntries int
 
-	mu      sync.Mutex
-	entries map[cacheKey]cacheEntry
-	locks   [lockStripes]sync.Mutex
+	mu        sync.Mutex
+	entries   map[cacheKey]cacheEntry
+	published map[cacheKey]publishedStatus
+	locks     [lockStripes]sync.Mutex
 }
 
 func newCache(ttl time.Duration, maxEntries int) *cache {
@@ -60,6 +68,7 @@ func newCache(ttl time.Duration, maxEntries int) *cache {
 		ttl:        ttl,
 		maxEntries: maxEntries,
 		entries:    map[cacheKey]cacheEntry{},
+		published:  map[cacheKey]publishedStatus{},
 	}
 }
 
@@ -87,6 +96,22 @@ func (c *cache) matches(key cacheKey) ([]rules.Match, bool) {
 	}
 
 	return entry.matches, true
+}
+
+// statusPublished reports whether this process already sent exactly this status.
+func (c *cache) statusPublished(key cacheKey, state, description string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	published, ok := c.published[key]
+	return ok && published.state == state && published.description == description
+}
+
+func (c *cache) recordStatus(key cacheKey, state, description string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.published[key] = publishedStatus{state: state, description: description}
 }
 
 func (c *cache) storeMatches(key cacheKey, matches []rules.Match) {

@@ -110,6 +110,12 @@ func routeEvent(eventType string, payload []byte) (org, repo string, relevant bo
 		Repository struct {
 			FullName string `json:"full_name"`
 		} `json:"repository"`
+		Comment struct {
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Body string `json:"body"`
+		} `json:"comment"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return "", "", false, err
@@ -128,7 +134,11 @@ func routeEvent(eventType string, payload []byte) (org, repo string, relevant bo
 			return org, repo, true, nil
 		}
 	case "issue_comment":
-		if envelope.Action == string(github.IssueCommentActionCreated) {
+		// The bot also comments for other reasons; only an approval
+		// notification can change the verdict.
+		if envelope.Action == string(github.IssueCommentActionCreated) &&
+			isBotLogin(envelope.Comment.User.Login) &&
+			isApprovalNotification(envelope.Comment.Body) {
 			return org, repo, true, nil
 		}
 	}

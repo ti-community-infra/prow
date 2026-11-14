@@ -49,6 +49,11 @@ var (
 		Name: "protected_changes_status_total",
 		Help: "Statuses posted to GitHub, by state.",
 	}, []string{"state"})
+
+	statusesSkipped = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "protected_changes_status_skipped_total",
+		Help: "Evaluations whose verdict matched the status already published for the commit.",
+	})
 )
 
 func init() {

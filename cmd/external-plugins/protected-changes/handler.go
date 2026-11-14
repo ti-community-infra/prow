@@ -32,6 +32,9 @@ const (
 	// statusContext is the commit status context; it is also the name tide uses
 	// if the check is ever made required.
 	statusContext = "protected-changes"
+	// noProtectedChanges is the description of a commit that touches nothing
+	// the policy protects.
+	noProtectedChanges = "No protected changes detected."
 	// commentMarker identifies the advisory comment, so it is updated in place.
 	commentMarker = "<!-- protected-changes -->"
 
@@ -85,7 +88,10 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 	if event.Issue.PullRequest == nil || event.Issue.State == github.PullRequestStateClosed {
 		return nil
 	}
-	if login := event.Comment.User.Login; login != tiChiBotLogin && login != tiChiBotLoginBold {
+	if !isBotLogin(event.Comment.User.Login) {
+		return nil
+	}
+	if !isApprovalNotification(event.Comment.Body) {
 		return nil
 	}
 
@@ -151,8 +157,15 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 
 	if len(matches) == 0 {
 		evaluations.WithLabelValues("clean").Inc()
-		if err := h.postStatus(org, repo, sha, github.StatusSuccess, "No protected changes detected."); err != nil {
-			return err
+		if h.cache.statusPublished(key, github.StatusSuccess, noProtectedChanges) {
+			statusesSkipped.Inc()
+		} else {
+			if err := h.postStatus(org, repo, sha, github.StatusSuccess, noProtectedChanges); err != nil {
+				return err
+			}
+			if !h.dryRun {
+				h.cache.recordStatus(key, github.StatusSuccess, noProtectedChanges)
+			}
 		}
 		return h.clearComment(org, repo, number)
 	}
@@ -169,8 +182,18 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 	}
 
 	description, state := h.describe(verdict)
-	if err := h.postStatus(org, repo, sha, state, description); err != nil {
-		return err
+	if h.cache.statusPublished(key, state, description) {
+		// The same commit, policy and verdict: a repeated event (an approval
+		// comment that changed nothing, a redelivered webhook) must not add a
+		// second identical status to the commit.
+		statusesSkipped.Inc()
+	} else {
+		if err := h.postStatus(org, repo, sha, state, description); err != nil {
+			return err
+		}
+		if !h.dryRun {
+			h.cache.recordStatus(key, state, description)
+		}
 	}
 
 	if verdict.Approved {
@@ -287,6 +310,10 @@ func (h *handler) upsertComment(comments []github.IssueComment, org, repo string
 	}
 
 	if existing != nil {
+		if existing.Body == body {
+			// Rewriting an identical comment only adds a notification.
+			return nil
+		}
 		if err := h.ghc.EditComment(org, repo, existing.ID, body); err != nil {
 			githubErrors.WithLabelValues("edit_comment").Inc()
 			return fmt.Errorf("failed to update the advisory comment: %w", err)

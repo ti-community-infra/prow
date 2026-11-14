@@ -21,11 +21,13 @@ this plugin.
 | Event | Action | Handling |
 | --- | --- | --- |
 | `pull_request` | `opened`, `synchronize`, `reopened` | recompute rules and approval |
-| `issue_comment` | `created` by `ti-chi-bot` | recompute approval, reuse the rules computed for the current commit |
+| `issue_comment` | `created` by `ti-chi-bot`, carrying an approval notification | recompute approval, reuse the rules computed for the current commit |
 
 Every other event is acknowledged without a GitHub call: `hook` dispatches
 webhooks synchronously for the whole instance, so this handler must answer fast
-and does the work in the background.
+and does the work in the background. The bot comments for the welcome message,
+command help and label churn as well; only a `[APPROVALNOTIFIER]` notification
+can change the verdict, and re-posting an identical status is suppressed.
 
 ## Policy
 

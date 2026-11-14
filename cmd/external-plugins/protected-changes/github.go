@@ -48,6 +48,19 @@ const (
 // approval notification.
 var approvalLinkRegex = regexp.MustCompile(`<a[^>]*title="Approved"[^>]*>([^<]+)</a>`)
 
+// isBotLogin reports whether login belongs to the approval bot.
+func isBotLogin(login string) bool {
+	return login == tiChiBotLogin || login == tiChiBotLoginBold
+}
+
+// isApprovalNotification reports whether body is one of the approval
+// notifications ti-chi-bot posts. The bot also comments for other reasons
+// (welcome message, command help, label churn); none of those can change the
+// verdict, and re-evaluating on them would burn GitHub calls for nothing.
+func isApprovalNotification(body string) bool {
+	return strings.HasPrefix(strings.TrimSpace(body), approvalNotificationPrefix)
+}
+
 // approversFromComments extracts the approvers ti-chi-bot reported, in comment
 // order and without duplicates.
 func approversFromComments(comments []github.IssueComment) []string {
