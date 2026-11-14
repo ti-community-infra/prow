@@ -37,6 +37,7 @@ jobs:
             cmd/deck
             cmd/external-plugins/chatgpt
             cmd/external-plugins/cherrypicker
+            cmd/external-plugins/protected-changes
             cmd/external-plugins/refresh
             cmd/hook
             cmd/horologium
