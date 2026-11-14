@@ -17,9 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"regexp"
-	"strings"
-
 	"sigs.k8s.io/prow/pkg/github"
 )
 
@@ -28,68 +25,10 @@ import (
 type githubAPI interface {
 	GetPullRequest(org, repo string, number int) (*github.PullRequest, error)
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
+	ListReviews(org, repo string, number int) ([]github.Review, error)
 	ListIssueComments(org, repo string, number int) ([]github.IssueComment, error)
 	CreateStatus(org, repo, sha string, status github.Status) error
 	CreateComment(org, repo string, number int, body string) error
 	EditComment(org, repo string, id int, body string) error
 	DeleteComment(org, repo string, id int) error
-}
-
-const (
-	// tiChiBot posts the approval notification that carries the approver list.
-	tiChiBotLogin     = "ti-chi-bot"
-	tiChiBotLoginBold = "ti-chi-bot[bot]"
-
-	approvalNotificationPrefix = "[APPROVALNOTIFIER]"
-	approvalDetailsPrefix      = "This pull-request has been approved by:"
-)
-
-// approvalLinkRegex matches the approver links ti-chi-bot renders in its
-// approval notification.
-var approvalLinkRegex = regexp.MustCompile(`<a[^>]*title="Approved"[^>]*>([^<]+)</a>`)
-
-// isBotLogin reports whether login belongs to the approval bot.
-func isBotLogin(login string) bool {
-	return login == tiChiBotLogin || login == tiChiBotLoginBold
-}
-
-// isApprovalNotification reports whether body is one of the approval
-// notifications ti-chi-bot posts. The bot also comments for other reasons
-// (welcome message, command help, label churn); none of those can change the
-// verdict, and re-evaluating on them would burn GitHub calls for nothing.
-func isApprovalNotification(body string) bool {
-	return strings.HasPrefix(strings.TrimSpace(body), approvalNotificationPrefix)
-}
-
-// approversFromComments extracts the approvers ti-chi-bot reported, in comment
-// order and without duplicates.
-func approversFromComments(comments []github.IssueComment) []string {
-	var approvers []string
-	seen := map[string]bool{}
-
-	for _, comment := range comments {
-		if comment.User.Login != tiChiBotLogin && comment.User.Login != tiChiBotLoginBold {
-			continue
-		}
-		if !strings.HasPrefix(comment.Body, approvalNotificationPrefix) {
-			continue
-		}
-		if !strings.Contains(comment.Body, approvalDetailsPrefix) {
-			continue
-		}
-
-		for _, match := range approvalLinkRegex.FindAllStringSubmatch(comment.Body, -1) {
-			if len(match) < 2 {
-				continue
-			}
-			login := strings.TrimSpace(match[1])
-			if login == "" || seen[login] {
-				continue
-			}
-			seen[login] = true
-			approvers = append(approvers, login)
-		}
-	}
-
-	return approvers
 }

@@ -90,6 +90,11 @@ func (s *server) dispatch(l *logrus.Entry, eventType string, payload []byte) {
 		if err = json.Unmarshal(payload, event); err == nil {
 			err = s.handler.handlePullRequestEvent(event)
 		}
+	case "pull_request_review":
+		event := &github.ReviewEvent{}
+		if err = json.Unmarshal(payload, event); err == nil {
+			err = s.handler.handlePullRequestReviewEvent(event)
+		}
 	default:
 		event := &github.IssueCommentEvent{}
 		if err = json.Unmarshal(payload, event); err == nil {
@@ -133,12 +138,18 @@ func routeEvent(eventType string, payload []byte) (org, repo string, relevant bo
 		case string(github.PullRequestActionOpened), string(github.PullRequestActionSynchronize), string(github.PullRequestActionReopened):
 			return org, repo, true, nil
 		}
+	case "pull_request_review":
+		// A review can approve or withdraw an approval. Repositories that do not
+		// use the review UI produce none; the /approve and /lgtm comments below
+		// cover them.
+		switch envelope.Action {
+		case string(github.ReviewActionSubmitted), string(github.ReviewActionDismissed):
+			return org, repo, true, nil
+		}
 	case "issue_comment":
-		// The bot also comments for other reasons; only an approval
-		// notification can change the verdict.
-		if envelope.Action == string(github.IssueCommentActionCreated) &&
-			isBotLogin(envelope.Comment.User.Login) &&
-			isApprovalNotification(envelope.Comment.Body) {
+		// Only a comment carrying an approval command can change the verdict;
+		// every other comment is acknowledged without any GitHub call.
+		if envelope.Action == string(github.IssueCommentActionCreated) && hasApprovalCommand(envelope.Comment.Body) {
 			return org, repo, true, nil
 		}
 	}

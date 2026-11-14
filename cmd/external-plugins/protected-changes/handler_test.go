@@ -22,11 +22,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/prow/pkg/github"
 )
+
+// selfLogin is the identity the fake plugin runs as.
+const selfLogin = "prow-protected-changes-bot"
 
 // fakeGitHub records what the plugin asks of GitHub.
 type fakeGitHub struct {
@@ -34,9 +38,11 @@ type fakeGitHub struct {
 
 	pr       *github.PullRequest
 	changes  []github.PullRequestChange
+	reviews  []github.Review
 	comments []github.IssueComment
 
 	changesErr  error
+	reviewsErr  error
 	commentsErr error
 	statusErr   error
 
@@ -91,6 +97,16 @@ func (f *fakeGitHub) GetPullRequestChanges(org, repo string, number int) ([]gith
 	return f.changes, nil
 }
 
+func (f *fakeGitHub) ListReviews(org, repo string, number int) ([]github.Review, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls["ListReviews"]++
+	if f.reviewsErr != nil {
+		return nil, f.reviewsErr
+	}
+	return f.reviews, nil
+}
+
 func (f *fakeGitHub) ListIssueComments(org, repo string, number int) ([]github.IssueComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -120,7 +136,7 @@ func (f *fakeGitHub) CreateComment(org, repo string, number int, body string) er
 	// Behave like GitHub: the comment is visible on the next list call.
 	f.comments = append(f.comments, github.IssueComment{
 		ID:   1000 + len(f.createdComments),
-		User: github.User{Login: "ti-community-bot"},
+		User: github.User{Login: selfLogin},
 		Body: body,
 	})
 	return nil
@@ -131,6 +147,11 @@ func (f *fakeGitHub) EditComment(org, repo string, id int, body string) error {
 	defer f.mu.Unlock()
 	f.calls["EditComment"]++
 	f.editedComments[id] = body
+	for i := range f.comments {
+		if f.comments[i].ID == id {
+			f.comments[i].Body = body
+		}
+	}
 	return nil
 }
 
@@ -175,12 +196,12 @@ func protectedChange() []github.PullRequestChange {
 	}}
 }
 
-func approvalComment(login string) github.IssueComment {
-	return github.IssueComment{
-		ID:   99,
-		User: github.User{Login: tiChiBotLogin},
-		Body: "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: <a href=\"https://github.com/tikv/pd/pull/1#pullrequestreview-1\" title=\"Approved\">" + login + "</a>",
-	}
+func review(login string, state github.ReviewState, at time.Time) github.Review {
+	return github.Review{User: github.User{Login: login}, State: state, SubmittedAt: at}
+}
+
+func commentFrom(login, body string, at time.Time) github.IssueComment {
+	return github.IssueComment{User: github.User{Login: login}, Body: body, CreatedAt: at}
 }
 
 func newTestPlugin(t *testing.T, policy string, fake *fakeGitHub, dryRun bool) *handler {
@@ -195,7 +216,8 @@ func newTestPlugin(t *testing.T, policy string, fake *fakeGitHub, dryRun bool) *
 		t.Fatalf("load policy: %v", err)
 	}
 
-	return newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), dryRun, log)
+	isSelf := func(login string) bool { return login == selfLogin }
+	return newHandler(configs, fake, newCache(defaultCacheTTL, defaultCacheSize), dryRun, isSelf, log)
 }
 
 func writePolicy(t *testing.T, policy string) string {
@@ -241,10 +263,12 @@ func TestUnapprovedProtectedChangeFails(t *testing.T) {
 	}
 }
 
-func TestApprovedProtectedChangeSucceeds(t *testing.T) {
+// A GitHub review is the primary approval signal and works without any approve
+// plugin installed.
+func TestApprovedByReviewSucceeds(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
-	fake.comments = []github.IssueComment{approvalComment("reviewer-two")}
+	fake.reviews = []github.Review{review("reviewer-two", github.ReviewStateApproved, time.Now())}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
 	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
@@ -260,11 +284,51 @@ func TestApprovedProtectedChangeSucceeds(t *testing.T) {
 	}
 }
 
-// An approval by someone outside the repository whitelist must not pass.
-func TestApprovalByUnlistedUserFails(t *testing.T) {
+// Repositories that never receive a review approve with /approve or /lgtm
+// comments; that must still pass.
+func TestApprovedByCommandWithoutReviewsSucceeds(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
-	fake.comments = []github.IssueComment{approvalComment("random-contributor")}
+	fake.comments = []github.IssueComment{commentFrom("reviewer-one", "/approve", time.Now())}
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 1 || statuses[0].State != github.StatusSuccess {
+		t.Fatalf("got statuses %+v, want one success", statuses)
+	}
+	if !strings.Contains(statuses[0].Description, "reviewer-one") {
+		t.Errorf("description %q does not name the approver", statuses[0].Description)
+	}
+}
+
+func TestLGTMCommandAlsoApproves(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	fake.comments = []github.IssueComment{commentFrom("reviewer-two", "/lgtm", time.Now())}
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 1 || statuses[0].State != github.StatusSuccess {
+		t.Fatalf("got statuses %+v, want one success", statuses)
+	}
+}
+
+func TestApprovalCancelWithdraws(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	now := time.Now()
+	fake.comments = []github.IssueComment{
+		commentFrom("reviewer-one", "/approve", now.Add(-time.Minute)),
+		commentFrom("reviewer-one", "/approve cancel", now),
+	}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
 	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
@@ -274,6 +338,65 @@ func TestApprovalByUnlistedUserFails(t *testing.T) {
 	statuses := fake.recordedStatuses()
 	if len(statuses) != 1 || statuses[0].State != github.StatusFailure {
 		t.Fatalf("got statuses %+v, want one failure", statuses)
+	}
+}
+
+func TestChangesRequestedWithdrawsReviewApproval(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	now := time.Now()
+	fake.reviews = []github.Review{
+		review("reviewer-one", github.ReviewStateApproved, now.Add(-time.Hour)),
+		review("reviewer-one", github.ReviewStateChangesRequested, now),
+	}
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 1 || statuses[0].State != github.StatusFailure {
+		t.Fatalf("got statuses %+v, want one failure", statuses)
+	}
+}
+
+// An approval by someone outside the repository whitelist must not pass.
+func TestApprovalByUnlistedUserFails(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	fake.reviews = []github.Review{review("random-contributor", github.ReviewStateApproved, time.Now())}
+	fake.comments = []github.IssueComment{commentFrom("random-contributor", "/approve", time.Now())}
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 1 || statuses[0].State != github.StatusFailure {
+		t.Fatalf("got statuses %+v, want one failure", statuses)
+	}
+}
+
+// When a review from a listed approver exists, the commands are not needed.
+func TestReviewApprovalIsPreferredOverCommands(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	fake.reviews = []github.Review{review("reviewer-one", github.ReviewStateApproved, time.Now())}
+	fake.comments = []github.IssueComment{commentFrom("reviewer-two", "/approve", time.Now())}
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 1 || statuses[0].State != github.StatusSuccess {
+		t.Fatalf("got statuses %+v, want one success", statuses)
+	}
+	if !strings.Contains(statuses[0].Description, "reviewer-one") {
+		t.Errorf("description %q does not name the review approver", statuses[0].Description)
 	}
 }
 
@@ -373,8 +496,8 @@ func TestDryRunDoesNotMutate(t *testing.T) {
 	}
 }
 
-// An approval notification after a failed evaluation must reuse the computed
-// matches for the same commit instead of fetching the diff again.
+// An approval after a failed evaluation must reuse the computed matches for the
+// same commit instead of fetching the diff again.
 func TestIssueCommentReusesMatchesForTheSameCommit(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
@@ -387,12 +510,14 @@ func TestIssueCommentReusesMatchesForTheSameCommit(t *testing.T) {
 		t.Fatalf("GetPullRequestChanges calls = %d, want 1", got)
 	}
 
-	fake.comments = []github.IssueComment{approvalComment("reviewer-one")}
+	// The approve plugin is not installed here: the approval only exists as a
+	// comment command, and the webhook carries it.
+	fake.comments = []github.IssueComment{commentFrom("reviewer-one", "/approve", time.Now())}
 	event := &github.IssueCommentEvent{
 		Action:  github.IssueCommentActionCreated,
 		Repo:    github.Repo{Owner: github.User{Login: "tikv"}, Name: "pd"},
 		Issue:   github.Issue{Number: 1, State: github.PullRequestStateOpen, PullRequest: &struct{}{}},
-		Comment: github.IssueComment{User: github.User{Login: tiChiBotLogin}, Body: "[APPROVALNOTIFIER] ..."},
+		Comment: commentFrom("reviewer-one", "/approve", time.Now()),
 	}
 	if err := h.handleIssueCommentEvent(event); err != nil {
 		t.Fatalf("handle comment: %v", err)
@@ -408,42 +533,60 @@ func TestIssueCommentReusesMatchesForTheSameCommit(t *testing.T) {
 	}
 }
 
-// A new commit must be evaluated from scratch.
-func TestNewCommitInvalidatesCachedMatches(t *testing.T) {
+func TestReviewEventTriggersEvaluation(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
+	fake.reviews = []github.Review{review("reviewer-one", github.ReviewStateApproved, time.Now())}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
-		t.Fatalf("evaluate: %v", err)
+	event := &github.ReviewEvent{
+		Action:      github.ReviewActionSubmitted,
+		Repo:        github.Repo{Owner: github.User{Login: "tikv"}, Name: "pd"},
+		PullRequest: github.PullRequest{Number: 1, State: github.PullRequestStateOpen, Head: github.PullRequestBranch{SHA: "abc123"}},
 	}
-	if err := h.evaluate("tikv", "pd", 1, "def456"); err != nil {
-		t.Fatalf("evaluate: %v", err)
+	if err := h.handlePullRequestReviewEvent(event); err != nil {
+		t.Fatalf("handle review: %v", err)
 	}
 
-	if got := fake.count("GetPullRequestChanges"); got != 2 {
-		t.Errorf("GetPullRequestChanges calls = %d, want 2", got)
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 1 || statuses[0].State != github.StatusSuccess {
+		t.Fatalf("got statuses %+v, want one success", statuses)
 	}
 }
 
-// A bot comment that is not an approval notification must not reach GitHub.
-func TestOtherBotCommentIsIgnored(t *testing.T) {
-	fake := newFakeGitHub()
-	fake.changes = protectedChange()
-	h := newTestPlugin(t, testPolicy, fake, false)
-
-	event := &github.IssueCommentEvent{
-		Action:  github.IssueCommentActionCreated,
-		Repo:    github.Repo{Owner: github.User{Login: "tikv"}, Name: "pd"},
-		Issue:   github.Issue{Number: 1, State: github.PullRequestStateOpen, PullRequest: &struct{}{}},
-		Comment: github.IssueComment{User: github.User{Login: tiChiBotLogin}, Body: "Welcome to the pull request!"},
-	}
-	if err := h.handleIssueCommentEvent(event); err != nil {
-		t.Fatalf("handle comment: %v", err)
+// A comment without an approval command cannot change the verdict, and our own
+// comment must never re-trigger the check that wrote it.
+func TestIrrelevantIssueCommentsAreIgnored(t *testing.T) {
+	tests := []struct {
+		name  string
+		login string
+		body  string
+	}{
+		{name: "bot welcome message", login: "ti-chi-bot", body: "Welcome to the pull request!"},
+		{name: "human chatter", login: "someone", body: "looks good to me, thanks!"},
+		{name: "our own comment", login: selfLogin, body: "/approve"},
 	}
 
-	if len(fake.calls) != 0 {
-		t.Errorf("made GitHub calls for a non-approval comment: %v", fake.calls)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGitHub()
+			fake.changes = protectedChange()
+			h := newTestPlugin(t, testPolicy, fake, false)
+
+			event := &github.IssueCommentEvent{
+				Action:  github.IssueCommentActionCreated,
+				Repo:    github.Repo{Owner: github.User{Login: "tikv"}, Name: "pd"},
+				Issue:   github.Issue{Number: 1, State: github.PullRequestStateOpen, PullRequest: &struct{}{}},
+				Comment: commentFrom(tt.login, tt.body, time.Now()),
+			}
+			if err := h.handleIssueCommentEvent(event); err != nil {
+				t.Fatalf("handle comment: %v", err)
+			}
+
+			if len(fake.calls) != 0 {
+				t.Errorf("made GitHub calls for an irrelevant comment: %v", fake.calls)
+			}
+		})
 	}
 }
 
@@ -468,13 +611,31 @@ func TestRepeatedEvaluationPublishesOneStatus(t *testing.T) {
 	}
 }
 
+// A new commit must be evaluated from scratch.
+func TestNewCommitInvalidatesCachedMatches(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if err := h.evaluate("tikv", "pd", 1, "def456"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	if got := fake.count("GetPullRequestChanges"); got != 2 {
+		t.Errorf("GetPullRequestChanges calls = %d, want 2", got)
+	}
+}
+
 // The advisory comment is a single comment that is edited in place.
 func TestAdvisoryCommentIsUpdatedInPlace(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = protectedChange()
 	fake.comments = []github.IssueComment{{
 		ID:   42,
-		User: github.User{Login: "ti-community-bot"},
+		User: github.User{Login: selfLogin},
 		Body: commentMarker + "\n**Protected changes**\n\nold text",
 	}}
 	h := newTestPlugin(t, testPolicy, fake, false)
@@ -495,12 +656,35 @@ func TestAdvisoryCommentIsUpdatedInPlace(t *testing.T) {
 	}
 }
 
+// A contributor can paste the marker; rewriting their comment would be wrong.
+func TestMarkerCommentFromSomeoneElseIsNotEdited(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = protectedChange()
+	fake.comments = []github.IssueComment{{
+		ID:   7,
+		User: github.User{Login: "someone"},
+		Body: commentMarker + "\nnot ours",
+	}}
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	if len(fake.editedComments) != 0 {
+		t.Errorf("edited a comment this plugin did not write: %v", fake.editedComments)
+	}
+	if len(fake.createdComments) != 1 {
+		t.Errorf("got %d created comments, want 1", len(fake.createdComments))
+	}
+}
+
 // Once the pull request no longer touches protected files, the advisory comment
 // must go away.
 func TestStaleCommentIsDeletedWhenClean(t *testing.T) {
 	fake := newFakeGitHub()
 	fake.changes = nil
-	fake.comments = []github.IssueComment{{ID: 7, Body: commentMarker + "\nold finding"}}
+	fake.comments = []github.IssueComment{{ID: 7, User: github.User{Login: selfLogin}, Body: commentMarker + "\nold finding"}}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
 	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {

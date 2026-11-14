@@ -50,15 +50,20 @@ type handler struct {
 	cache   *cache
 	dryRun  bool
 	log     *logrus.Entry
+	// isSelf tells whether a login belongs to this plugin. It is resolved from
+	// the GitHub App identity at startup, so nothing has to be configured and no
+	// bot login is hardcoded.
+	isSelf func(login string) bool
 }
 
-func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, log *logrus.Entry) *handler {
+func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, isSelf func(string) bool, log *logrus.Entry) *handler {
 	return &handler{
 		configs: configs,
 		ghc:     ghc,
 		cache:   cache,
 		dryRun:  dryRun,
 		log:     log,
+		isSelf:  isSelf,
 	}
 }
 
@@ -78,9 +83,11 @@ func (h *handler) handlePullRequestEvent(event *github.PullRequestEvent) error {
 
 // handleIssueCommentEvent re-evaluates the approval half of the verdict.
 //
-// Only ti-chi-bot comments matter: an approval or a withdrawn approval makes the
-// bot post a new notification. Re-checking every comment would turn the busiest
-// webhook event into a GitHub API consumer for no verdict change.
+// A comment only matters when it carries an /approve or /lgtm command: that is
+// how approval is given in repositories that do not use the GitHub review UI.
+// Every other comment would turn the busiest webhook event into a GitHub API
+// consumer for no verdict change, and our own advisory comment must never
+// re-trigger the check that wrote it.
 func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error {
 	if event.Action != github.IssueCommentActionCreated {
 		return nil
@@ -88,10 +95,10 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 	if event.Issue.PullRequest == nil || event.Issue.State == github.PullRequestStateClosed {
 		return nil
 	}
-	if !isBotLogin(event.Comment.User.Login) {
+	if h.isSelf(event.Comment.User.Login) {
 		return nil
 	}
-	if !isApprovalNotification(event.Comment.Body) {
+	if !hasApprovalCommand(event.Comment.Body) {
 		return nil
 	}
 
@@ -103,6 +110,22 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 	}
 
 	return h.evaluate(org, repo, number, pr.Head.SHA)
+}
+
+// handlePullRequestReviewEvent evaluates a review that approves or revokes its
+// approval. Reviews are the primary approval signal, so they must trigger even
+// when no approve plugin is installed.
+func (h *handler) handlePullRequestReviewEvent(event *github.ReviewEvent) error {
+	switch event.Action {
+	case github.ReviewActionSubmitted, github.ReviewActionDismissed:
+	default:
+		return nil
+	}
+	if event.PullRequest.State != github.PullRequestStateOpen {
+		return nil
+	}
+
+	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.PullRequest.Number, event.PullRequest.Head.SHA)
 }
 
 // evaluate computes the verdict for one commit of a pull request and publishes
@@ -170,13 +193,14 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 		return h.clearComment(org, repo, number)
 	}
 
-	comments, err := h.ghc.ListIssueComments(org, repo, number)
+	repoConfig := config.GetRepository(fullName)
+
+	approvers, comments, err := h.approvals(org, repo, number, repoConfig.Approvers)
 	if err != nil {
-		githubErrors.WithLabelValues("list_issue_comments").Inc()
-		return h.reportFailure(org, repo, sha, "could not read the pull request comments", err)
+		return h.reportFailure(org, repo, sha, "could not read the approval state", err)
 	}
 
-	verdict, err := checker.Evaluate(fullName, matches, approversFromComments(comments))
+	verdict, err := checker.Evaluate(fullName, matches, approvers)
 	if err != nil {
 		return h.reportFailure(org, repo, sha, "could not evaluate the approval state", err)
 	}
@@ -198,6 +222,11 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 
 	if verdict.Approved {
 		evaluations.WithLabelValues("approved").Inc()
+		if comments == nil {
+			if comments, err = h.listComments(org, repo, number); err != nil {
+				return err
+			}
+		}
 		return h.clearCommentWith(comments, org, repo, number)
 	}
 
@@ -207,7 +236,49 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 		evaluations.WithLabelValues("unapproved").Inc()
 	}
 
+	if comments == nil {
+		if comments, err = h.listComments(org, repo, number); err != nil {
+			return err
+		}
+	}
 	return h.upsertComment(comments, org, repo, number, renderComment(verdict, config.Settings.Hint))
+}
+
+// approvals returns the whitelisted approvers of the pull request and, when the
+// fallback source had to be read, the pull request comments.
+//
+// GitHub reviews come first: they are the native signal and work without any
+// approve plugin. Repositories that only ever receive /approve or /lgtm commands
+// produce no review at all, so when the reviews yield no listed approver the
+// commands are read instead. Comments are returned when they were read, so the
+// caller does not fetch them twice.
+func (h *handler) approvals(org, repo string, number int, whitelist []string) ([]string, []github.IssueComment, error) {
+	reviews, err := h.ghc.ListReviews(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_reviews").Inc()
+		return nil, nil, fmt.Errorf("failed to read the pull request reviews: %w", err)
+	}
+
+	if approvers := whitelistedApprovers(approvalFromReviews(reviews), whitelist); len(approvers) > 0 {
+		return approvers, nil, nil
+	}
+
+	comments, err := h.ghc.ListIssueComments(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_issue_comments").Inc()
+		return nil, nil, fmt.Errorf("failed to read the pull request comments: %w", err)
+	}
+
+	return whitelistedApprovers(approvalFromComments(comments), whitelist), comments, nil
+}
+
+func (h *handler) listComments(org, repo string, number int) ([]github.IssueComment, error) {
+	comments, err := h.ghc.ListIssueComments(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_issue_comments").Inc()
+		return nil, fmt.Errorf("failed to read the pull request comments: %w", err)
+	}
+	return comments, nil
 }
 
 // describe renders the status description and state for a verdict.
@@ -283,7 +354,7 @@ func (h *handler) clearComment(org, repo string, number int) error {
 }
 
 func (h *handler) clearCommentWith(comments []github.IssueComment, org, repo string, number int) error {
-	existing := findMarkerComment(comments)
+	existing := h.findMarkerComment(comments)
 	if existing == nil {
 		return nil
 	}
@@ -302,7 +373,7 @@ func (h *handler) clearCommentWith(comments []github.IssueComment, org, repo str
 
 // upsertComment keeps exactly one advisory comment per pull request.
 func (h *handler) upsertComment(comments []github.IssueComment, org, repo string, number int, body string) error {
-	existing := findMarkerComment(comments)
+	existing := h.findMarkerComment(comments)
 
 	if h.dryRun {
 		h.log.WithFields(logrus.Fields{"comment-id": commentID(existing), "body": body}).Info("Dry run: would publish the advisory comment.")
@@ -328,9 +399,11 @@ func (h *handler) upsertComment(comments []github.IssueComment, org, repo string
 	return nil
 }
 
-func findMarkerComment(comments []github.IssueComment) *github.IssueComment {
+func (h *handler) findMarkerComment(comments []github.IssueComment) *github.IssueComment {
 	for i := range comments {
-		if strings.Contains(comments[i].Body, commentMarker) {
+		// Only edit what this plugin wrote: a contributor can paste the marker,
+		// and rewriting their comment would be wrong.
+		if strings.Contains(comments[i].Body, commentMarker) && h.isSelf(comments[i].User.Login) {
 			return &comments[i]
 		}
 	}

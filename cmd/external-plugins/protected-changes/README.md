@@ -21,13 +21,31 @@ this plugin.
 | Event | Action | Handling |
 | --- | --- | --- |
 | `pull_request` | `opened`, `synchronize`, `reopened` | recompute rules and approval |
-| `issue_comment` | `created` by `ti-chi-bot`, carrying an approval notification | recompute approval, reuse the rules computed for the current commit |
+| `pull_request_review` | `submitted`, `dismissed` | recompute approval, reuse the rules computed for the current commit |
+| `issue_comment` | `created`, body carries `/approve` or `/lgtm` (or a `cancel` form) | recompute approval, same reuse |
 
 Every other event is acknowledged without a GitHub call: `hook` dispatches
 webhooks synchronously for the whole instance, so this handler must answer fast
-and does the work in the background. The bot comments for the welcome message,
-command help and label churn as well; only a `[APPROVALNOTIFIER]` notification
-can change the verdict, and re-posting an identical status is suppressed.
+and does the work in the background. Only a comment that carries an approval
+command can change the verdict, and a status identical to the one already
+published for the commit is not posted again.
+
+## Approval sources
+
+No bot login is hardcoded. The plugin resolves its own identity from the GitHub
+App it runs as and only rewrites comments it wrote itself.
+
+An approval comes from, in this order:
+
+1. **GitHub reviews** — the latest review of each person wins, so a later
+   `CHANGES_REQUESTED` or a dismissal withdraws an approval.
+2. **`/approve` and `/lgtm` commands** — used when the reviews yield no approver
+   from the repository's list. That is the case in repositories that do not run
+   the `approve` plugin and never receive a review. `approve cancel` and
+   `lgtm cancel` withdraw, and the last command of a person wins.
+
+Either source is filtered by the repository's `approvers` list, so the plugin
+works with or without the approve/lgtm plugins installed.
 
 ## Policy
 
