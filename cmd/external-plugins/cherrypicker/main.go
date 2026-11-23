@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	cherryconfig "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/config"
 	"sigs.k8s.io/prow/pkg/config/secret"
 	"sigs.k8s.io/prow/pkg/flagutil"
 	prowflagutil "sigs.k8s.io/prow/pkg/flagutil"
@@ -44,12 +46,28 @@ type options struct {
 	instrumentationOptions prowflagutil.InstrumentationOptions
 	logLevel               string
 
-	webhookSecretFile string
-	prowAssignments   bool
-	allowAll          bool
-	issueOnConflict   bool
-	skipFork          bool
-	labelPrefix       string
+	webhookSecretFile     string
+	externalPluginsConfig string
+	validateConfig        bool
+	prowAssignments       bool
+	allowAll              bool
+	issueOnConflict       bool
+	skipFork              bool
+	labelPrefix           string
+}
+
+// defaults returns the process-wide settings used when a repository has no
+// override in the external plugins config.
+func (o *options) defaults() cherryconfig.Defaults {
+	return cherryconfig.Defaults{
+		LabelPrefix:        o.labelPrefix,
+		AllowAll:           o.allowAll,
+		UseProwAssignments: o.prowAssignments,
+		Labels:             o.labels.Strings(),
+		// The conflict policy flag arrives with the conflict handling rework;
+		// until then the flag default is the hold policy.
+		OnConflict: cherryconfig.OnConflictHold,
+	}
 }
 
 func (o *options) Validate() error {
@@ -69,12 +87,15 @@ func gatherOptions() options {
 	fs.BoolVar(&o.dryRun, "dry-run", true, "Dry run for testing. Uses API tokens but does not mutate.")
 	fs.Var(&o.labels, "labels", "Labels to apply to the cherrypicked PR.")
 	fs.StringVar(&o.webhookSecretFile, "hmac-secret-file", "/etc/webhook/hmac", "Path to the file containing the GitHub HMAC secret.")
+	fs.StringVar(&o.externalPluginsConfig, "external-plugins-config",
+		"/etc/external_plugins_config/external_plugins_config.yaml", "Path to external plugin config file.")
+	fs.BoolVar(&o.validateConfig, "validate-config", false, "Validate the external plugin config file and exit.")
 	fs.StringVar(&o.logLevel, "log-level", "debug", fmt.Sprintf("Log level is one of %v.", logrus.AllLevels))
 	fs.BoolVar(&o.prowAssignments, "use-prow-assignments", true, "Use prow commands to assign cherrypicked PRs.")
 	fs.BoolVar(&o.allowAll, "allow-all", false, "Allow anybody to use automated cherrypicks by skipping GitHub organization membership checks.")
 	fs.BoolVar(&o.issueOnConflict, "create-issue-on-conflict", false, "Create a GitHub issue and assign it to the requestor on cherrypick conflict.")
 	fs.BoolVar(&o.skipFork, "skip-fork", false, "Skip to create fork repository for cherrypicks.")
-	fs.StringVar(&o.labelPrefix, "label-prefix", defaultLabelPrefix, "Set a custom label prefix.")
+	fs.StringVar(&o.labelPrefix, "label-prefix", cherryconfig.DefaultLabelPrefix, "Set a custom label prefix.")
 	for _, group := range []flagutil.OptionGroup{&o.github, &o.instrumentationOptions} {
 		group.AddFlags(fs)
 	}
@@ -95,6 +116,24 @@ func main() {
 	}
 	logrus.SetLevel(logLevel)
 	log := logrus.StandardLogger().WithField("plugin", pluginName)
+
+	defaults := o.defaults()
+
+	if o.validateConfig {
+		if err := cherryconfig.ValidateFile(o.externalPluginsConfig); err != nil {
+			logrus.WithError(err).Fatalf("Invalid external plugin config %q.", o.externalPluginsConfig)
+		}
+		logrus.WithField("path", o.externalPluginsConfig).Info("External plugin config is valid.")
+		return
+	}
+
+	configAgent := cherryconfig.NewAgent()
+	if err := configAgent.Start(o.externalPluginsConfig); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logrus.WithError(err).Fatalf("Error loading external plugin config from %q.", o.externalPluginsConfig)
+		}
+		log.WithField("path", o.externalPluginsConfig).Warn("External plugin config not found, using flag defaults.")
+	}
 
 	if err := secret.Add(o.webhookSecretFile); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
@@ -139,6 +178,7 @@ func main() {
 		issueOnConflict: o.issueOnConflict,
 		labelPrefix:     o.labelPrefix,
 		skipFork:        o.skipFork,
+		configAgent:     configAgent,
 
 		bare:     &http.Client{},
 		patchURL: "https://patch-diff.githubusercontent.com",
@@ -149,7 +189,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", server)
-	externalplugins.ServeExternalPluginHelp(mux, log, HelpProvider)
+	externalplugins.ServeExternalPluginHelp(mux, log, HelpProvider(configAgent, defaults))
 	httpServer := &http.Server{Addr: ":" + strconv.Itoa(o.port), Handler: mux}
 	defer interrupts.WaitForGracefulShutdown()
 	interrupts.ListenAndServe(httpServer, 5*time.Second)

@@ -32,16 +32,19 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/exec"
+	cherryconfig "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/config"
 	cherrypicker "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/lib"
 	"sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/git/v2"
 	"sigs.k8s.io/prow/pkg/github"
 	"sigs.k8s.io/prow/pkg/pluginhelp"
+	"sigs.k8s.io/prow/pkg/pluginhelp/externalplugins"
 	"sigs.k8s.io/prow/pkg/plugins"
 )
 
 const pluginName = "cherrypick"
-const defaultLabelPrefix = "cherrypick/"
+
+const defaultLabelPrefix = cherryconfig.DefaultLabelPrefix
 
 var cherryPickRe = regexp.MustCompile(`(?m)^(?:/cherrypick|/cherry-pick)\s+(.+)$`)
 var releaseNoteRe = regexp.MustCompile(`(?s)(?:Release note\*\*:\s*(?:<!--[^<>]*-->\s*)?` + "```(?:release-note)?|```release-note)(.+?)```")
@@ -66,20 +69,44 @@ type githubClient interface {
 	ListOrgMembers(org, role string) ([]github.TeamMember, error)
 }
 
-// HelpProvider construct the pluginhelp.PluginHelp for this plugin.
-func HelpProvider(_ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
-	pluginHelp := &pluginhelp.PluginHelp{
-		Description: `The cherrypick plugin is used for cherrypicking PRs across branches. For every successful cherrypick invocation a new PR is opened against the target branch and assigned to the requester. If the parent PR contains a release note, it is copied to the cherrypick PR. Kind labels (e.g. kind/bug, kind/cleanup) from the original PR are copied into the cherry-pick PR description as /kind commands so the bot can re-apply them.`,
+// HelpProvider constructs the PluginHelp for this plugin, including the
+// effective configuration of every enabled repository.
+func HelpProvider(agent *cherryconfig.Agent, defaults cherryconfig.Defaults) externalplugins.ExternalPluginHelpProvider {
+	return func(enabledRepos []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
+		pluginHelp := &pluginhelp.PluginHelp{
+			Description: `The cherrypick plugin is used for cherrypicking PRs across branches. For every successful cherrypick invocation a new PR is opened against the target branch and assigned to the requester. If the parent PR contains a release note, it is copied to the cherrypick PR. Kind labels (e.g. kind/bug, kind/cleanup) from the original PR are copied into the cherry-pick PR description as /kind commands so the bot can re-apply them.`,
+			Config:      map[string]string{},
+		}
+		if agent != nil && agent.Config() != nil {
+			for _, repo := range enabledRepos {
+				pluginHelp.Config[repo.String()] = describeOptions(agent.Config().Options(repo.Org, repo.Repo, defaults))
+			}
+		}
+		pluginHelp.AddCommand(pluginhelp.Command{
+			Usage:       "/cherrypick [branch]",
+			Description: "Cherrypick a PR to a different branch. This command works both in merged PRs (the cherrypick PR is opened immediately) and open PRs (the cherrypick PR opens as soon as the original PR merges). If multiple branches are specified, separated by a space, a cherrypick for the first branch will be created with a comment to cherrypick the remaining branches after the first merges.",
+			Featured:    true,
+			// depends on how the cherrypick server runs; needs auth by default (--allow-all=false)
+			WhoCanUse: "Members of the trusted organization for the repo.",
+			Examples:  []string{"/cherrypick release-3.9", "/cherry-pick release-1.15", "/cherrypick release-1.6 release-1.5 release-1.4"},
+		})
+		return pluginHelp, nil
 	}
-	pluginHelp.AddCommand(pluginhelp.Command{
-		Usage:       "/cherrypick [branch]",
-		Description: "Cherrypick a PR to a different branch. This command works both in merged PRs (the cherrypick PR is opened immediately) and open PRs (the cherrypick PR opens as soon as the original PR merges). If multiple branches are specified, separated by a space, a cherrypick for the first branch will be created with a comment to cherrypick the remaining branches after the first merges.",
-		Featured:    true,
-		// depends on how the cherrypick server runs; needs auth by default (--allow-all=false)
-		WhoCanUse: "Members of the trusted organization for the repo.",
-		Examples:  []string{"/cherrypick release-3.9", "/cherry-pick release-1.15", "/cherrypick release-1.6 release-1.5 release-1.4"},
-	})
-	return pluginHelp, nil
+}
+
+func describeOptions(o cherryconfig.Options) string {
+	return strings.Join([]string{
+		"<ul>",
+		fmt.Sprintf("<li>label_prefix: <code>%s</code></li>", o.LabelPrefix),
+		fmt.Sprintf("<li>allow_all: <code>%t</code></li>", o.AllowAll),
+		fmt.Sprintf("<li>use_prow_assignments: <code>%t</code></li>", o.UseProwAssignments),
+		fmt.Sprintf("<li>labels: <code>%s</code></li>", strings.Join(o.Labels, ", ")),
+		fmt.Sprintf("<li>picked_label_prefix: <code>%s</code></li>", o.PickedLabelPrefix),
+		fmt.Sprintf("<li>exclude_labels: <code>%s</code></li>", strings.Join(o.ExcludeLabels, ", ")),
+		fmt.Sprintf("<li>on_conflict: <code>%s</code></li>", o.OnConflict),
+		fmt.Sprintf("<li>copy_issue_numbers_from_squashed_commit: <code>%t</code></li>", o.CopyIssueNumbersFromSquashedCommit),
+		"</ul>",
+	}, "\n")
 }
 
 // Server implements http.Handler. It validates incoming GitHub webhooks and
@@ -97,6 +124,9 @@ type Server struct {
 	pusher pusher
 	ghc    githubClient
 	log    logrus.FieldLogger
+
+	// configAgent holds the per-repository overrides of the flag defaults.
+	configAgent *cherryconfig.Agent
 
 	// Labels to apply to the cherrypicked PR.
 	labels []string

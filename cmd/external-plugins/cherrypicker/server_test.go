@@ -931,17 +931,17 @@ func testCherryPickPRWithLabels(clients localgit.Clients, t *testing.T) {
 		prComments  []github.IssueComment
 	}{
 		{
-			name:        "Default label prefix",
+			name:        "Flag default label prefix",
 			labelPrefix: defaultLabelPrefix,
 			prLabels: []github.Label{
 				{
-					Name: "cherrypick/release-1.5",
+					Name: defaultLabelPrefix + "release-1.5",
 				},
 				{
-					Name: "cherrypick/release-1.6",
+					Name: defaultLabelPrefix + "release-1.6",
 				},
 				{
-					Name: "cherrypick/release-1.7",
+					Name: defaultLabelPrefix + "release-1.7",
 				},
 			},
 		},
@@ -1369,7 +1369,7 @@ func TestHandlePullRequestLabelAdded_BaseEqualsTarget(t *testing.T) {
 
 	event := github.PullRequestEvent{
 		Action: github.PullRequestActionLabeled,
-		Label:  github.Label{Name: "cherrypick/master"},
+		Label:  github.Label{Name: defaultLabelPrefix + "master"},
 		PullRequest: github.PullRequest{
 			Number: prNumber,
 			Merged: true,
@@ -1414,7 +1414,7 @@ func TestHandlePullRequestLabelAdded_NonMemberRejected(t *testing.T) {
 
 	event := github.PullRequestEvent{
 		Action: github.PullRequestActionLabeled,
-		Label:  github.Label{Name: "cherrypick/release-1.9"},
+		Label:  github.Label{Name: defaultLabelPrefix + "release-1.9"},
 		PullRequest: github.PullRequest{
 			Number: prNumber,
 			Merged: true,
