@@ -21,6 +21,7 @@ this plugin.
 | Event | Action | Handling |
 | --- | --- | --- |
 | `pull_request` | `opened`, `synchronize`, `reopened` | recompute rules and approval |
+| `pull_request` | `edited` with a base branch change | recompute against the new base; title/body edits are ignored |
 | `pull_request_review` | `submitted`, `dismissed` | recompute approval, reuse the rules computed for the current commit |
 | `issue_comment` | `created` by this plugin's own app, body starts with `[APPROVALNOTIFIER]` | recompute approval, same reuse |
 
@@ -28,7 +29,9 @@ Every other event is acknowledged without a GitHub call: `hook` dispatches
 webhooks synchronously for the whole instance, so this handler must answer fast
 and does the work in the background. Only an approval notification can change the
 verdict, and a status identical to the one already published for the commit is
-not posted again.
+not posted again. The cached rules are keyed by repository, pull request, head and
+base commit, and policy digest, so a retarget cannot reuse the verdict computed
+for the previous base branch.
 
 ## Approval sources
 
@@ -77,7 +80,11 @@ settings:
 - A rule without `files` applies to every changed file.
 - A pattern without `/` in `files` matches the file basename, so `go.mod` also
   covers `tools/foo/go.mod`.
-- Only added lines are matched.
+- Only added lines are matched. Consecutive added lines whose parentheses are
+  still open are matched as one statement, so a call formatted over several lines
+  (`log.Error("msg",` with its arguments on the next lines) is matched as the
+  whole call it is. A call whose opening line is not part of the change is not
+  matched: the rule reports a change to the call, not its context.
 - `min_approvals` and `check_behavior.mode` fall back to `1` and
   `check_and_fail` when absent, so a truncated document cannot turn the check
   off.

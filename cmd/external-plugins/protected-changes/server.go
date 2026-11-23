@@ -111,7 +111,8 @@ func (s *server) dispatch(l *logrus.Entry, eventType string, payload []byte) {
 // goroutine and a GitHub call.
 func routeEvent(eventType string, payload []byte, isSelf func(login string) bool) (org, repo string, relevant bool, err error) {
 	var envelope struct {
-		Action     string `json:"action"`
+		Action     string          `json:"action"`
+		Changes    json.RawMessage `json:"changes"`
 		Repository struct {
 			FullName string `json:"full_name"`
 		} `json:"repository"`
@@ -137,6 +138,12 @@ func routeEvent(eventType string, payload []byte, isSelf func(login string) bool
 		switch envelope.Action {
 		case string(github.PullRequestActionOpened), string(github.PullRequestActionSynchronize), string(github.PullRequestActionReopened):
 			return org, repo, true, nil
+		case string(github.PullRequestActionEdited):
+			// Edited covers title and body changes as well; only a retarget
+			// changes the diff the verdict is computed from.
+			if retargeted(envelope.Changes) {
+				return org, repo, true, nil
+			}
 		}
 	case "pull_request_review":
 		// A review can approve or withdraw an approval. Repositories that do not

@@ -282,6 +282,160 @@ repositories:
 	}
 }
 
+// The production Go rules require the call to close on the matched text, so a
+// call whose arguments span several added lines has to be evaluated as one
+// statement; matching line by line reports a false success for it.
+func TestCheckFileChangesMatchesMultilineCalls(t *testing.T) {
+	checker := newTestChecker(t, goCallPolicy)
+
+	tests := []struct {
+		name          string
+		patch         string
+		wantPatterns  []string
+		wantRuleName  string
+		wantStatement string
+	}{
+		{
+			name:          "single line call",
+			patch:         "@@ -0,0 +1,1 @@\n+\tlog.Error(\"failed to load\")",
+			wantPatterns:  []string{"string_literals", "variables_and_functions"},
+			wantRuleName:  "string_literals",
+			wantStatement: `log.Error("failed to load")`,
+		},
+		{
+			name:          "call reopened on the following lines",
+			patch:         "@@ -0,0 +1,3 @@\n+\tlog.Error(\"failed to load\",\n+\t\tzap.Error(err),\n+\t)",
+			wantPatterns:  []string{"string_literals", "variables_and_functions"},
+			wantRuleName:  "string_literals",
+			wantStatement: `log.Error("failed to load",`,
+		},
+		{
+			name:          "message on the line after the opening parenthesis",
+			patch:         "@@ -0,0 +1,3 @@\n+\tlog.Error(\n+\t\t\"failed to load\",\n+\t)",
+			wantPatterns:  []string{"string_literals", "variables_and_functions"},
+			wantRuleName:  "string_literals",
+			wantStatement: `log.Error(`,
+		},
+		{
+			name:          "error variable only",
+			patch:         "@@ -0,0 +1,1 @@\n+\tlog.Error(err)",
+			wantPatterns:  []string{"variables_and_functions"},
+			wantRuleName:  "variables_and_functions",
+			wantStatement: `log.Error(err)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches, err := checker.CheckFileChanges("test/repo", []FileChange{{Filename: "pkg/scheduler/log.go", Patch: tt.patch}})
+			if err != nil {
+				t.Fatalf("check changes: %v", err)
+			}
+
+			got := map[string]bool{}
+			for _, match := range matches {
+				got[match.Pattern] = true
+			}
+			if len(got) != len(tt.wantPatterns) {
+				t.Fatalf("matched %v, want %v", got, tt.wantPatterns)
+			}
+			for _, pattern := range tt.wantPatterns {
+				if !got[pattern] {
+					t.Errorf("pattern %q did not match: %+v", pattern, matches)
+				}
+			}
+
+			reported := false
+			for _, match := range matches {
+				if match.Pattern == tt.wantRuleName && strings.Contains(match.Line, tt.wantStatement) {
+					reported = true
+				}
+			}
+			if !reported {
+				t.Errorf("no %q match reported the statement %q: %+v", tt.wantRuleName, tt.wantStatement, matches)
+			}
+		})
+	}
+}
+
+// A statement that is only partly added is not protected: the lines this pull
+// request adds do not open a protected call, so the context line before them
+// must not be pulled into the match.
+func TestCheckFileChangesDoesNotJoinContextLines(t *testing.T) {
+	checker := newTestChecker(t, goCallPolicy)
+
+	matches, err := checker.CheckFileChanges("test/repo", []FileChange{{
+		Filename: "pkg/scheduler/log.go",
+		Patch:    "@@ -1,1 +1,3 @@\n \tlog.Error(\"failed to load\",\n+\t\tzap.Error(err),\n+\t)",
+	}})
+	if err != nil {
+		t.Fatalf("check changes: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("got %+v, want no match for context-only call openings", matches)
+	}
+}
+
+// Consecutive statements stay separate: joining them would report one match for
+// two distinct log calls.
+func TestCheckFileChangesKeepsStatementsSeparate(t *testing.T) {
+	checker := newTestChecker(t, goCallPolicy)
+
+	matches, err := checker.CheckFileChanges("test/repo", []FileChange{{
+		Filename: "pkg/scheduler/log.go",
+		Patch:    "@@ -0,0 +1,2 @@\n+\tlog.Error(\"first\")\n+\tlog.Error(\"second\")",
+	}})
+	if err != nil {
+		t.Fatalf("check changes: %v", err)
+	}
+
+	var literals []string
+	for _, match := range matches {
+		if match.Pattern == "string_literals" {
+			literals = append(literals, match.Line)
+		}
+	}
+	if len(literals) != 2 {
+		t.Fatalf("got %d string literal matches (%v), want 2", len(literals), literals)
+	}
+	if !strings.Contains(literals[0], "first") || !strings.Contains(literals[1], "second") {
+		t.Errorf("matches are not the two statements: %v", literals)
+	}
+}
+
+// The TiKV policy protects error macros. Its literal rule does not require the
+// macro to close, but it does require the message on an added line of the same
+// statement; the variable rule has to tolerate the "error!(" opening.
+func TestCheckFileChangesMatchesTiKVMacros(t *testing.T) {
+	checker := newTestChecker(t, tikvPolicy)
+
+	matches, err := checker.CheckFileChanges("test/repo", []FileChange{
+		{Filename: "src/server.rs", Patch: "@@ -0,0 +1,1 @@\n+\terror!(?e);"},
+		{Filename: "src/storage.rs", Patch: "@@ -0,0 +1,4 @@\n+\terror!(\n+\t\t?e,\n+\t\t\"failed to flush memtable\"\n+\t);"},
+		{Filename: "src/raft.rs", Patch: "@@ -0,0 +1,1 @@\n+\terror!(\"raft log is corrupted\");"},
+	})
+	if err != nil {
+		t.Fatalf("check changes: %v", err)
+	}
+
+	got := map[string]map[string]bool{}
+	for _, match := range matches {
+		if got[match.File] == nil {
+			got[match.File] = map[string]bool{}
+		}
+		got[match.File][match.Pattern] = true
+	}
+	if !got["src/server.rs"]["error_variables"] {
+		t.Errorf("error variable only call matched %v, want error_variables", got["src/server.rs"])
+	}
+	if !got["src/storage.rs"]["string_literals"] {
+		t.Errorf("multiline call matched %v, want string_literals", got["src/storage.rs"])
+	}
+	if !got["src/raft.rs"]["string_literals"] {
+		t.Errorf("single line call matched %v, want string_literals", got["src/raft.rs"])
+	}
+}
+
 func TestCheckFileChangesRejectsUnknownRepository(t *testing.T) {
 	checker := newTestChecker(t, `repositories: []`)
 
@@ -427,3 +581,32 @@ func newTestChecker(t *testing.T, body string) *Checker {
 	}
 	return NewChecker(config)
 }
+
+// goCallPolicy carries the two Go rules the production policy uses for the Go
+// repositories. They are copied verbatim so a policy change that breaks
+// multiline calls shows up here.
+const goCallPolicy = `
+repositories:
+  - name: test/repo
+    patterns:
+      - name: string_literals
+        description: Pattern for string literals
+        regex: '(?:^|\s)(?:(?:[^)]+\.)?(?:log|logutil|logger|brlog)(?:\.(?:L\(\)|CL\([^)]*\)|FromContext\([^)]*\)|Logger\([^)]*\)|[A-Za-z]+Logger\([^)]*\))\)?)?)\.(Error|Panic|Fatal|Fatalf|Fatalln)\([^"]*"([^"]+)"[^)]*\)'
+      - name: variables_and_functions
+        description: Pattern for variables and function calls
+        regex: '(?:^|\s)(?:(?:[^)]+\.)?(?:log|logutil|logger|brlog)(?:\.(?:L\(\)|CL\([^)]*\)|FromContext\([^)]*\)|Logger\([^)]*\)|[A-Za-z]+Logger\([^)]*\))\)?)?)\.(Error|Panic|Fatal|Fatalf|Fatalln)\(\s*([^,)]+?)(?:\s*,\s*[^)]+?)?\s*\)'
+`
+
+// tikvPolicy carries the TiKV rules, with the macro delimiter consumed before
+// the error-variable prefix so "error!(?e" is recognised.
+const tikvPolicy = `
+repositories:
+  - name: test/repo
+    patterns:
+      - name: string_literals
+        description: Pattern for string literals
+        regex: '(?:^|\s)error![^"]*"([^"]+)"[^)]*'
+      - name: error_variables
+        description: Pattern for error variables
+        regex: '(?:^|\s)error!\(\s*(\?%?\w+(?:\s*[,;]\s*[^)]*)?)'
+`

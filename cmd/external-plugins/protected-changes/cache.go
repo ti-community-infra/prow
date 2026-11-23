@@ -26,12 +26,14 @@ import (
 
 const lockStripes = 64
 
-// cacheKey identifies one evaluation. A new commit or a policy change produces a
-// new key, so a stale result can never be reused for different content.
+// cacheKey identifies one evaluation. A new commit, a new base branch or a policy
+// change produces a new key, so a stale result can never be reused for different
+// content.
 type cacheKey struct {
 	repo       string
 	number     int
 	sha        string
+	baseSHA    string
 	configHash string
 }
 
