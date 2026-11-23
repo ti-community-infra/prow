@@ -52,7 +52,7 @@ type options struct {
 	validateConfig        bool
 	prowAssignments       bool
 	allowAll              bool
-	issueOnConflict       bool
+	onConflict            string
 	forkOwner             string
 	labelPrefix           string
 }
@@ -65,9 +65,7 @@ func (o *options) defaults() cherryconfig.Defaults {
 		AllowAll:           o.allowAll,
 		UseProwAssignments: o.prowAssignments,
 		Labels:             o.labels.Strings(),
-		// The conflict policy flag arrives with the conflict handling rework;
-		// until then the flag default is the hold policy.
-		OnConflict: cherryconfig.OnConflictHold,
+		OnConflict:         cherryconfig.OnConflict(o.onConflict),
 	}
 }
 
@@ -78,6 +76,12 @@ func (o *options) Validate() error {
 		}
 	}
 
+	switch cherryconfig.OnConflict(o.onConflict) {
+	case cherryconfig.OnConflictIssue, cherryconfig.OnConflictHold, cherryconfig.OnConflictFail:
+	default:
+		return fmt.Errorf("invalid --on-conflict %q: must be one of %q, %q, %q",
+			o.onConflict, cherryconfig.OnConflictIssue, cherryconfig.OnConflictHold, cherryconfig.OnConflictFail)
+	}
 	return nil
 }
 
@@ -94,7 +98,7 @@ func gatherOptions() options {
 	fs.StringVar(&o.logLevel, "log-level", "debug", fmt.Sprintf("Log level is one of %v.", logrus.AllLevels))
 	fs.BoolVar(&o.prowAssignments, "use-prow-assignments", true, "Use prow commands to assign cherrypicked PRs.")
 	fs.BoolVar(&o.allowAll, "allow-all", false, "Allow anybody to use automated cherrypicks by skipping GitHub organization membership checks.")
-	fs.BoolVar(&o.issueOnConflict, "create-issue-on-conflict", false, "Create a GitHub issue and assign it to the requestor on cherrypick conflict.")
+	fs.StringVar(&o.onConflict, "on-conflict", string(cherryconfig.OnConflictHold), "What to do when a cherry-pick conflicts: issue, hold or fail.")
 	fs.StringVar(&o.forkOwner, "fork-owner", "", "Owner of the pre-created fork cherry-pick branches are pushed to. Empty pushes them into the base repository.")
 	fs.StringVar(&o.labelPrefix, "label-prefix", cherryconfig.DefaultLabelPrefix, "Set a custom label prefix.")
 	for _, group := range []flagutil.OptionGroup{&o.github, &o.instrumentationOptions} {
@@ -182,8 +186,7 @@ func main() {
 		ghc: githubClient,
 		log: log,
 
-		issueOnConflict: o.issueOnConflict,
-		defaults:        defaults,
+		defaults: defaults,
 
 		forkOwner:         o.forkOwner,
 		githubURL:         githubBaseURL(o.github.Host),

@@ -49,12 +49,14 @@ const pluginName = "cherrypick"
 const defaultLabelPrefix = cherryconfig.DefaultLabelPrefix
 
 var cherryPickRe = regexp.MustCompile(`(?m)^(?:/cherrypick|/cherry-pick)\s+(.+)$`)
+var cherryPickInviteRe = regexp.MustCompile(`(?m)^(?:/cherrypick|/cherry-pick)-invite\b`)
 var releaseNoteRe = regexp.MustCompile(`(?s)(?:Release note\*\*:\s*(?:<!--[^<>]*-->\s*)?` + "```(?:release-note)?|```release-note)(.+?)```")
 var titleTargetBranchIndicatorTemplate = `[%s] `
 
 var notOrgMemberMessageTemplate = "only [%s](https://github.com/orgs/%s/people) org members may request cherry picks. If you are already part of the org, make sure to [change](https://github.com/orgs/%s/people?query=%s) your membership to public. Otherwise you can still do the cherry-pick manually. "
 
 type githubClient interface {
+	AddCollaborator(org, repo, user string, permission github.RepoPermissionLevel) error
 	AddLabel(org, repo string, number int, label string) error
 	AssignIssue(org, repo string, number int, logins []string) error
 	CreateComment(org, repo string, number int, comment string) error
@@ -64,10 +66,13 @@ type githubClient interface {
 	GetPullRequestPatch(org, repo string, number int) ([]byte, error)
 	GetPullRequests(org, repo string) ([]github.PullRequest, error)
 	GetRepo(owner, name string) (github.FullRepo, error)
+	GetSingleCommit(org, repo, SHA string) (github.RepositoryCommit, error)
 	IsMember(org, user string) (bool, error)
+	ListCollaborators(org, repo string) ([]github.User, error)
 	ListIssueComments(org, repo string, number int) ([]github.IssueComment, error)
 	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
 	ListOrgMembers(org, role string) ([]github.TeamMember, error)
+	ListRepoInvitations(org, repo string) ([]github.CollaboratorRepoInvitation, error)
 }
 
 // HelpProvider constructs the PluginHelp for this plugin, including the
@@ -137,8 +142,6 @@ type Server struct {
 	// defaults are the process-wide settings taken from the flags; the
 	// per-repository config overrides them.
 	defaults cherryconfig.Defaults
-	// Create an issue on cherrypick conflict.
-	issueOnConflict bool
 
 	bare     *http.Client
 	patchURL string
@@ -300,6 +303,10 @@ func (s *Server) handleIssueComment(log logrus.FieldLogger, ic github.IssueComme
 		github.RepoLogField: repo,
 		github.PrLogField:   num,
 	})
+
+	if cherryPickInviteRe.MatchString(ic.Comment.Body) {
+		return log, s.inviteCollaborator(log, ic)
+	}
 
 	// fetch pull request
 	pr, err := s.ghc.GetPullRequest(org, repo, num)
@@ -715,22 +722,38 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	titleTargetBranchIndicator := fmt.Sprintf(titleTargetBranchIndicatorTemplate, targetBranch)
 	title = fmt.Sprintf("%s%s", titleTargetBranchIndicator, omitBaseBranchFromTitle(title, baseBranch))
 
+	conflicts := false
 	if err := s.applyToBranch(r, org, repo, localPath, num); err != nil {
-		errs := []error{fmt.Errorf("failed to cherry-pick: %w", err)}
 		logger.WithError(err).Warn("failed to apply PR on top of target branch")
 		resp := fmt.Sprintf("#%d failed to apply on top of branch %q:\n```\n%v\n```", num, targetBranch, err)
-		if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
-			errs = append(errs, fmt.Errorf("failed to create comment: %w", err))
-		}
 
-		if s.issueOnConflict {
+		switch opts.OnConflict {
+		case cherryconfig.OnConflictHold:
+			// Keep the conflicts in the branch and open the pull request so
+			// the requester can resolve them.
+			if commitErr := s.commitConflicts(r, org, repo, num, opts.CopyIssueNumbersFromSquashedCommit); commitErr != nil {
+				logger.WithError(commitErr).Warn("failed to commit the conflicted cherry-pick")
+				if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
+					return fmt.Errorf("failed to create comment: %w", err)
+				}
+				return commitErr
+			}
+			conflicts = true
+		case cherryconfig.OnConflictIssue:
+			if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
+				return fmt.Errorf("failed to create comment: %w", err)
+			}
 			resp = fmt.Sprintf("Manual cherrypick required.\n\n%v", resp)
 			if err := s.createIssue(logger, org, repo, title, resp, num, comment, nil, []string{requester}); err != nil {
-				errs = append(errs, fmt.Errorf("failed to create issue: %w", err))
+				return fmt.Errorf("failed to create issue: %w", err)
 			}
+			return nil
+		default:
+			if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
+				return fmt.Errorf("failed to create comment: %w", err)
+			}
+			return nil
 		}
-
-		return utilerrors.NewAggregate(errs)
 	}
 
 	// Push the new branch, falling back to the base repository when the
@@ -777,7 +800,11 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		return fmt.Errorf("failed to create comment: %w", err)
 	}
 
-	for _, label := range cherryPickLabels(opts, sourceLabels, targetBranch) {
+	labelsToAdd := cherryPickLabels(opts, sourceLabels, targetBranch)
+	if conflicts {
+		labelsToAdd = append(labelsToAdd, "do-not-merge/hold")
+	}
+	for _, label := range labelsToAdd {
 		if err := s.ghc.AddLabel(org, repo, createdNum, label); err != nil {
 			return fmt.Errorf("failed to add label %s: %w", label, err)
 		}
@@ -791,7 +818,77 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 			return nil
 		}
 	}
+
+	if conflicts {
+		instructions := fmt.Sprintf("@%s This PR has conflicts, I have held it. "+
+			"Please resolve them or ask others to resolve them, then comment `/unhold` to remove the hold label.", requester)
+		if err := s.ghc.CreateComment(org, repo, createdNum, instructions); err != nil {
+			logger.WithError(err).Warn("failed to comment the conflict instructions")
+		}
+	}
 	return nil
+}
+
+// commitConflicts commits the conflicted working tree, keeping the conflict
+// markers, so the cherry-pick pull request can be opened and held.
+func (s *Server) commitConflicts(r git.RepoClient, org, repo string, num int, copyIssueNumbers bool) error {
+	pr, err := s.ghc.GetPullRequest(org, repo, num)
+	if err != nil {
+		return fmt.Errorf("failed to get pull request %s/%s#%d: %w", org, repo, num, err)
+	}
+	if pr.MergeSHA == nil {
+		return fmt.Errorf("pull request %s/%s#%d has no merge commit to cherry-pick", org, repo, num)
+	}
+
+	ex := exec.New()
+	dir := r.Directory()
+
+	cherrypick := ex.Command("git", "cherry-pick", "-m", "1", "--cleanup=verbatim", *pr.MergeSHA)
+	cherrypick.SetDir(dir)
+	// A failure here means the conflicts are in the working tree; they are
+	// committed below. Any other failure makes the commit fail as well.
+	_, _ = cherrypick.CombinedOutput()
+
+	add := ex.Command("git", "add", "-A")
+	add.SetDir(dir)
+	if out, err := add.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to add the conflicted files: %w: %s", err, string(out))
+	}
+
+	commit := ex.Command("git", "commit", "-s", "-m", s.cherryPickCommitMessage(org, repo, num, copyIssueNumbers))
+	commit.SetDir(dir)
+	if out, err := commit.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to commit the conflicted cherry-pick: %w: %s", err, string(out))
+	}
+	return nil
+}
+
+// cherryPickCommitMessage builds the commit message of a conflicted
+// cherry-pick, optionally carrying the issue references of the squashed commit.
+func (s *Server) cherryPickCommitMessage(org, repo string, num int, copyIssueNumbers bool) string {
+	message := fmt.Sprintf("This is an automated cherry-pick of #%d", num)
+	if !copyIssueNumbers {
+		return message
+	}
+
+	pr, err := s.ghc.GetPullRequest(org, repo, num)
+	if err != nil || pr.MergeSHA == nil {
+		return message
+	}
+	commit, err := s.ghc.GetSingleCommit(org, repo, *pr.MergeSHA)
+	if err != nil {
+		return message
+	}
+
+	numbers := github.NormalizeIssueNumbers(commit.Commit.Message, org, repo)
+	if len(numbers) == 0 {
+		return message
+	}
+	texts := make([]string, 0, len(numbers))
+	for _, number := range numbers {
+		texts = append(texts, fmt.Sprintf("%s %s/%s#%d", number.AssociatePrefix, number.Org, number.Repo, number.Number))
+	}
+	return fmt.Sprintf("%s\n\n%s", message, strings.Join(texts, ", "))
 }
 
 func (s *Server) applyToBranch(r git.RepoClient, org, repo, localPath string, num int) error {
@@ -860,6 +957,69 @@ func (s *Server) createComment(l logrus.FieldLogger, org, repo string, num int, 
 	}
 	l.Debug("Created comment")
 	return nil
+}
+
+// inviteCollaborator adds the requester of a cherry-pick pull request as a
+// collaborator of the bot fork so they can push conflict resolutions.
+func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueCommentEvent) error {
+	org := ic.Repo.Owner.Login
+	repo := ic.Repo.Name
+	num := ic.Issue.Number
+	user := ic.Comment.User.Login
+
+	comment := func(message string) error {
+		return s.ghc.CreateComment(org, repo, num, plugins.FormatICResponse(ic.Comment, message))
+	}
+
+	if s.forkOwner == "" {
+		return comment(fmt.Sprintf("@%s no invitation is needed: cherry-pick branches are created in `%s/%s`.", user, org, repo))
+	}
+
+	pr, err := s.ghc.GetPullRequest(org, repo, num)
+	if err != nil {
+		return fmt.Errorf("failed to get pull request %s/%s#%d: %w", org, repo, num, err)
+	}
+	if pr.Head.Repo.Owner.Login != s.forkOwner {
+		return comment(fmt.Sprintf("@%s no invitation is needed: this pull request was not created from the `%s` fork.", user, s.forkOwner))
+	}
+
+	collaborators, err := s.ghc.ListCollaborators(s.forkOwner, repo)
+	if err != nil {
+		return fmt.Errorf("failed to list collaborators of %s/%s: %w", s.forkOwner, repo, err)
+	}
+	for _, collaborator := range collaborators {
+		if collaborator.Login == user {
+			return comment(fmt.Sprintf("@%s you are already a collaborator of `%s/%s`.", user, s.forkOwner, repo))
+		}
+	}
+
+	invitations, err := s.ghc.ListRepoInvitations(s.forkOwner, repo)
+	if err != nil {
+		return fmt.Errorf("failed to list invitations of %s/%s: %w", s.forkOwner, repo, err)
+	}
+	for _, invitation := range invitations {
+		if invitation.Invitee != nil && invitation.Invitee.Login == user {
+			log.WithField("invitation", invitation.URL).Info("The user is already invited to the fork.")
+			return nil
+		}
+	}
+
+	member, err := s.ghc.IsMember(org, user)
+	if err != nil {
+		return err
+	}
+	if !member {
+		return comment(fmt.Sprintf("@%s you are not a member of org `%s`, so you cannot be added to the fork.", user, org))
+	}
+
+	if err := s.ghc.AddCollaborator(s.forkOwner, repo, user, github.Write); err != nil {
+		log.WithError(err).Warn("failed to add the collaborator")
+		return comment(fmt.Sprintf("@%s failed to invite you as a collaborator of `%s/%s`: %v", user, s.forkOwner, repo, err))
+	}
+
+	return comment(fmt.Sprintf("@%s Please accept the invitation, then you can push to the cherry-pick pull requests. "+
+		"Comment with `/cherry-pick-invite` if the invitation expired. %s/%s/%s/invitations",
+		user, s.githubURL, s.forkOwner, repo))
 }
 
 // createIssue creates an issue on GitHub.

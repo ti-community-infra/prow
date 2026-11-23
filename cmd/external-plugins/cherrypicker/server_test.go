@@ -53,6 +53,12 @@ type fghc struct {
 	orgMembers []github.TeamMember
 	issues     []github.Issue
 	repoErrors map[string]error
+
+	collaborators      []github.User
+	invitations        []github.CollaboratorRepoInvitation
+	addedCollaborators []string
+	addCollaboratorErr error
+	singleCommit       github.RepositoryCommit
 }
 
 func (f *fghc) AddLabel(org, repo string, number int, label string) error {
@@ -211,6 +217,34 @@ func (f *fghc) ListOrgMembers(org, role string) ([]github.TeamMember, error) {
 		return nil, fmt.Errorf("all is only supported role, not: %s", role)
 	}
 	return f.orgMembers, nil
+}
+
+func (f *fghc) AddCollaborator(org, repo, user string, permission github.RepoPermissionLevel) error {
+	f.Lock()
+	defer f.Unlock()
+	if f.addCollaboratorErr != nil {
+		return f.addCollaboratorErr
+	}
+	f.addedCollaborators = append(f.addedCollaborators, fmt.Sprintf("%s/%s:%s:%s", org, repo, user, permission))
+	return nil
+}
+
+func (f *fghc) ListCollaborators(org, repo string) ([]github.User, error) {
+	f.Lock()
+	defer f.Unlock()
+	return f.collaborators, nil
+}
+
+func (f *fghc) ListRepoInvitations(org, repo string) ([]github.CollaboratorRepoInvitation, error) {
+	f.Lock()
+	defer f.Unlock()
+	return f.invitations, nil
+}
+
+func (f *fghc) GetSingleCommit(org, repo, SHA string) (github.RepositoryCommit, error) {
+	f.Lock()
+	defer f.Unlock()
+	return f.singleCommit, nil
 }
 
 func (f *fghc) CreateFork(org, repo string) (string, error) {
