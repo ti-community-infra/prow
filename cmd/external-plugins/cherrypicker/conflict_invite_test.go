@@ -67,7 +67,7 @@ func TestConflictPolicies(t *testing.T) {
 			}
 			s.defaults.OnConflict = tc.policy
 
-			_ = s.handle(s.log, "wiseguy", nil, "foo", "bar", "stage", "master", nil, "This is a fix for X", body, ghc.pr.Number)
+			_ = s.handle(s.log, "wiseguy", nil, "foo", "bar", "stage", "base", nil, "This is a fix for X", body, ghc.pr.Number)
 
 			if len(ghc.issues) != tc.wantIssue {
 				t.Errorf("expected %d issues, got %d", tc.wantIssue, len(ghc.issues))
@@ -79,6 +79,90 @@ func TestConflictPolicies(t *testing.T) {
 				t.Error("expected the failure to be reported in a comment")
 			}
 		})
+	}
+}
+
+func TestConflictHoldPolicyOpensHeldPullRequest(t *testing.T) {
+	lg, c := makeFakeRepoWithCommit(localgit.NewV2, t)
+
+	// The default branch name depends on the git configuration, so remember
+	// the base commit and detach to it instead of checking it out by name.
+	baseSHA, err := lg.RevParse("foo", "bar", "HEAD")
+	if err != nil {
+		t.Fatalf("failed to resolve the base commit: %v", err)
+	}
+
+	if err := lg.CheckoutNewBranch("foo", "bar", "feature"); err != nil {
+		t.Fatalf("failed to create the feature branch: %v", err)
+	}
+	if err := lg.AddCommit("foo", "bar", map[string][]byte{"bar.go": []byte("feature version\n")}); err != nil {
+		t.Fatalf("failed to commit the feature change: %v", err)
+	}
+
+	if err := lg.Checkout("foo", "bar", baseSHA); err != nil {
+		t.Fatalf("failed to check out the base commit: %v", err)
+	}
+	if err := lg.CheckoutNewBranch("foo", "bar", "stage"); err != nil {
+		t.Fatalf("failed to create the target branch: %v", err)
+	}
+	if err := lg.AddCommit("foo", "bar", map[string][]byte{"bar.go": []byte("stage version\n")}); err != nil {
+		t.Fatalf("failed to commit the conflicting change: %v", err)
+	}
+	if err := lg.Checkout("foo", "bar", baseSHA); err != nil {
+		t.Fatalf("failed to check out the base commit: %v", err)
+	}
+
+	if _, err := lg.Merge("foo", "bar", "feature"); err != nil {
+		t.Fatalf("failed to create the merge commit: %v", err)
+	}
+	mergeSHA, err := lg.RevParse("foo", "bar", "HEAD")
+	if err != nil {
+		t.Fatalf("failed to resolve the merge commit: %v", err)
+	}
+
+	ghc := &fghc{
+		pr: &github.PullRequest{
+			Number:   fakePR.GetPRNumber(),
+			Merged:   true,
+			MergeSHA: &mergeSHA,
+			Title:    "This is a fix for X",
+		},
+		isMember: true,
+		patch:    []byte("this is not a valid patch"),
+	}
+
+	s := &Server{
+		botUser:        &github.UserData{Login: "ci-robot"},
+		gc:             c,
+		pusher:         fakePusher{},
+		ghc:            ghc,
+		tokenGenerator: func() []byte { return []byte("sha=abcdefg") },
+		log:            logrus.WithField("test", t.Name()),
+	}
+	s.defaults.OnConflict = cherryconfig.OnConflictHold
+
+	_ = s.handle(s.log, "wiseguy", nil, "foo", "bar", "stage", "base", nil, "This is a fix for X", body, ghc.pr.Number)
+
+	if len(ghc.prs) != 1 {
+		t.Fatalf("expected one held pull request, got %d (comments: %v)", len(ghc.prs), ghc.comments)
+	}
+	held := false
+	for _, label := range ghc.prs[0].Labels {
+		if label.Name == "do-not-merge/hold" {
+			held = true
+		}
+	}
+	if !held {
+		t.Errorf("expected the do-not-merge/hold label, got %v", ghc.prs[0].Labels)
+	}
+	pinged := false
+	for _, comment := range ghc.comments {
+		if strings.Contains(comment, "/unhold") {
+			pinged = true
+		}
+	}
+	if !pinged {
+		t.Errorf("expected the /unhold instructions, got %v", ghc.comments)
 	}
 }
 
