@@ -27,6 +27,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	cherryconfig "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/config"
 	"sigs.k8s.io/prow/pkg/git/localgit"
 	"sigs.k8s.io/prow/pkg/git/v2"
 	v2 "sigs.k8s.io/prow/pkg/git/v2"
@@ -354,7 +355,7 @@ func testCherryPickIC(clients localgit.Clients, t *testing.T) {
 			tokenGenerator:    getSecret,
 			log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-			prowAssignments: true,
+			defaults: cherryconfig.Defaults{UseProwAssignments: true},
 		}
 
 		if _, err := s.handleIssueComment(logrus.NewEntry(logrus.StandardLogger()), ic); err != nil {
@@ -593,7 +594,7 @@ func testCherryPickPR(clients localgit.Clients, t *testing.T) {
 		tokenGenerator:    getSecret,
 		log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-		prowAssignments: false,
+		defaults: cherryconfig.Defaults{},
 	}
 
 	if _, err := s.handlePullRequest(logrus.NewEntry(logrus.StandardLogger()), pr); err != nil {
@@ -610,7 +611,7 @@ func testCherryPickPR(clients localgit.Clients, t *testing.T) {
 			expectedBody = fmt.Sprintf("%s\n\n/cherrypick release-1.11 release-1.10 release-1.9", expectedBody)
 		}
 		expectedHead := fmt.Sprintf(botUser.Login+":"+cherryPickBranchFmt, prNumber, branch)
-		expectedLabels := s.labels
+		expectedLabels := s.defaults.Labels
 		return fmt.Sprintf(expectedFmt, expectedTitle, expectedBody, expectedHead, branch, expectedLabels)
 	}
 
@@ -729,7 +730,7 @@ func testCherryPickPRAfterMerge(clients localgit.Clients, t *testing.T) {
 		tokenGenerator:    func() []byte { return []byte("sha=abcdefg") },
 		log:               logger.WithField("client", "cherrypicker"),
 
-		prowAssignments: false,
+		defaults: cherryconfig.Defaults{},
 	}
 
 	if _, err := s.handleIssueComment(logger, ic); err != nil {
@@ -822,7 +823,7 @@ func testCherryPickOfCherryPickPR(clients localgit.Clients, t *testing.T) {
 		tokenGenerator:    getSecret,
 		log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-		prowAssignments: false,
+		defaults: cherryconfig.Defaults{},
 	}
 
 	// Cherry pick master -> release-1.8
@@ -850,7 +851,7 @@ func testCherryPickOfCherryPickPR(clients localgit.Clients, t *testing.T) {
 		expectedTitle := fmt.Sprintf("[%s] This is a fix for Y", branch)
 		expectedBody := fmt.Sprintf("This is an automated cherry-pick of #%d", prNumber)
 		expectedHead := fmt.Sprintf(botUser.Login+":"+cherryPickBranchFmt, prNumber, branch)
-		expectedLabels := s.labels
+		expectedLabels := s.defaults.Labels
 		return fmt.Sprintf(expectedFmt, expectedTitle, expectedBody, expectedHead, branch, expectedLabels)
 	}
 
@@ -1010,9 +1011,10 @@ func testCherryPickPRWithLabels(clients localgit.Clients, t *testing.T) {
 						tokenGenerator:    getSecret,
 						log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-						labels:          []string{"cla: yes"},
-						prowAssignments: false,
-						labelPrefix:     tc.labelPrefix,
+						defaults: cherryconfig.Defaults{
+							Labels:      []string{"cla: yes"},
+							LabelPrefix: tc.labelPrefix,
+						},
 					}
 
 					event := pr(evt)
@@ -1029,7 +1031,7 @@ func testCherryPickPRWithLabels(clients localgit.Clients, t *testing.T) {
 						expectedTitle := fmt.Sprintf("[%s] This is a fix for Y", branch)
 						expectedBody := fmt.Sprintf("This is an automated cherry-pick of #%d", prNumber)
 						expectedHead := fmt.Sprintf(botUser.Login+":"+cherryPickBranchFmt, prNumber, branch)
-						expectedLabels := s.labels
+						expectedLabels := s.defaults.Labels
 						return fmt.Sprintf(expectedFmt, expectedTitle, expectedBody, expectedHead, branch, expectedLabels)
 					}
 
@@ -1232,7 +1234,7 @@ func testCherryPickPRAssignments(clients localgit.Clients, t *testing.T) {
 			tokenGenerator:    getSecret,
 			log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-			prowAssignments: prowAssignments,
+			defaults: cherryconfig.Defaults{UseProwAssignments: prowAssignments},
 		}
 
 		if _, err := s.handleIssueComment(logrus.NewEntry(logrus.StandardLogger()), ic); err != nil {
@@ -1300,9 +1302,9 @@ func TestHandlePullRequestLabelAdded_BaseEqualsTarget(t *testing.T) {
 	botUser := &github.UserData{Login: "ci-robot"}
 
 	s := &Server{
-		botUser:     botUser,
-		ghc:         ghc,
-		labelPrefix: defaultLabelPrefix,
+		botUser:  botUser,
+		ghc:      ghc,
+		defaults: cherryconfig.Defaults{LabelPrefix: defaultLabelPrefix},
 	}
 
 	event := github.PullRequestEvent{
@@ -1346,8 +1348,8 @@ func TestHandlePullRequestLabelAdded_NonMemberRejected(t *testing.T) {
 	}
 
 	s := &Server{
-		ghc:         ghc,
-		labelPrefix: defaultLabelPrefix,
+		ghc:      ghc,
+		defaults: cherryconfig.Defaults{LabelPrefix: defaultLabelPrefix},
 	}
 
 	event := github.PullRequestEvent{

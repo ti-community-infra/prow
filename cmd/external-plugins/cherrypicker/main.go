@@ -182,11 +182,8 @@ func main() {
 		ghc: githubClient,
 		log: log,
 
-		labels:          o.labels.Strings(),
-		prowAssignments: o.prowAssignments,
-		allowAll:        o.allowAll,
 		issueOnConflict: o.issueOnConflict,
-		labelPrefix:     o.labelPrefix,
+		defaults:        defaults,
 
 		forkOwner:         o.forkOwner,
 		githubURL:         githubBaseURL(o.github.Host),

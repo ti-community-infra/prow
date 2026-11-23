@@ -134,22 +134,33 @@ type Server struct {
 	// configAgent holds the per-repository overrides of the flag defaults.
 	configAgent *cherryconfig.Agent
 
-	// Labels to apply to the cherrypicked PR.
-	labels []string
-	// Use prow to assign users to cherrypicked PRs.
-	prowAssignments bool
-	// Allow anybody to do cherrypicks.
-	allowAll bool
+	// defaults are the process-wide settings taken from the flags; the
+	// per-repository config overrides them.
+	defaults cherryconfig.Defaults
 	// Create an issue on cherrypick conflict.
 	issueOnConflict bool
-	// Set a custom label prefix.
-	labelPrefix string
 
 	bare     *http.Client
 	patchURL string
 
 	mapLock sync.Mutex
 	lockMap map[cherryPickRequest]*sync.Mutex
+}
+
+// options resolves the effective settings for a repository, layering the
+// per-repository config over the flag defaults.
+func (s *Server) options(org, repo string) cherryconfig.Options {
+	var cfg *cherryconfig.Config
+	if s.configAgent != nil {
+		cfg = s.configAgent.Config()
+	}
+	return cfg.Options(org, repo, s.defaults)
+}
+
+// hasLabelPrefix reports whether the label starts with the configured prefix.
+// An empty prefix disables label initiated cherry-picks.
+func hasLabelPrefix(label, prefix string) bool {
+	return prefix != "" && strings.HasPrefix(label, prefix)
 }
 
 type pusher interface {
@@ -282,6 +293,7 @@ func (s *Server) handleIssueComment(log logrus.FieldLogger, ic github.IssueComme
 	repo := ic.Repo.Name
 	num := ic.Issue.Number
 	commentAuthor := ic.Comment.User.Login
+	opts := s.options(org, repo)
 
 	log = log.WithFields(logrus.Fields{
 		github.OrgLogField:  org,
@@ -320,7 +332,7 @@ func (s *Server) handleIssueComment(log logrus.FieldLogger, ic github.IssueComme
 
 	// PR is not yet done, inform the user we will remember their instructions and create PRs later.
 	if ic.Issue.State != "closed" {
-		if !s.allowAll {
+		if !opts.AllowAll {
 			// Only members should be able to do cherry-picks.
 			ok, err := s.ghc.IsMember(org, commentAuthor)
 			if err != nil {
@@ -359,7 +371,7 @@ func (s *Server) handleIssueComment(log logrus.FieldLogger, ic github.IssueComme
 		return log, s.ghc.CreateComment(org, repo, num, plugins.FormatICResponse(ic.Comment, resp))
 	}
 
-	if !s.allowAll {
+	if !opts.AllowAll {
 		// Only org members should be able to do cherry-picks.
 		ok, err := s.ghc.IsMember(org, commentAuthor)
 		if err != nil {
@@ -430,15 +442,17 @@ func (s *Server) handlePullRequest(log logrus.FieldLogger, pre github.PullReques
 
 func (s *Server) handlePullRequestLabelAdded(log logrus.FieldLogger, pre github.PullRequestEvent) (logrus.FieldLogger, error) {
 	pr := pre.PullRequest
-	// Ignore non cherrypick labels
-	if pre.Label.Name == "" || !strings.HasPrefix(pre.Label.Name, s.labelPrefix) {
-		return log, nil
-	}
 	org := pr.Base.Repo.Owner.Login
 	repo := pr.Base.Repo.Name
 	num := pr.Number
 	baseBranch := pr.Base.Ref
-	targetBranch := strings.TrimPrefix(pre.Label.Name, s.labelPrefix)
+	opts := s.options(org, repo)
+
+	// Ignore non cherrypick labels
+	if pre.Label.Name == "" || !hasLabelPrefix(pre.Label.Name, opts.LabelPrefix) {
+		return log, nil
+	}
+	targetBranch := strings.TrimPrefix(pre.Label.Name, opts.LabelPrefix)
 	log = log.WithFields(logrus.Fields{
 		github.OrgLogField:  org,
 		github.RepoLogField: repo,
@@ -446,7 +460,7 @@ func (s *Server) handlePullRequestLabelAdded(log logrus.FieldLogger, pre github.
 	})
 	prAuthor := pr.User.Login
 
-	if !s.allowAll {
+	if !opts.AllowAll {
 		// Only org members should be able to do cherry-picks.
 		ok, err := s.ghc.IsMember(org, prAuthor)
 		if err != nil {
@@ -505,6 +519,7 @@ func (s *Server) handlePullRequestClosed(log logrus.FieldLogger, pre github.Pull
 	num := pr.Number
 	title := pr.Title
 	body := pr.Body
+	opts := s.options(org, repo)
 
 	log = log.WithFields(logrus.Fields{
 		github.OrgLogField:  org,
@@ -548,18 +563,18 @@ func (s *Server) handlePullRequestClosed(log logrus.FieldLogger, pre github.Pull
 		return log, fmt.Errorf("failed to get issue labels: %w", err)
 	}
 	for _, label := range labels {
-		if strings.HasPrefix(label.Name, s.labelPrefix) {
+		if hasLabelPrefix(label.Name, opts.LabelPrefix) {
 			if requesterToComments[pr.User.Login] == nil {
 				requesterToComments[pr.User.Login] = make(map[string]*github.IssueComment)
 			}
-			requesterToComments[pr.User.Login][label.Name[len(s.labelPrefix):]] = nil // leave this nil which indicates a label-initiated cherry-pick
+			requesterToComments[pr.User.Login][strings.TrimPrefix(label.Name, opts.LabelPrefix)] = nil // leave this nil which indicates a label-initiated cherry-pick
 		}
 	}
 	if len(requesterToComments) == 0 {
 		return log, nil
 	}
 	// Figure out membership.
-	if !s.allowAll {
+	if !opts.AllowAll {
 		// TODO: Possibly cache this.
 		members, err := s.ghc.ListOrgMembers(org, "all")
 		if err != nil {
@@ -625,6 +640,8 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	}()
 	lock.Lock()
 	defer lock.Unlock()
+
+	opts := s.options(org, repo)
 
 	targets := s.pushTargets(logger, org, repo)
 	if s.pusher != nil {
@@ -728,13 +745,15 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 
 	// Open a PR in GitHub.
 	var kindLabels []string
+	var sourceLabels []github.Label
 	if labels, err := s.ghc.GetIssueLabels(org, repo, num); err != nil {
-		logger.WithError(err).Debug("Failed to get issue labels, omitting kind commands from cherry-pick PR body.")
+		logger.WithError(err).Debug("Failed to get issue labels, omitting kind commands and copied labels from the cherry-pick PR.")
 	} else {
+		sourceLabels = labels
 		kindLabels = kindLabelsFromIssueLabels(labels)
 	}
 	var cherryPickBody string
-	if s.prowAssignments {
+	if opts.UseProwAssignments {
 		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches, kindLabels)
 	} else {
 		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches, kindLabels)
@@ -758,16 +777,12 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		return fmt.Errorf("failed to create comment: %w", err)
 	}
 
-	// TODO:
-	// - Copying original pull request labels.
-	// - Add picked label.
-
-	for _, label := range s.labels {
+	for _, label := range cherryPickLabels(opts, sourceLabels, targetBranch) {
 		if err := s.ghc.AddLabel(org, repo, createdNum, label); err != nil {
 			return fmt.Errorf("failed to add label %s: %w", label, err)
 		}
 	}
-	if s.prowAssignments {
+	if opts.UseProwAssignments {
 		if err := s.ghc.AssignIssue(org, repo, createdNum, []string{requester}); err != nil {
 			logger.WithError(err).Warn("failed to assign to new PR")
 			// Ignore returning errors on failure to assign as this is most likely
@@ -927,6 +942,26 @@ func releaseNoteFromParentPR(body string) string {
 		return ""
 	}
 	return fmt.Sprintf("```release-note\n%s\n```", strings.TrimSpace(potentialMatch[1]))
+}
+
+// cherryPickLabels returns the labels to apply to a new cherry-pick PR: the
+// configured labels, the picked label for the target branch, and the source PR
+// labels except the excluded ones and the cherry-pick request labels. Kind
+// labels are omitted because they are re-applied through /kind commands in the
+// PR body.
+func cherryPickLabels(opts cherryconfig.Options, sourceLabels []github.Label, targetBranch string) []string {
+	labels := sets.New[string](opts.Labels...)
+	if opts.PickedLabelPrefix != "" {
+		labels.Insert(opts.PickedLabelPrefix + targetBranch)
+	}
+	excluded := sets.New[string](opts.ExcludeLabels...)
+	for _, label := range sourceLabels {
+		if excluded.Has(label.Name) || hasLabelPrefix(label.Name, opts.LabelPrefix) || strings.HasPrefix(label.Name, kindLabelPrefix) {
+			continue
+		}
+		labels.Insert(label.Name)
+	}
+	return sets.List(labels)
 }
 
 const kindLabelPrefix = "kind/"
