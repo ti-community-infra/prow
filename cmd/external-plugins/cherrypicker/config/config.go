@@ -25,6 +25,8 @@ limitations under the License.
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -111,11 +113,26 @@ type RepoConfig struct {
 	CopyIssueNumbersFromSquashedCommit *bool `json:"copy_issue_numbers_from_squashed_commit,omitempty"`
 }
 
-// Parse strictly decodes the configuration. Unknown fields are rejected. It
-// does not validate the decoded values; call Validate for that.
+// Parse decodes the cherry-pick section of the external plugins config file.
+//
+// The file is shared with the other external plugins, so its other top-level
+// sections are ignored. Unknown fields inside the cherry-pick section are
+// rejected. Parse does not validate the decoded values; call Validate for that.
 func Parse(data []byte) (*Config, error) {
+	sections := map[string]json.RawMessage{}
+	if err := yaml.Unmarshal(data, &sections); err != nil {
+		return nil, fmt.Errorf("failed to decode the external plugin config: %w", err)
+	}
+
 	cfg := &Config{}
-	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
+	section, ok := sections["cherry-pick"]
+	if !ok {
+		return cfg, nil
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(section))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg.CherryPick); err != nil {
 		return nil, fmt.Errorf("failed to decode cherry-pick config: %w", err)
 	}
 	return cfg, nil

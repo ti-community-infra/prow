@@ -61,6 +61,43 @@ cherry-pick:
 	}
 }
 
+func TestParseIgnoresUnrelatedTopLevelKeys(t *testing.T) {
+	cfg, err := Parse([]byte(`
+ti-community-cherrypicker:
+  - repos:
+      - legacy-org/repo
+    label_prefix: needs-cherry-pick-
+ti-community-label:
+  - repos:
+      - legacy-org/repo
+    prefixes:
+      - sig/
+cherry-pick:
+  - repos:
+      - test-org/repo
+    on_conflict: fail
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.CherryPick) != 1 || cfg.CherryPick[0].Repos[0] != "test-org/repo" {
+		t.Fatalf("expected only the cherry-pick section to be decoded, got %+v", cfg.CherryPick)
+	}
+	if got := cfg.Options("test-org", "repo", testDefaults()).OnConflict; got != OnConflictFail {
+		t.Fatalf("expected on_conflict=fail, got %q", got)
+	}
+}
+
+func TestParseMissingSection(t *testing.T) {
+	cfg, err := Parse([]byte("ti-community-label:\n  - repos: [legacy-org/repo]\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.CherryPick) != 0 {
+		t.Fatalf("expected an empty config, got %+v", cfg.CherryPick)
+	}
+}
+
 func TestParseValid(t *testing.T) {
 	cfg, err := Parse([]byte(validConfig))
 	if err != nil {
