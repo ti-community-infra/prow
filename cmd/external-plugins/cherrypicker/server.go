@@ -20,7 +20,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -58,7 +60,6 @@ type githubClient interface {
 	CreateComment(org, repo string, number int, comment string) error
 	CreatePullRequest(org, repo, title, body, head, base string, canModify bool) (int, error)
 	CreateIssue(org, repo, title, body string, milestone int, labels, assignees []string) (int, error)
-	EnsureFork(forkingUser, org, repo string) (string, error)
 	GetPullRequest(org, repo string, number int) (*github.PullRequest, error)
 	GetPullRequestPatch(org, repo string, number int) ([]byte, error)
 	GetPullRequests(org, repo string) ([]github.PullRequest, error)
@@ -116,8 +117,13 @@ type Server struct {
 	botUser        *github.UserData
 	email          string
 
-	// skip to fork the repo
-	skipFork bool
+	// forkOwner is the owner of the pre-created fork cherry-pick branches are
+	// pushed to. Empty means the branches are pushed into the base repository.
+	forkOwner string
+	// githubURL is the web URL of the GitHub instance, e.g. https://github.com.
+	githubURL string
+	// installationToken returns a token that can write to the given owner.
+	installationToken func(owner string) (string, error)
 
 	gc git.ClientFactory
 	// Used for unit testing
@@ -150,18 +156,68 @@ type pusher interface {
 	Push(r git.RepoClient, newBranch string, force bool) error
 }
 
-type forkPusher struct {
-	forkName string
-}
-
-func (p *forkPusher) Push(r git.RepoClient, newBranch string, force bool) error {
-	return r.PushToNamedFork(p.forkName, newBranch, force)
-}
-
 type centralPusher struct{}
 
 func (p *centralPusher) Push(r git.RepoClient, newBranch string, force bool) error {
 	return r.PushToCentral(newBranch, force)
+}
+
+// pushTarget is one place a cherry-pick branch can be pushed to, in order of
+// preference.
+type pushTarget struct {
+	org    string
+	pusher pusher
+}
+
+// authenticatedPusher pushes a branch to an explicit repository URL using a
+// token resolved for that repository's owner. It is used for forks owned by a
+// different organization than the base repository.
+type authenticatedPusher struct {
+	owner     string
+	repo      string
+	githubURL string
+	token     func(owner string) (string, error)
+}
+
+func (p *authenticatedPusher) Push(r git.RepoClient, newBranch string, force bool) error {
+	token, err := p.token(p.owner)
+	if err != nil {
+		return fmt.Errorf("failed to get a token for %s: %w", p.owner, err)
+	}
+	remote, err := p.pushURL(token)
+	if err != nil {
+		return err
+	}
+
+	args := []string{"push"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, remote, newBranch)
+	cmd := exec.New().Command("git", args...)
+	cmd.SetDir(r.Directory())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git push to %s/%s failed: %w: %s", p.owner, p.repo, err, censorToken(string(out), token))
+	}
+	return nil
+}
+
+func (p *authenticatedPusher) pushURL(token string) (string, error) {
+	u, err := url.Parse(p.githubURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid github URL %q: %w", p.githubURL, err)
+	}
+	u.User = url.UserPassword("x-access-token", token)
+	u.Path = path.Join(u.Path, p.owner, p.repo) + ".git"
+	return u.String(), nil
+}
+
+func censorToken(text, token string) string {
+	if token == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, token, "***")
 }
 
 type cherryPickRequest struct {
@@ -570,15 +626,11 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	lock.Lock()
 	defer lock.Unlock()
 
-	p, pushOrg, err := s.getPusherAndOrg(logger, org, repo)
-	if err != nil {
-		logger.WithError(err).Warn("failed get pusher")
-		resp := fmt.Sprintf("cannot decide how to push into %s/%s: %v", org, repo, err)
-		return s.createComment(logger, org, repo, num, comment, resp)
-	}
-
+	targets := s.pushTargets(logger, org, repo)
 	if s.pusher != nil {
-		p = s.pusher
+		for i := range targets {
+			targets[i].pusher = s.pusher
+		}
 	}
 
 	// Clone the repo, checkout the target branch.
@@ -628,7 +680,8 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 			return fmt.Errorf("failed to get pullrequests for %s/%s: %w", org, repo, err)
 		}
 		for _, pr := range prs {
-			if pr.Head.Ref == fmt.Sprintf("%s:%s", s.botUser.Login, newBranch) {
+			expectedHeads := sets.New(newBranch, fmt.Sprintf("%s:%s", s.forkOwner, newBranch))
+			if expectedHeads.Has(pr.Head.Ref) {
 				logger.WithField("preexisting_cherrypick", pr.HTMLURL).Info("PR already has cherrypick")
 				resp := fmt.Sprintf("Looks like #%d has already been cherry picked in %s", num, pr.HTMLURL)
 				return s.createComment(logger, org, repo, num, comment, resp)
@@ -663,11 +716,14 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		return utilerrors.NewAggregate(errs)
 	}
 
-	// Push the new branch
-	if err := p.Push(r, newBranch, true); err != nil {
-		logger.WithError(err).Warn("failed to push chery-picked changes to GitHub")
-		resp := fmt.Sprintf("failed to push cherry-picked changes in GitHub: %v", err)
-		return utilerrors.NewAggregate([]error{err, s.createComment(logger, org, repo, num, comment, resp)})
+	// Push the new branch, falling back to the base repository when the
+	// configured fork is missing or not writable.
+	pushOrg, pushErrs := s.pushBranch(r, targets, newBranch)
+	if pushOrg == "" {
+		pushErr := utilerrors.NewAggregate(pushErrs)
+		logger.WithError(pushErr).Warn("failed to push cherry-picked changes to GitHub")
+		resp := fmt.Sprintf("failed to push cherry-picked changes in GitHub: %v", pushErr)
+		return utilerrors.NewAggregate([]error{pushErr, s.createComment(logger, org, repo, num, comment, resp)})
 	}
 
 	// Open a PR in GitHub.
@@ -801,22 +857,44 @@ func (s *Server) createIssue(l logrus.FieldLogger, org, repo, title, body string
 	return s.createComment(l, org, repo, num, comment, fmt.Sprintf("new issue created for failed cherrypick: #%d", issueNum))
 }
 
-func (s *Server) getPusherAndOrg(l logrus.FieldLogger, org, repo string) (pusher, string, error) {
-	// fork repo if it doesn't exist
-	forkName, err := s.ghc.EnsureFork(s.botUser.Login, org, repo)
-	if err != nil && !github.IsForbidden(err) {
-		return nil, "", fmt.Errorf("failed to ensure fork exists: %w", err)
+func (s *Server) pushTargets(l logrus.FieldLogger, org, repo string) []pushTarget {
+	central := pushTarget{org: org, pusher: &centralPusher{}}
+	if s.forkOwner == "" || s.installationToken == nil {
+		return []pushTarget{central}
 	}
 
-	// private repos cannot be forked because by default it's denied on org level.
-	// Push into the same org/repo as used for the cherry pick if it's forbidden
-	if github.IsForbidden(err) {
-		l.Warnf("forking repo %s/%s is forbidden, pushing cherrypick branch into the same repo", org, repo)
-		return &centralPusher{}, org, nil
+	if _, err := s.ghc.GetRepo(s.forkOwner, repo); err != nil {
+		l.WithError(err).WithFields(logrus.Fields{
+			github.OrgLogField:  org,
+			github.RepoLogField: repo,
+		}).Info("Bot fork is not available, pushing the cherry-pick branch into the base repository.")
+		return []pushTarget{central}
 	}
-	return &forkPusher{
-		forkName: forkName,
-	}, s.botUser.Login, nil
+
+	fork := pushTarget{
+		org: s.forkOwner,
+		pusher: &authenticatedPusher{
+			owner:     s.forkOwner,
+			repo:      repo,
+			githubURL: s.githubURL,
+			token:     s.installationToken,
+		},
+	}
+	return []pushTarget{fork, central}
+}
+
+// pushBranch pushes the branch to the first target that accepts it and returns
+// the owner the branch landed in. An empty owner means every target failed.
+func (s *Server) pushBranch(r git.RepoClient, targets []pushTarget, branch string) (string, []error) {
+	var errs []error
+	for _, target := range targets {
+		if err := target.pusher.Push(r, branch, true); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		return target.org, errs
+	}
+	return "", errs
 }
 
 // getPatch gets the patch for the provided PR and creates a local

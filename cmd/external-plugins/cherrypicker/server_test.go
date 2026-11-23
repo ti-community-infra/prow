@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -26,7 +25,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"sigs.k8s.io/prow/pkg/git/localgit"
@@ -53,6 +51,7 @@ type fghc struct {
 	prLabels   []github.Label
 	orgMembers []github.TeamMember
 	issues     []github.Issue
+	repoErrors map[string]error
 }
 
 func (f *fghc) AddLabel(org, repo string, number int, label string) error {
@@ -122,20 +121,10 @@ func (f *fghc) IsMember(org, user string) (bool, error) {
 func (f *fghc) GetRepo(owner, name string) (github.FullRepo, error) {
 	f.Lock()
 	defer f.Unlock()
-	return github.FullRepo{}, nil
-}
-
-func (f *fghc) EnsureFork(forkingUser, org, repo string) (string, error) {
-	if repo == "changeme" {
-		return "changed", nil
+	if err, ok := f.repoErrors[name]; ok {
+		return github.FullRepo{}, err
 	}
-	if repo == "error" {
-		return repo, errors.New("errors")
-	}
-	if repo == "forbidden" {
-		return repo, github.NewForbidden()
-	}
-	return repo, nil
+	return github.FullRepo{Repo: github.Repo{FullName: owner + "/" + name}}, nil
 }
 
 var expectedFmt = `title=%q body=%q head=%s base=%s labels=%v`
@@ -356,12 +345,14 @@ func testCherryPickIC(clients localgit.Clients, t *testing.T) {
 		expected := fmt.Sprintf(expectedFmt, expectedTitle, expectedBody, expectedHead, expectedBase, expectedLabels)
 
 		s := &Server{
-			botUser:        botUser,
-			gc:             c,
-			pusher:         fakePusher{},
-			ghc:            ghc,
-			tokenGenerator: getSecret,
-			log:            logrus.StandardLogger().WithField("client", "cherrypicker"),
+			botUser:           botUser,
+			gc:                c,
+			pusher:            fakePusher{},
+			forkOwner:         "ci-robot",
+			installationToken: func(string) (string, error) { return "token", nil },
+			ghc:               ghc,
+			tokenGenerator:    getSecret,
+			log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
 			prowAssignments: true,
 		}
@@ -432,12 +423,14 @@ func testCherryPickIC(clients localgit.Clients, t *testing.T) {
 		}
 
 		s := &Server{
-			botUser:        botUser,
-			gc:             c,
-			pusher:         fakePusher{},
-			ghc:            ghc,
-			tokenGenerator: getSecret,
-			log:            logrus.StandardLogger().WithField("client", "cherrypicker"),
+			botUser:           botUser,
+			gc:                c,
+			pusher:            fakePusher{},
+			forkOwner:         "ci-robot",
+			installationToken: func(string) (string, error) { return "token", nil },
+			ghc:               ghc,
+			tokenGenerator:    getSecret,
+			log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 		}
 
 		_, _ = s.handleIssueComment(logrus.NewEntry(logrus.StandardLogger()), ic)
@@ -591,12 +584,14 @@ func testCherryPickPR(clients localgit.Clients, t *testing.T) {
 	}
 
 	s := &Server{
-		botUser:        botUser,
-		gc:             c,
-		pusher:         fakePusher{},
-		ghc:            ghc,
-		tokenGenerator: getSecret,
-		log:            logrus.StandardLogger().WithField("client", "cherrypicker"),
+		botUser:           botUser,
+		gc:                c,
+		pusher:            fakePusher{},
+		forkOwner:         "ci-robot",
+		installationToken: func(string) (string, error) { return "token", nil },
+		ghc:               ghc,
+		tokenGenerator:    getSecret,
+		log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
 		prowAssignments: false,
 	}
@@ -725,12 +720,14 @@ func testCherryPickPRAfterMerge(clients localgit.Clients, t *testing.T) {
 	logger := logrus.StandardLogger()
 
 	s := &Server{
-		gc:             c,
-		ghc:            ghc,
-		botUser:        &github.UserData{Login: "ci-robot", Email: "ci-robot@users.noreply.github.com"},
-		pusher:         fakePusher{},
-		tokenGenerator: func() []byte { return []byte("sha=abcdefg") },
-		log:            logger.WithField("client", "cherrypicker"),
+		gc:                c,
+		ghc:               ghc,
+		botUser:           &github.UserData{Login: "ci-robot", Email: "ci-robot@users.noreply.github.com"},
+		pusher:            fakePusher{},
+		forkOwner:         "ci-robot",
+		installationToken: func(string) (string, error) { return "token", nil },
+		tokenGenerator:    func() []byte { return []byte("sha=abcdefg") },
+		log:               logger.WithField("client", "cherrypicker"),
 
 		prowAssignments: false,
 	}
@@ -816,12 +813,14 @@ func testCherryPickOfCherryPickPR(clients localgit.Clients, t *testing.T) {
 	}
 
 	s := &Server{
-		botUser:        botUser,
-		gc:             c,
-		pusher:         fakePusher{},
-		ghc:            ghc,
-		tokenGenerator: getSecret,
-		log:            logrus.StandardLogger().WithField("client", "cherrypicker"),
+		botUser:           botUser,
+		gc:                c,
+		pusher:            fakePusher{},
+		forkOwner:         "ci-robot",
+		installationToken: func(string) (string, error) { return "token", nil },
+		ghc:               ghc,
+		tokenGenerator:    getSecret,
+		log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
 		prowAssignments: false,
 	}
@@ -1002,12 +1001,14 @@ func testCherryPickPRWithLabels(clients localgit.Clients, t *testing.T) {
 					}
 
 					s := &Server{
-						botUser:        botUser,
-						gc:             c,
-						pusher:         fakePusher{},
-						ghc:            ghc,
-						tokenGenerator: getSecret,
-						log:            logrus.StandardLogger().WithField("client", "cherrypicker"),
+						botUser:           botUser,
+						gc:                c,
+						pusher:            fakePusher{},
+						forkOwner:         "ci-robot",
+						installationToken: func(string) (string, error) { return "token", nil },
+						ghc:               ghc,
+						tokenGenerator:    getSecret,
+						log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
 						labels:          []string{"cla: yes"},
 						prowAssignments: false,
@@ -1222,12 +1223,14 @@ func testCherryPickPRAssignments(clients localgit.Clients, t *testing.T) {
 		}
 
 		s := &Server{
-			botUser:        botUser,
-			gc:             c,
-			pusher:         fakePusher{},
-			ghc:            ghc,
-			tokenGenerator: getSecret,
-			log:            logrus.StandardLogger().WithField("client", "cherrypicker"),
+			botUser:           botUser,
+			gc:                c,
+			pusher:            fakePusher{},
+			forkOwner:         "ci-robot",
+			installationToken: func(string) (string, error) { return "token", nil },
+			ghc:               ghc,
+			tokenGenerator:    getSecret,
+			log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
 			prowAssignments: prowAssignments,
 		}
@@ -1250,9 +1253,14 @@ func testCherryPickPRAssignments(clients localgit.Clients, t *testing.T) {
 
 func TestHandleLocks(t *testing.T) {
 	t.Parallel()
+	_, c := makeFakeRepoWithCommit(localgit.NewV2, t)
 	s := &Server{
 		ghc:     &threadUnsafeFGHC{fghc: &fghc{}},
 		botUser: &github.UserData{},
+		gc:      c,
+
+		forkOwner:         "bot-org",
+		installationToken: func(string) (string, error) { return "token", nil },
 	}
 
 	routine1Done := make(chan struct{})
@@ -1262,91 +1270,21 @@ func TestHandleLocks(t *testing.T) {
 
 	go func() {
 		defer close(routine1Done)
-		if err := s.handle(l, "", &github.IssueComment{}, "org", "repo", "targetBranch", "baseBranch", []string{}, "title", "body", 0); err != nil {
-			t.Errorf("routine failed: %v", err)
-		}
+		// The handle call is expected to fail at the checkout; only the
+		// number of fork lookups, which happen under the per-request lock,
+		// is asserted.
+		_ = s.handle(l, "", &github.IssueComment{}, "foo", "bar", "targetBranch", "baseBranch", []string{}, "title", "body", 0)
 	}()
 	go func() {
 		defer close(routine2Done)
-		if err := s.handle(l, "", &github.IssueComment{}, "org", "repo", "targetBranch", "baseBranch", []string{}, "title", "body", 0); err != nil {
-			t.Errorf("routine failed: %v", err)
-		}
+		_ = s.handle(l, "", &github.IssueComment{}, "foo", "bar", "targetBranch", "baseBranch", []string{}, "title", "body", 0)
 	}()
 
 	<-routine1Done
 	<-routine2Done
 
 	if actual := s.ghc.(*threadUnsafeFGHC).orgRepoCountCalled; actual != 2 {
-		t.Errorf("expected two EnsureFork calls, got %d", actual)
-	}
-}
-
-func TestGetPusherAndOrg(t *testing.T) {
-	botUser := &github.UserData{Login: "ci-robot", Email: "ci-robot@users.noreply.github.com"}
-
-	l := logrus.WithField("test", t.Name())
-	ghc := &fghc{}
-
-	s := &Server{
-		botUser: botUser,
-		ghc:     ghc,
-	}
-
-	testCases := []struct {
-		name        string
-		org         string
-		repo        string
-		expected    pusher
-		expectedOrg string
-		errors      bool
-	}{
-		{
-			name: "Repo name does not change after ensured",
-			org:  "whatever",
-			repo: "repo",
-			expected: &forkPusher{
-				forkName: "repo",
-			},
-			expectedOrg: "ci-robot",
-			errors:      false,
-		},
-		{
-			name: "EnsureFork changes repo name",
-			org:  "whatever",
-			repo: "changeme",
-			expected: &forkPusher{
-				forkName: "changed",
-			},
-			expectedOrg: "ci-robot",
-			errors:      false,
-		},
-		{
-			name:   "EnsureFork errors",
-			org:    "whatever",
-			repo:   "error",
-			errors: true,
-		},
-		{
-			name:        "forking is forbidden",
-			org:         "whatever",
-			repo:        "forbidden",
-			expected:    &centralPusher{},
-			expectedOrg: "whatever",
-			errors:      false,
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			res, pushOrg, err := s.getPusherAndOrg(l, tc.org, tc.repo)
-			if tc.errors && err == nil {
-				t.Errorf("expected error, but did not get one")
-			}
-			if !tc.errors && err != nil {
-				t.Errorf("expected no error, but got one")
-			}
-			assert.Equal(t, tc.expected, res)
-			assert.Equal(t, tc.expectedOrg, pushOrg)
-		})
+		t.Errorf("expected two fork lookups, got %d", actual)
 	}
 }
 
@@ -1447,9 +1385,9 @@ type threadUnsafeFGHC struct {
 	orgRepoCountCalled int
 }
 
-func (tuf *threadUnsafeFGHC) EnsureFork(login, org, repo string) (string, error) {
+func (tuf *threadUnsafeFGHC) GetRepo(owner, name string) (github.FullRepo, error) {
 	tuf.orgRepoCountCalled++
-	return "", errors.New("that is enough")
+	return github.FullRepo{Repo: github.Repo{FullName: owner + "/" + name}}, nil
 }
 
 type prNumberGenerator struct {

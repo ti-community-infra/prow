@@ -395,6 +395,21 @@ func (o *GitHubOptions) getGitHubAuthentication(dryRun bool) (string, gitv2.Toke
 	return login, gitv2.TokenGetter(o.tokenGenerator), nil
 }
 
+// InstallationTokenFor returns a token that authenticates as the given owner.
+//
+// With GitHub App authentication this is the installation token of that
+// organization or user, so a branch can be pushed to a fork owned by another
+// organization with that organization's own installation. With a personal
+// access token it is the configured token, which works for every owner it can
+// already write to. The GitHub client must have been constructed at least once
+// before this is called.
+func (o *GitHubOptions) InstallationTokenFor(owner string) (string, error) {
+	if o.tokenGenerator == nil {
+		return "", errors.New("the github client has not been constructed yet")
+	}
+	return o.tokenGenerator(owner)
+}
+
 func (o *GitHubOptions) appPrivateKeyGenerator() (func() *rsa.PrivateKey, error) {
 	generator, err := secret.AddWithParser(
 		o.AppPrivateKeyPath,

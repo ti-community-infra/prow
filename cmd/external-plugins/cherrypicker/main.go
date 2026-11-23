@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -52,7 +53,7 @@ type options struct {
 	prowAssignments       bool
 	allowAll              bool
 	issueOnConflict       bool
-	skipFork              bool
+	forkOwner             string
 	labelPrefix           string
 }
 
@@ -94,13 +95,22 @@ func gatherOptions() options {
 	fs.BoolVar(&o.prowAssignments, "use-prow-assignments", true, "Use prow commands to assign cherrypicked PRs.")
 	fs.BoolVar(&o.allowAll, "allow-all", false, "Allow anybody to use automated cherrypicks by skipping GitHub organization membership checks.")
 	fs.BoolVar(&o.issueOnConflict, "create-issue-on-conflict", false, "Create a GitHub issue and assign it to the requestor on cherrypick conflict.")
-	fs.BoolVar(&o.skipFork, "skip-fork", false, "Skip to create fork repository for cherrypicks.")
+	fs.StringVar(&o.forkOwner, "fork-owner", "", "Owner of the pre-created fork cherry-pick branches are pushed to. Empty pushes them into the base repository.")
 	fs.StringVar(&o.labelPrefix, "label-prefix", cherryconfig.DefaultLabelPrefix, "Set a custom label prefix.")
 	for _, group := range []flagutil.OptionGroup{&o.github, &o.instrumentationOptions} {
 		group.AddFlags(fs)
 	}
 	fs.Parse(os.Args[1:])
 	return o
+}
+
+// githubBaseURL returns the web URL of the GitHub instance.
+func githubBaseURL(host string) string {
+	host = strings.TrimSuffix(host, "/")
+	if strings.Contains(host, "://") {
+		return host
+	}
+	return "https://" + host
 }
 
 func main() {
@@ -177,8 +187,12 @@ func main() {
 		allowAll:        o.allowAll,
 		issueOnConflict: o.issueOnConflict,
 		labelPrefix:     o.labelPrefix,
-		skipFork:        o.skipFork,
-		configAgent:     configAgent,
+
+		forkOwner:         o.forkOwner,
+		githubURL:         githubBaseURL(o.github.Host),
+		installationToken: o.github.InstallationTokenFor,
+
+		configAgent: configAgent,
 
 		bare:     &http.Client{},
 		patchURL: "https://patch-diff.githubusercontent.com",
