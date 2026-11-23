@@ -52,9 +52,9 @@ func (c *Checker) Config() *Config {
 	return c.config
 }
 
-// CheckFileChanges returns every added line that matches a rule configured for
-// repoName. Files excluded at repository level are skipped before any rule is
-// evaluated; each rule may additionally limit itself with Files and Excludes.
+// CheckFileChanges returns every added statement that matches a rule configured
+// for repoName. Files excluded at repository level are skipped before any rule
+// is evaluated; each rule may additionally limit itself with Files and Excludes.
 func (c *Checker) CheckFileChanges(repoName string, changes []FileChange) ([]Match, error) {
 	repo := c.config.GetRepository(repoName)
 	if repo == nil {
@@ -67,7 +67,7 @@ func (c *Checker) CheckFileChanges(repoName string, changes []FileChange) ([]Mat
 			continue
 		}
 
-		for _, line := range addedLines(change.Patch) {
+		for _, statement := range addedStatements(change.Patch) {
 			for i := range repo.Patterns {
 				pattern := &repo.Patterns[i]
 				if !matchesFileScope(change.Filename, pattern.Files) {
@@ -76,14 +76,14 @@ func (c *Checker) CheckFileChanges(repoName string, changes []FileChange) ([]Mat
 				if matchesAnyPattern(change.Filename, pattern.Excludes) {
 					continue
 				}
-				if pattern.compiled == nil || !pattern.compiled.MatchString(line) {
+				if pattern.compiled == nil || !pattern.compiled.MatchString(statement) {
 					continue
 				}
 
 				matches = append(matches, Match{
 					Pattern:     pattern.Name,
 					Description: pattern.Description,
-					Line:        strings.TrimSpace(line),
+					Line:        strings.TrimSpace(statement),
 					File:        change.Filename,
 				})
 			}
@@ -93,16 +93,70 @@ func (c *Checker) CheckFileChanges(repoName string, changes []FileChange) ([]Mat
 	return matches, nil
 }
 
-// addedLines extracts the added lines of a file patch. A patch has no file
-// headers, so every line starting with "+" is an addition; hunk headers start
-// with "@@" and context/removed lines with " " and "-".
-func addedLines(patch string) []string {
-	var lines []string
+// maxStatementLines caps how many added lines are joined into one statement, so
+// an unbalanced parenthesis cannot swallow a whole file.
+const maxStatementLines = 20
+
+// addedStatements extracts the added statements of a file patch.
+//
+// A statement is a run of consecutive added lines whose parentheses are still
+// open at the end of the line, joined with newlines: policies match a whole call,
+// and a call formatted over several lines is one change even though GitHub
+// reports it as several added lines. A patch has no file headers, so every line
+// starting with "+" is an addition; hunk headers start with "@@" and
+// context/removed lines with " " and "-", which also close a statement — a call
+// that is only partly added is not a statement this pull request adds.
+func addedStatements(patch string) []string {
+	var statements []string
+	var pending []string
+	depth := 0
+
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		statements = append(statements, strings.Join(pending, "\n"))
+		pending, depth = nil, 0
+	}
+
 	for line := range strings.SplitSeq(patch, "\n") {
 		if !strings.HasPrefix(line, "+") {
+			flush()
 			continue
 		}
-		lines = append(lines, strings.TrimPrefix(line, "+"))
+
+		pending = append(pending, strings.TrimPrefix(line, "+"))
+		depth += parenDelta(pending[len(pending)-1])
+		if depth <= 0 || len(pending) >= maxStatementLines {
+			flush()
+		}
 	}
-	return lines
+	flush()
+
+	return statements
+}
+
+// parenDelta is the change in parenthesis depth of text, ignoring parentheses
+// inside string and rune literals.
+func parenDelta(text string) int {
+	depth := 0
+	inString, escaped := false, false
+
+	for _, r := range text {
+		switch {
+		case escaped:
+			escaped = false
+		case inString && r == '\\':
+			escaped = true
+		case r == '"':
+			inString = !inString
+		case inString:
+		case r == '(':
+			depth++
+		case r == ')':
+			depth--
+		}
+	}
+
+	return depth
 }

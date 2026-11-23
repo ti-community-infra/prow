@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -67,10 +68,17 @@ func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool,
 	}
 }
 
-// handlePullRequestEvent evaluates a push to a pull request.
+// handlePullRequestEvent evaluates a push to a pull request, or a retarget that
+// changes the diff the verdict is based on.
 func (h *handler) handlePullRequestEvent(event *github.PullRequestEvent) error {
 	switch event.Action {
 	case github.PullRequestActionOpened, github.PullRequestActionSynchronize, github.PullRequestActionReopened:
+	case github.PullRequestActionEdited:
+		// Editing the title or body leaves the diff alone; only a base branch
+		// change invalidates the cached matches.
+		if !retargeted(event.Changes) {
+			return nil
+		}
 	default:
 		return nil
 	}
@@ -78,7 +86,7 @@ func (h *handler) handlePullRequestEvent(event *github.PullRequestEvent) error {
 		return nil
 	}
 
-	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.Number, event.PullRequest.Head.SHA)
+	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.Number, event.PullRequest.Head.SHA, event.PullRequest.Base.SHA)
 }
 
 // handleIssueCommentEvent re-evaluates the approval half of the verdict.
@@ -108,7 +116,7 @@ func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error
 		return fmt.Errorf("failed to read pull request %s/%s#%d: %w", org, repo, number, err)
 	}
 
-	return h.evaluate(org, repo, number, pr.Head.SHA)
+	return h.evaluate(org, repo, number, pr.Head.SHA, pr.Base.SHA)
 }
 
 // handlePullRequestReviewEvent evaluates a review that approves or revokes its
@@ -124,7 +132,26 @@ func (h *handler) handlePullRequestReviewEvent(event *github.ReviewEvent) error 
 		return nil
 	}
 
-	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.PullRequest.Number, event.PullRequest.Head.SHA)
+	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.PullRequest.Number, event.PullRequest.Head.SHA, event.PullRequest.Base.SHA)
+}
+
+// retargeted reports whether a pull_request.edited payload says the base branch
+// changed. GitHub sends "edited" for title and body edits too, but only a
+// retarget changes the diff the verdict is computed from. A payload without
+// change information is treated as a retarget, so an unexpected shape cannot
+// leave a verdict based on another base branch.
+func retargeted(changes json.RawMessage) bool {
+	if len(changes) == 0 {
+		return true
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(changes, &fields); err != nil {
+		return true
+	}
+
+	_, ok := fields["base"]
+	return ok
 }
 
 // evaluate computes the verdict for one commit of a pull request and publishes
@@ -132,7 +159,7 @@ func (h *handler) handlePullRequestReviewEvent(event *github.ReviewEvent) error 
 //
 // Everything here runs off the webhook response path: the caller has already
 // acknowledged the event.
-func (h *handler) evaluate(org, repo string, number int, sha string) error {
+func (h *handler) evaluate(org, repo string, number int, sha, baseSHA string) error {
 	fullName := org + "/" + repo
 	config := h.configs.Current()
 	if config.GetRepository(fullName) == nil {
@@ -148,7 +175,7 @@ func (h *handler) evaluate(org, repo string, number int, sha string) error {
 	defer unlock()
 
 	checker := rules.NewChecker(config)
-	key := cacheKey{repo: fullName, number: number, sha: sha, configHash: config.Hash()}
+	key := cacheKey{repo: fullName, number: number, sha: sha, baseSHA: baseSHA, configHash: config.Hash()}
 
 	matches, cached := h.cache.matches(key)
 	if cached {

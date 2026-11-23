@@ -68,6 +68,23 @@ func TestRouteEvent(t *testing.T) {
 			wantRelevant: false,
 		},
 		{
+			name:         "retargeted pull request",
+			eventType:    "pull_request",
+			payload:      `{"action":"edited","changes":{"base":{"ref":{"from":"master"}}},"repository":{"full_name":"tikv/pd"}}`,
+			wantOrg:      "tikv",
+			wantRepo:     "pd",
+			wantRelevant: true,
+		},
+		{
+			// Editing the title or body leaves the diff alone.
+			name:         "pull request body edit is ignored",
+			eventType:    "pull_request",
+			payload:      `{"action":"edited","changes":{"body":{"from":"old body"}},"repository":{"full_name":"tikv/pd"}}`,
+			wantOrg:      "tikv",
+			wantRepo:     "pd",
+			wantRelevant: false,
+		},
+		{
 			name:         "approval notification from a bot",
 			eventType:    "issue_comment",
 			payload:      `{"action":"created","repository":{"full_name":"tikv/pd"},"comment":{"user":{"login":"prow-protected-changes-bot"},"body":"[APPROVALNOTIFIER] This PR is **APPROVED**"}}`,

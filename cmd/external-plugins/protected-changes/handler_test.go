@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -58,6 +59,7 @@ func newFakeGitHub() *fakeGitHub {
 			Number: 1,
 			State:  github.PullRequestStateOpen,
 			Head:   github.PullRequestBranch{SHA: "abc123"},
+			Base:   github.PullRequestBranch{SHA: "base123"},
 		},
 	}
 }
@@ -244,7 +246,7 @@ func TestUnapprovedProtectedChangeFails(t *testing.T) {
 	fake.changes = protectedChange()
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -280,7 +282,7 @@ func TestApprovedByNotificationSucceeds(t *testing.T) {
 	fake.comments = []github.IssueComment{notification("reviewer-two")}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -304,7 +306,7 @@ func TestApprovedByReviewWhenNoNotificationSucceeds(t *testing.T) {
 	fake.reviews = []github.Review{review("reviewer-one", github.ReviewStateApproved, time.Now())}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -324,7 +326,7 @@ func TestChangesRequestedWithdrawsReviewApproval(t *testing.T) {
 	}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -360,7 +362,7 @@ func TestApprovalByUnlistedUserFails(t *testing.T) {
 			tt.prepare(fake)
 			h := newTestPlugin(t, testPolicy, fake, false)
 
-			if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+			if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 				t.Fatalf("evaluate: %v", err)
 			}
 
@@ -388,7 +390,7 @@ func TestNotificationTextFromAHumanIsIgnored(t *testing.T) {
 		fake.comments = []github.IssueComment{forged}
 		h := newTestPlugin(t, testPolicy, fake, false)
 
-		if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 			t.Fatalf("evaluate: %v", err)
 		}
 
@@ -408,7 +410,7 @@ func TestCleanPullRequestSucceedsWithoutComment(t *testing.T) {
 	}}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -435,7 +437,7 @@ func TestFileScopedRuleMatchesNestedModule(t *testing.T) {
 	}}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -450,7 +452,7 @@ func TestUnconfiguredRepositoryIsIgnored(t *testing.T) {
 	fake.changes = protectedChange()
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("pingcap", "tidb", 1, "abc123"); err != nil {
+	if err := h.evaluate("pingcap", "tidb", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -465,7 +467,7 @@ func TestInternalErrorReportsErrorStatus(t *testing.T) {
 	fake.changesErr = fmt.Errorf("boom")
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err == nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err == nil {
 		t.Fatal("expected the evaluation error to be returned")
 	}
 
@@ -483,7 +485,7 @@ func TestDryRunDoesNotMutate(t *testing.T) {
 	fake.changes = protectedChange()
 	h := newTestPlugin(t, testPolicy, fake, true)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -502,7 +504,7 @@ func TestIssueCommentReusesMatchesForTheSameCommit(t *testing.T) {
 	fake.changes = protectedChange()
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	if got := fake.count("GetPullRequestChanges"); got != 1 {
@@ -552,6 +554,77 @@ func TestReviewEventTriggersEvaluation(t *testing.T) {
 	}
 }
 
+// Retargeting changes the diff without changing the head commit: the matches
+// computed against the old base must not be reused for the new one.
+func TestBaseBranchChangeInvalidatesCachedMatches(t *testing.T) {
+	fake := newFakeGitHub()
+	fake.changes = nil
+	h := newTestPlugin(t, testPolicy, fake, false)
+
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base-old"); err != nil {
+		t.Fatalf("evaluate against the old base: %v", err)
+	}
+
+	// The same head commit against the new base adds a protected line.
+	fake.changes = protectedChange()
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base-new"); err != nil {
+		t.Fatalf("evaluate against the new base: %v", err)
+	}
+
+	if got := fake.count("GetPullRequestChanges"); got != 2 {
+		t.Errorf("GetPullRequestChanges calls = %d, want 2", got)
+	}
+	statuses := fake.recordedStatuses()
+	if len(statuses) != 2 {
+		t.Fatalf("got %d statuses, want 2: %+v", len(statuses), statuses)
+	}
+	if statuses[0].State != github.StatusSuccess || statuses[1].State != github.StatusFailure {
+		t.Errorf("got %q then %q, want success then failure", statuses[0].State, statuses[1].State)
+	}
+}
+
+// A retarget arrives as pull_request.edited with the base in changes; a title or
+// body edit carries another field and must not spend GitHub calls.
+func TestEditedPullRequestEvaluatesOnlyRetargets(t *testing.T) {
+	tests := []struct {
+		name      string
+		changes   string
+		wantCalls bool
+	}{
+		{name: "base branch change", changes: `{"base":{"ref":{"from":"master"}}}`, wantCalls: true},
+		{name: "title edit", changes: `{"title":{"from":"old title"}}`, wantCalls: false},
+		{name: "body edit", changes: `{"body":{"from":"old body"}}`, wantCalls: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGitHub()
+			fake.changes = protectedChange()
+			h := newTestPlugin(t, testPolicy, fake, false)
+
+			event := &github.PullRequestEvent{
+				Action: github.PullRequestActionEdited,
+				Repo:   github.Repo{Owner: github.User{Login: "tikv"}, Name: "pd"},
+				Number: 1,
+				PullRequest: github.PullRequest{
+					Number: 1,
+					State:  github.PullRequestStateOpen,
+					Head:   github.PullRequestBranch{SHA: "abc123"},
+					Base:   github.PullRequestBranch{SHA: "base-new"},
+				},
+				Changes: json.RawMessage(tt.changes),
+			}
+			if err := h.handlePullRequestEvent(event); err != nil {
+				t.Fatalf("handle edited pull request: %v", err)
+			}
+
+			if got := fake.count("CreateStatus") == 1; got != tt.wantCalls {
+				t.Errorf("status posted = %v, want %v (calls: %v)", got, tt.wantCalls, fake.calls)
+			}
+		})
+	}
+}
+
 // Only an approval notification can change the verdict, and our own comment must
 // never re-trigger the check that wrote it.
 func TestIrrelevantIssueCommentsAreIgnored(t *testing.T) {
@@ -598,7 +671,7 @@ func TestRepeatedEvaluationPublishesOneStatus(t *testing.T) {
 	h := newTestPlugin(t, testPolicy, fake, false)
 
 	for i := range 3 {
-		if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+		if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 			t.Fatalf("evaluate %d: %v", i, err)
 		}
 	}
@@ -617,10 +690,10 @@ func TestNewCommitInvalidatesCachedMatches(t *testing.T) {
 	fake.changes = protectedChange()
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
-	if err := h.evaluate("tikv", "pd", 1, "def456"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "def456", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -640,7 +713,7 @@ func TestAdvisoryCommentIsUpdatedInPlace(t *testing.T) {
 	}}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -667,7 +740,7 @@ func TestMarkerCommentFromSomeoneElseIsNotEdited(t *testing.T) {
 	}}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -687,7 +760,7 @@ func TestStaleCommentIsDeletedWhenClean(t *testing.T) {
 	fake.comments = []github.IssueComment{{ID: 7, User: github.User{Login: selfLogin, Type: github.UserTypeBot}, Body: commentMarker + "\nold finding"}}
 	h := newTestPlugin(t, testPolicy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -704,7 +777,7 @@ func TestWarnModeReportsSuccessWithAdvisory(t *testing.T) {
 	fake.changes = protectedChange()
 	h := newTestPlugin(t, policy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -728,7 +801,7 @@ func TestStatusDescriptionFitsGitHubLimit(t *testing.T) {
 	fake.changes = protectedChange()
 	h := newTestPlugin(t, policy, fake, false)
 
-	if err := h.evaluate("tikv", "pd", 1, "abc123"); err != nil {
+	if err := h.evaluate("tikv", "pd", 1, "abc123", "base123"); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
