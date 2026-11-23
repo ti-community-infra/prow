@@ -96,6 +96,13 @@ func HelpProvider(agent *cherryconfig.Agent, defaults cherryconfig.Defaults) ext
 			WhoCanUse: "Members of the trusted organization for the repo.",
 			Examples:  []string{"/cherrypick release-3.9", "/cherry-pick release-1.15", "/cherrypick release-1.6 release-1.5 release-1.4"},
 		})
+		pluginHelp.AddCommand(pluginhelp.Command{
+			Usage:       "/cherry-pick-invite",
+			Description: "Request a collaborator invitation to the bot fork so you can push to a cherry-pick pull request created from that fork.",
+			Featured:    true,
+			WhoCanUse:   "Members of the trusted organization for the repo.",
+			Examples:    []string{"/cherry-pick-invite"},
+		})
 		return pluginHelp, nil
 	}
 }
