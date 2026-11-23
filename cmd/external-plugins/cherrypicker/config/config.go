@@ -27,6 +27,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -210,22 +211,11 @@ func (c *Config) Options(org, repo string, defaults Defaults) Options {
 }
 
 func (c *RepoConfig) matchesOrg(org string) bool {
-	for _, repo := range c.Repos {
-		if repo == org {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Repos, org)
 }
 
 func (c *RepoConfig) matchesRepo(org, repo string) bool {
-	fullName := org + "/" + repo
-	for _, candidate := range c.Repos {
-		if candidate == fullName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Repos, org+"/"+repo)
 }
 
 func (c *RepoConfig) apply(out *Options) {

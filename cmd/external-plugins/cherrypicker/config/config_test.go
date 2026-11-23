@@ -24,8 +24,6 @@ import (
 	"time"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 func testDefaults() Defaults {
 	return Defaults{
 		LabelPrefix:        "needs-cherry-pick-",
