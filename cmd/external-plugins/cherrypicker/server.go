@@ -96,6 +96,13 @@ func HelpProvider(agent *cherryconfig.Agent, defaults cherryconfig.Defaults) ext
 			WhoCanUse: "Members of the trusted organization for the repo.",
 			Examples:  []string{"/cherrypick release-3.9", "/cherry-pick release-1.15", "/cherrypick release-1.6 release-1.5 release-1.4"},
 		})
+		pluginHelp.AddCommand(pluginhelp.Command{
+			Usage:       "/cherry-pick-invite",
+			Description: "Request a collaborator invitation to the bot fork so you can push to a cherry-pick pull request created from that fork.",
+			Featured:    true,
+			WhoCanUse:   "Members of the trusted organization for the repo.",
+			Examples:    []string{"/cherry-pick-invite"},
+		})
 		return pluginHelp, nil
 	}
 }
@@ -787,7 +794,7 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		head = newBranch
 	}
 
-	createdNum, err := s.ghc.CreatePullRequest(org, repo, title, cherryPickBody, head, targetBranch, true)
+	createdNum, err := s.ghc.CreatePullRequest(org, repo, title, cherryPickBody, head, targetBranch, maintainerCanModify(pushOrg, org))
 	if err != nil {
 		logger.WithError(err).Warn("failed to create new pull request")
 		resp := fmt.Sprintf("new pull request could not be created: %v", err)
@@ -889,6 +896,15 @@ func (s *Server) cherryPickCommitMessage(org, repo string, num int, copyIssueNum
 		texts = append(texts, fmt.Sprintf("%s %s/%s#%d", number.AssociatePrefix, number.Org, number.Repo, number.Number))
 	}
 	return fmt.Sprintf("%s\n\n%s", message, strings.Join(texts, ", "))
+}
+
+// maintainerCanModify reports whether the maintainer edit permission can be
+// requested. GitHub rejects a pull request created from a fork when the request
+// asks for it, because the base repository cannot grant the fork owner
+// collaboration (fork_collab), so it is only requested for same-repository
+// heads.
+func maintainerCanModify(pushOrg, org string) bool {
+	return pushOrg == org
 }
 
 func (s *Server) applyToBranch(r git.RepoClient, org, repo, localPath string, num int) error {

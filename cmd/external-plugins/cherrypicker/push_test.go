@@ -179,6 +179,15 @@ func TestCensorToken(t *testing.T) {
 	}
 }
 
+func TestMaintainerCanModify(t *testing.T) {
+	if !maintainerCanModify("base-org", "base-org") {
+		t.Error("expected same-repository heads to allow maintainer edits")
+	}
+	if maintainerCanModify("bot-owner", "base-org") {
+		t.Error("expected fork heads to skip maintainer edits")
+	}
+}
+
 func TestGitHubBaseURL(t *testing.T) {
 	tests := map[string]string{
 		"github.com":               "https://github.com",

@@ -19,6 +19,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -65,6 +66,16 @@ cherry-pick:
 	} {
 		if !strings.Contains(config, want) {
 			t.Errorf("expected help config to contain %q, got:\n%s", want, config)
+		}
+	}
+
+	var usages []string
+	for _, command := range help.Commands {
+		usages = append(usages, command.Usage)
+	}
+	for _, want := range []string{"/cherrypick [branch]", "/cherry-pick-invite"} {
+		if !slices.Contains(usages, want) {
+			t.Errorf("expected help to document %q, got %v", want, usages)
 		}
 	}
 }
