@@ -1085,6 +1085,7 @@ func TestNewPresubmitWithModifiers(t *testing.T) {
 						kube.RepoLabel:         "repo-name",
 						kube.BaseRefLabel:      "base-ref",
 						kube.PullLabel:         "42",
+						kube.AuthorLabel:       "user-login",
 						"extra-label":          "foo",
 					},
 					Annotations: map[string]string{
@@ -1151,6 +1152,7 @@ func TestNewPresubmitWithModifiers(t *testing.T) {
 						kube.RepoLabel:         "repo-name",
 						kube.BaseRefLabel:      "base-ref",
 						kube.PullLabel:         "42",
+						kube.AuthorLabel:       "user-login",
 						"extra-label":          "foo",
 					},
 					Annotations: map[string]string{

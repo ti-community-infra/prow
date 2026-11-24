@@ -66,6 +66,7 @@ var (
 		github.PullRequestActionUnlocked:             true,
 		github.PullRequestActionAutoMergeEnabled:     true,
 		github.PullRequestActionAutoMergeDisabled:    true,
+		github.PullRequestActionStacked:              true,
 	}
 )
 

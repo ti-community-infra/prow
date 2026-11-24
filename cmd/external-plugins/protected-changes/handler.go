@@ -1,0 +1,502 @@
+/*
+Copyright The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/sirupsen/logrus"
+
+	"sigs.k8s.io/prow/cmd/external-plugins/protected-changes/rules"
+	"sigs.k8s.io/prow/pkg/github"
+)
+
+const (
+	// statusContext is the commit status context; it is also the name tide uses
+	// if the check is ever made required.
+	statusContext = "protected-changes"
+	// noProtectedChanges is the description of a commit that touches nothing
+	// the policy protects.
+	noProtectedChanges = "No protected changes detected."
+	// commentMarker identifies the advisory comment, so it is updated in place.
+	commentMarker = "<!-- protected-changes -->"
+
+	// githubStatusDescriptionLimit is the API limit for a status description.
+	githubStatusDescriptionLimit = 140
+	maxCommentRows               = 20
+	maxCommentFieldLength        = 160
+)
+
+type handler struct {
+	configs *configSource
+	ghc     githubAPI
+	cache   *cache
+	dryRun  bool
+	log     *logrus.Entry
+	// isSelf tells whether a login belongs to this plugin. It is resolved from
+	// the GitHub App identity at startup, so nothing has to be configured and no
+	// bot login is hardcoded.
+	isSelf func(login string) bool
+}
+
+func newHandler(configs *configSource, ghc githubAPI, cache *cache, dryRun bool, isSelf func(string) bool, log *logrus.Entry) *handler {
+	return &handler{
+		configs: configs,
+		ghc:     ghc,
+		cache:   cache,
+		dryRun:  dryRun,
+		log:     log,
+		isSelf:  isSelf,
+	}
+}
+
+// handlePullRequestEvent evaluates a push to a pull request, or a retarget that
+// changes the diff the verdict is based on.
+func (h *handler) handlePullRequestEvent(event *github.PullRequestEvent) error {
+	switch event.Action {
+	case github.PullRequestActionOpened, github.PullRequestActionSynchronize, github.PullRequestActionReopened:
+	case github.PullRequestActionEdited:
+		// Editing the title or body leaves the diff alone; only a base branch
+		// change invalidates the cached matches.
+		if !retargeted(event.Changes) {
+			return nil
+		}
+	default:
+		return nil
+	}
+	if event.PullRequest.State != github.PullRequestStateOpen {
+		return nil
+	}
+
+	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.Number, event.PullRequest.Head.SHA, event.PullRequest.Base.SHA)
+}
+
+// handleIssueCommentEvent re-evaluates the approval half of the verdict.
+//
+// Only an approval notification can change the verdict: the approval bot posts
+// one whenever an approval is given or withdrawn. Every other comment would turn
+// the busiest webhook event into a GitHub API consumer for no verdict change, and
+// our own advisory comment must never re-trigger the check that wrote it.
+func (h *handler) handleIssueCommentEvent(event *github.IssueCommentEvent) error {
+	if event.Action != github.IssueCommentActionCreated {
+		return nil
+	}
+	if event.Issue.PullRequest == nil || event.Issue.State == github.PullRequestStateClosed {
+		return nil
+	}
+	// An approval notification is written by this plugin's own app, so it must
+	// be accepted; every other comment of ours (the advisory comment in
+	// particular) is not and therefore cannot re-trigger the check.
+	if !isApprovalNotification(event.Comment, h.isSelf) {
+		return nil
+	}
+
+	org, repo, number := event.Repo.Owner.Login, event.Repo.Name, event.Issue.Number
+	pr, err := h.ghc.GetPullRequest(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("get_pull_request").Inc()
+		return fmt.Errorf("failed to read pull request %s/%s#%d: %w", org, repo, number, err)
+	}
+
+	return h.evaluate(org, repo, number, pr.Head.SHA, pr.Base.SHA)
+}
+
+// handlePullRequestReviewEvent evaluates a review that approves or revokes its
+// approval. Reviews are the primary approval signal, so they must trigger even
+// when no approve plugin is installed.
+func (h *handler) handlePullRequestReviewEvent(event *github.ReviewEvent) error {
+	switch event.Action {
+	case github.ReviewActionSubmitted, github.ReviewActionDismissed:
+	default:
+		return nil
+	}
+	if event.PullRequest.State != github.PullRequestStateOpen {
+		return nil
+	}
+
+	return h.evaluate(event.Repo.Owner.Login, event.Repo.Name, event.PullRequest.Number, event.PullRequest.Head.SHA, event.PullRequest.Base.SHA)
+}
+
+// retargeted reports whether a pull_request.edited payload says the base branch
+// changed. GitHub sends "edited" for title and body edits too, but only a
+// retarget changes the diff the verdict is computed from. A payload without
+// change information is treated as a retarget, so an unexpected shape cannot
+// leave a verdict based on another base branch.
+func retargeted(changes json.RawMessage) bool {
+	if len(changes) == 0 {
+		return true
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(changes, &fields); err != nil {
+		return true
+	}
+
+	_, ok := fields["base"]
+	return ok
+}
+
+// evaluate computes the verdict for one commit of a pull request and publishes
+// it as a status plus one advisory comment.
+//
+// Everything here runs off the webhook response path: the caller has already
+// acknowledged the event.
+func (h *handler) evaluate(org, repo string, number int, sha, baseSHA string) error {
+	fullName := org + "/" + repo
+	config := h.configs.Current()
+	if config.GetRepository(fullName) == nil {
+		return nil
+	}
+
+	started := time.Now()
+	defer func() {
+		evaluationDuration.Observe(time.Since(started).Seconds())
+	}()
+
+	unlock := h.cache.lock(fullName, number)
+	defer unlock()
+
+	checker := rules.NewChecker(config)
+	key := cacheKey{repo: fullName, number: number, sha: sha, baseSHA: baseSHA, configHash: config.Hash()}
+
+	matches, cached := h.cache.matches(key)
+	if cached {
+		matchCacheHits.Inc()
+	} else {
+		changes, err := h.ghc.GetPullRequestChanges(org, repo, number)
+		if err != nil {
+			githubErrors.WithLabelValues("get_pull_request_changes").Inc()
+			return h.reportFailure(org, repo, sha, "could not read the pull request diff", err)
+		}
+
+		files := make([]rules.FileChange, 0, len(changes))
+		for _, change := range changes {
+			if change.Patch == "" && change.Additions > 0 {
+				// GitHub omits the patch of a very large or binary file; those
+				// added lines cannot be evaluated.
+				h.log.WithField("file", change.Filename).Warn("GitHub returned no patch for a changed file.")
+			}
+			files = append(files, rules.FileChange{Filename: change.Filename, Patch: change.Patch})
+		}
+
+		matches, err = checker.CheckFileChanges(fullName, files)
+		if err != nil {
+			return h.reportFailure(org, repo, sha, "could not evaluate the protected-change rules", err)
+		}
+		h.cache.storeMatches(key, matches)
+	}
+
+	if len(matches) == 0 {
+		evaluations.WithLabelValues("clean").Inc()
+		if h.cache.statusPublished(key, github.StatusSuccess, noProtectedChanges) {
+			statusesSkipped.Inc()
+		} else {
+			if err := h.postStatus(org, repo, sha, github.StatusSuccess, noProtectedChanges); err != nil {
+				return err
+			}
+			if !h.dryRun {
+				h.cache.recordStatus(key, github.StatusSuccess, noProtectedChanges)
+			}
+		}
+		return h.clearComment(org, repo, number)
+	}
+
+	repoConfig := config.GetRepository(fullName)
+
+	approvers, comments, err := h.approvals(org, repo, number, repoConfig.Approvers)
+	if err != nil {
+		return h.reportFailure(org, repo, sha, "could not read the approval state", err)
+	}
+
+	verdict, err := checker.Evaluate(fullName, matches, approvers)
+	if err != nil {
+		return h.reportFailure(org, repo, sha, "could not evaluate the approval state", err)
+	}
+
+	description, state := h.describe(verdict)
+	if h.cache.statusPublished(key, state, description) {
+		// The same commit, policy and verdict: a repeated event (an approval
+		// comment that changed nothing, a redelivered webhook) must not add a
+		// second identical status to the commit.
+		statusesSkipped.Inc()
+	} else {
+		if err := h.postStatus(org, repo, sha, state, description); err != nil {
+			return err
+		}
+		if !h.dryRun {
+			h.cache.recordStatus(key, state, description)
+		}
+	}
+
+	if verdict.Approved {
+		evaluations.WithLabelValues("approved").Inc()
+		return h.clearCommentWith(comments, org, repo, number)
+	}
+
+	if verdict.Mode == rules.ModeWarn {
+		evaluations.WithLabelValues("warned").Inc()
+	} else {
+		evaluations.WithLabelValues("unapproved").Inc()
+	}
+
+	return h.upsertComment(comments, org, repo, number, renderComment(verdict, config.Settings.Hint))
+}
+
+// approvals returns the whitelisted approvers of the pull request and its
+// comments.
+//
+// The approval notification is the primary source, because it is what the
+// presubmit this plugin replaces read and what an approval bot maintains for the
+// repository. A repository that does not run such a bot never gets a
+// notification, so when none names an approver the GitHub review state is used
+// instead. Either way the result is filtered by the repository's approver list.
+func (h *handler) approvals(org, repo string, number int, whitelist []string) ([]string, []github.IssueComment, error) {
+	comments, err := h.ghc.ListIssueComments(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_issue_comments").Inc()
+		return nil, nil, fmt.Errorf("failed to read the pull request comments: %w", err)
+	}
+
+	if approvers := whitelistedApprovers(approversFromNotifications(comments, h.isSelf), whitelist); len(approvers) > 0 {
+		return approvers, comments, nil
+	}
+
+	reviews, err := h.ghc.ListReviews(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_reviews").Inc()
+		return nil, nil, fmt.Errorf("failed to read the pull request reviews: %w", err)
+	}
+
+	return whitelistedApprovers(approversFromReviews(reviews), whitelist), comments, nil
+}
+
+// describe renders the status description and state for a verdict.
+func (h *handler) describe(verdict *rules.Verdict) (string, string) {
+	ruleCount := distinctRules(verdict.Matches)
+
+	if verdict.Approved {
+		return truncate(fmt.Sprintf("%d protected rule(s) matched, approved by %s.",
+			ruleCount, strings.Join(verdict.ApprovedBy, ", ")), githubStatusDescriptionLimit), github.StatusSuccess
+	}
+
+	if len(verdict.Required) == 0 {
+		// Nobody can approve, so the check can never pass: say so instead of
+		// asking for an approval that no login can satisfy.
+		return truncate(fmt.Sprintf("%d protected rule(s) matched, but no approver is configured for this repository.",
+			ruleCount), githubStatusDescriptionLimit), github.StatusError
+	}
+
+	description := fmt.Sprintf("%d protected rule(s) matched, approval needed from %s.",
+		ruleCount, strings.Join(verdict.Required, ", "))
+	if verdict.Mode == rules.ModeWarn {
+		return truncate(description+" (advisory)", githubStatusDescriptionLimit), github.StatusSuccess
+	}
+	return truncate(description, githubStatusDescriptionLimit), github.StatusFailure
+}
+
+// reportFailure publishes an error status. An internal failure must never leave
+// the commit looking green.
+func (h *handler) reportFailure(org, repo, sha, description string, cause error) error {
+	statusErr := h.postStatus(org, repo, sha, github.StatusError, "protected-changes could not finish: "+description)
+	if statusErr != nil {
+		h.log.WithError(statusErr).Error("Failed to post the error status.")
+	}
+	if cause != nil {
+		return cause
+	}
+	return errors.New(description)
+}
+
+func (h *handler) postStatus(org, repo, sha, state, description string) error {
+	status := github.Status{
+		State:       state,
+		Context:     statusContext,
+		Description: truncate(description, githubStatusDescriptionLimit),
+	}
+
+	if h.dryRun {
+		h.log.WithFields(logrus.Fields{
+			"github-org": org, "github-repo": repo, "sha": sha, "state": state, "description": description,
+		}).Info("Dry run: would post a commit status.")
+		return nil
+	}
+
+	if err := h.ghc.CreateStatus(org, repo, sha, status); err != nil {
+		githubErrors.WithLabelValues("create_status").Inc()
+		return fmt.Errorf("failed to post the %s status: %w", state, err)
+	}
+	reportedStatuses.WithLabelValues(state).Inc()
+	return nil
+}
+
+// clearComment removes the advisory comment of this pull request, if any.
+func (h *handler) clearComment(org, repo string, number int) error {
+	comments, err := h.ghc.ListIssueComments(org, repo, number)
+	if err != nil {
+		githubErrors.WithLabelValues("list_issue_comments").Inc()
+		// The verdict is already published; a stale comment must not turn a
+		// clean result into a failure.
+		h.log.WithError(err).Warn("Failed to list comments, so a stale advisory comment may remain.")
+		return nil
+	}
+	return h.clearCommentWith(comments, org, repo, number)
+}
+
+func (h *handler) clearCommentWith(comments []github.IssueComment, org, repo string, number int) error {
+	existing := h.findMarkerComment(comments)
+	if existing == nil {
+		return nil
+	}
+
+	if h.dryRun {
+		h.log.WithField("comment-id", existing.ID).Info("Dry run: would delete the advisory comment.")
+		return nil
+	}
+
+	if err := h.ghc.DeleteComment(org, repo, existing.ID); err != nil {
+		githubErrors.WithLabelValues("delete_comment").Inc()
+		h.log.WithError(err).Warn("Failed to delete the advisory comment.")
+	}
+	return nil
+}
+
+// upsertComment keeps exactly one advisory comment per pull request.
+func (h *handler) upsertComment(comments []github.IssueComment, org, repo string, number int, body string) error {
+	existing := h.findMarkerComment(comments)
+
+	if h.dryRun {
+		h.log.WithFields(logrus.Fields{"comment-id": commentID(existing), "body": body}).Info("Dry run: would publish the advisory comment.")
+		return nil
+	}
+
+	if existing != nil {
+		if existing.Body == body {
+			// Rewriting an identical comment only adds a notification.
+			return nil
+		}
+		if err := h.ghc.EditComment(org, repo, existing.ID, body); err != nil {
+			githubErrors.WithLabelValues("edit_comment").Inc()
+			return fmt.Errorf("failed to update the advisory comment: %w", err)
+		}
+		return nil
+	}
+
+	if err := h.ghc.CreateComment(org, repo, number, body); err != nil {
+		githubErrors.WithLabelValues("create_comment").Inc()
+		return fmt.Errorf("failed to post the advisory comment: %w", err)
+	}
+	return nil
+}
+
+func (h *handler) findMarkerComment(comments []github.IssueComment) *github.IssueComment {
+	for i := range comments {
+		// Only edit what this plugin wrote: a contributor can paste the marker,
+		// and rewriting their comment would be wrong.
+		if strings.Contains(comments[i].Body, commentMarker) && h.isSelf(comments[i].User.Login) {
+			return &comments[i]
+		}
+	}
+	return nil
+}
+
+func commentID(comment *github.IssueComment) int {
+	if comment == nil {
+		return 0
+	}
+	return comment.ID
+}
+
+// renderComment explains the verdict where contributors will see it: the
+// comment stands in for the log of the presubmit job this check replaces.
+func renderComment(verdict *rules.Verdict, hint string) string {
+	var builder strings.Builder
+	builder.WriteString(commentMarker + "\n")
+	builder.WriteString("**Protected changes**\n\n")
+	builder.WriteString("This pull request adds lines that a repository policy protects. ")
+	builder.WriteString("Merge needs an approval from a reviewer listed for it.\n\n")
+
+	fmt.Fprintf(&builder, "| File | Rule | Line |\n| --- | --- | --- |\n")
+	for i, match := range verdict.Matches {
+		if i == maxCommentRows {
+			fmt.Fprintf(&builder, "| _and %d more_ | | |\n", len(verdict.Matches)-maxCommentRows)
+			break
+		}
+		fmt.Fprintf(&builder, "| %s | %s | %s |\n",
+			codeSpan(match.File), codeSpan(match.Pattern), codeSpan(match.Line))
+	}
+
+	builder.WriteString("\n")
+	if len(verdict.Required) > 0 {
+		fmt.Fprintf(&builder, "Required reviewers: %s (%d approval(s) needed).\n",
+			mentionAll(verdict.Required), verdict.Minimum)
+		fmt.Fprintf(&builder, "Approved by: %s.\n", mentionAllOrNone(verdict.ApprovedBy))
+	} else {
+		builder.WriteString("No reviewer is configured for this repository, so this check cannot pass.\n")
+	}
+
+	if hint := strings.TrimSpace(hint); hint != "" {
+		fmt.Fprintf(&builder, "\n%s\n", hint)
+	}
+
+	builder.WriteString("\n<sub>This comment is updated on every push instead of adding a new one.</sub>\n")
+	return builder.String()
+}
+
+func distinctRules(matches []rules.Match) int {
+	seen := map[string]bool{}
+	for _, match := range matches {
+		seen[match.Pattern] = true
+	}
+	return len(seen)
+}
+
+func mentionAll(logins []string) string {
+	mentions := make([]string, 0, len(logins))
+	for _, login := range logins {
+		mentions = append(mentions, "@"+login)
+	}
+	return strings.Join(mentions, ", ")
+}
+
+func mentionAllOrNone(logins []string) string {
+	if len(logins) == 0 {
+		return "none yet"
+	}
+	return mentionAll(logins)
+}
+
+// codeSpan renders value as inline code without letting the content break the
+// table cell or the code span.
+func codeSpan(value string) string {
+	clean := strings.NewReplacer("`", "'", "|", "\\|", "\n", " ", "\r", " ").Replace(strings.TrimSpace(value))
+	return "`" + truncate(clean, maxCommentFieldLength) + "`"
+}
+
+func truncate(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit < 2 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-1]) + "…"
+}

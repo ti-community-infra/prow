@@ -145,11 +145,20 @@ func requirementDiff(pr *PullRequest, q *config.TideQuery, cc contextChecker, me
 
 	// Weight incorrect branches with very high diff so that we select the query
 	// for the correct branch.
-	targetBranchDenied := slices.Contains(q.ExcludedBranches, string(pr.BaseRef.Name))
+	targetBranchDenied := false
+	for _, excludedBranch := range q.ExcludedBranches {
+		if strings.HasPrefix(string(pr.BaseRef.Name), excludedBranch) {
+			targetBranchDenied = true
+			break
+		}
+	}
 	// if no allowlist is configured, the target is OK by default
 	targetBranchAllowed := len(q.IncludedBranches) == 0
-	if slices.Contains(q.IncludedBranches, string(pr.BaseRef.Name)) {
-		targetBranchAllowed = true
+	for _, includedBranch := range q.IncludedBranches {
+		if strings.HasPrefix(string(pr.BaseRef.Name), includedBranch) {
+			targetBranchAllowed = true
+			break
+		}
 	}
 	if targetBranchDenied || !targetBranchAllowed {
 		diff += 2000

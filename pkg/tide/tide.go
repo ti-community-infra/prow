@@ -211,6 +211,10 @@ var (
 		poolErrors   *prometheus.CounterVec
 		queryResults *prometheus.CounterVec
 
+		// mergeFailures counts merge failures that are otherwise only logged at
+		// debug level, so that silently retried merges are visible.
+		mergeFailures *prometheus.CounterVec
+
 		// Singleton
 		syncDuration         prometheus.Gauge
 		statusUpdateDuration prometheus.Gauge
@@ -268,6 +272,16 @@ var (
 			"query_index",
 			"org_shard",
 			"result",
+		}),
+
+		mergeFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tidemergefailures",
+			Help: "Count of Tide merge failures by pool and reason.",
+		}, []string{
+			"org",
+			"repo",
+			"branch",
+			"reason",
 		}),
 
 		// Use the sync heartbeat counter to monitor for liveness. Use the duration
@@ -346,6 +360,7 @@ func init() {
 	prometheus.MustRegister(tideMetrics.poolPendingPRs)
 	prometheus.MustRegister(tideMetrics.poolSuccessfulPRs)
 	prometheus.MustRegister(tideMetrics.poolBatchPendingPRs)
+	prometheus.MustRegister(tideMetrics.mergeFailures)
 }
 
 type manager interface {
@@ -1495,12 +1510,12 @@ func (c *syncController) trigger(sp subpool, presubmits []config.Presubmit, prs 
 	// If multiple required jobs have the same context, we assume the
 	// same shard will be run to provide those contexts
 	triggeredContexts := sets.New[string]()
-	enableScheduling := c.config().Scheduler.Enabled
 	for _, ps := range presubmits {
 		if triggeredContexts.Has(string(ps.Context)) {
 			continue
 		}
 		triggeredContexts.Insert(string(ps.Context))
+		enableScheduling := c.config().Scheduler.Enabled
 		var spec prowapi.ProwJobSpec
 		if len(prs) == 1 {
 			spec = pjutil.PresubmitSpec(ps, refs)
@@ -2032,6 +2047,57 @@ type PullRequest struct {
 	UpdatedAt githubql.DateTime
 }
 
+// NormalizeIssueNumbers is an utils method in CommitTemplate that used to extract the issue numbers in the text
+// and normalize it by a uniform format.
+func (pr PullRequest) NormalizeIssueNumbers(content string) []github.IssueNumberData {
+	currOrg := string(pr.Repository.Owner.Login)
+	currRepo := string(pr.Repository.Name)
+	return github.NormalizeIssueNumbers(content, currOrg, currRepo)
+}
+
+func (pr PullRequest) NormalizeSignedOffBy() []github.SignedAuthor {
+	commitNodes := pr.Commits.Nodes
+
+	if len(commitNodes) == 0 {
+		return []github.SignedAuthor{}
+	}
+
+	commitMessages := make([]string, 0)
+	for _, node := range commitNodes {
+		commitMessages = append(commitMessages, string(node.Commit.Message))
+	}
+
+	return github.NormalizeSignedOffBy(commitMessages)
+}
+
+func (pr PullRequest) NormalizeCoAuthorBy() []github.CoAuthor {
+	commitNodes := pr.Commits.Nodes
+	prAuthorLogin := string(pr.Author.Login)
+
+	if len(commitNodes) == 0 {
+		return []github.CoAuthor{}
+	}
+
+	authors := make([]github.CommitAuthor, 0)
+	commitMessages := make([]string, 0)
+	for _, node := range commitNodes {
+		// Convert graphql node to rest api object.
+		commitAuthor := github.CommitAuthor{}
+		commitAuthor.Name = string(node.Commit.Author.Name)
+		commitAuthor.Email = string(node.Commit.Author.Email)
+		if len(node.Commit.Author.User.Login) != 0 {
+			login := string(node.Commit.Author.User.Login)
+			commitAuthor.Login = &login
+		}
+		authors = append(authors, commitAuthor)
+
+		// Extract the commit message.
+		commitMessages = append(commitMessages, string(node.Commit.Message))
+	}
+
+	return github.NormalizeCoAuthorBy(authors, commitMessages, prAuthorLogin)
+}
+
 func (pr *PullRequest) logFields() logrus.Fields {
 	return logrus.Fields{
 		"org":    pr.Repository.Owner.Login,
@@ -2067,6 +2133,18 @@ type Commit struct {
 	Status            CommitStatus
 	OID               githubql.String `graphql:"oid"`
 	StatusCheckRollup StatusCheckRollup
+	Message           githubql.String
+	Author            Author
+}
+
+type Author struct {
+	Email githubql.String
+	Name  githubql.String
+	User  User
+}
+
+type User struct {
+	Login githubql.String
 }
 
 type CommitStatus struct {

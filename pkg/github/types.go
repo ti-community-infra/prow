@@ -207,6 +207,8 @@ const (
 	PullRequestActionAutoMergeEnabled PullRequestEventAction = "auto_merge_enabled"
 	// PullRequestActionAutoMergeDisabled means auto merge was disabled
 	PullRequestActionAutoMergeDisabled PullRequestEventAction = "auto_merge_disabled"
+	// PullRequestActionStacked means the PR was added to a stack.
+	PullRequestActionStacked PullRequestEventAction = "stacked"
 )
 
 // GenericEvent is a lightweight struct containing just Sender, Organization and Repo as
@@ -275,6 +277,23 @@ type PullRequest struct {
 	Milestone         *Milestone `json:"milestone,omitempty"`
 	Commits           int        `json:"commits"`
 	AuthorAssociation string     `json:"author_association,omitempty"`
+	// Stack is set when the pull request belongs to a stack of pull requests.
+	// The direct parent branch is still described by Base; Stack.Base points at
+	// the branch the whole stack targets (the trunk).
+	Stack *PullRequestStack `json:"stack,omitempty"`
+}
+
+// PullRequestStack describes the stack a pull request belongs to.
+// See https://docs.github.com/en/pull-requests/reference/stacked-pull-requests-apis-and-webhooks
+type PullRequestStack struct {
+	ID       int64 `json:"id"`
+	Number   int   `json:"number"`
+	Size     int   `json:"size"`
+	Position int   `json:"position"`
+	Base     struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"base"`
 }
 
 // PullRequestBranch contains information about a particular branch in a PR.

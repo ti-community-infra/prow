@@ -185,3 +185,12 @@ func TestHook(t *testing.T) {
 		t.Error("Plugin not called after one second.")
 	}
 }
+
+func TestStackedPullRequestActionIsNonComment(t *testing.T) {
+	t.Parallel()
+	// The stacked action has no comment equivalent, so it must be listed as a
+	// non-comment action to avoid emitting a spurious FailedCommentCoerce log.
+	if !nonCommentPullRequestActions[github.PullRequestActionStacked] {
+		t.Error("github.PullRequestActionStacked must be present in nonCommentPullRequestActions")
+	}
+}

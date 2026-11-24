@@ -72,6 +72,7 @@ type testcase struct {
 	IssueLabels    []string
 	IgnoreOkToTest bool
 	AddedComment   string
+	Stack          *github.PullRequestStack
 	PruneHelp      bool
 }
 
@@ -224,6 +225,98 @@ func TestHandleGenericComment(t *testing.T) {
 			IsPR:        true,
 			Branch:      "other",
 			ShouldBuild: false,
+		},
+		{
+			name: "Stacked PR on a feature base: /test all matches the stack base",
+
+			Author:        "trusted-member",
+			Body:          "/test all",
+			State:         "open",
+			IsPR:          true,
+			Branch:        "other",
+			Stack:         stackWithBase("master"),
+			ShouldBuild:   true,
+			StartsExactly: "pull-job",
+			PruneHelp:     true,
+		},
+		{
+			name: "Stacked PR on a feature base: /test <job> matches the stack base",
+
+			Author:        "trusted-member",
+			Body:          "/test job",
+			State:         "open",
+			IsPR:          true,
+			Branch:        "other",
+			Stack:         stackWithBase("master"),
+			ShouldBuild:   true,
+			StartsExactly: "pull-job",
+			PruneHelp:     true,
+		},
+		{
+			name: "Stacked PR on a feature base: /retest matches the stack base",
+
+			Author: "trusted-member",
+			Body:   "/retest",
+			State:  "open",
+			IsPR:   true,
+			Branch: "other",
+			Stack:  stackWithBase("master"),
+			Presubmits: map[string][]config.Presubmit{
+				"org/repo": {
+					{
+						JobBase: config.JobBase{
+							Name: "jib",
+						},
+						Brancher: config.Brancher{Branches: []string{"master"}},
+						Reporter: config.Reporter{
+							Context: "pull-jib",
+						},
+						Trigger:      `(?m)^/test (?:.*? )?jib(?: .*?)?$`,
+						RerunCommand: `/test jib`,
+					},
+				},
+			},
+			ShouldBuild:   true,
+			StartsExactly: "pull-jib",
+			PruneHelp:     true,
+		},
+		{
+			name: "Non-stacked PR on a feature base: /retest does not match the trunk branch",
+
+			Author: "trusted-member",
+			Body:   "/retest",
+			State:  "open",
+			IsPR:   true,
+			Branch: "other",
+			Presubmits: map[string][]config.Presubmit{
+				"org/repo": {
+					{
+						JobBase: config.JobBase{
+							Name: "jib",
+						},
+						Brancher: config.Brancher{Branches: []string{"master"}},
+						Reporter: config.Reporter{
+							Context: "pull-jib",
+						},
+						Trigger:      `(?m)^/test (?:.*? )?jib(?: .*?)?$`,
+						RerunCommand: `/test jib`,
+					},
+				},
+			},
+			ShouldBuild: false,
+			PruneHelp:   true,
+		},
+		{
+			name: "Stacked PR on a feature base: help lists jobs matching the stack base",
+
+			Author: "trusted-member",
+			Body:   "/test ?",
+			State:  "open",
+			IsPR:   true,
+			Branch: "other",
+			Stack:  stackWithBase("master"),
+
+			AddedComment: helpComment + helpTestAllWithJobsComment,
 		},
 		{
 			name: "Retest with one running and one failed",
@@ -1529,6 +1622,7 @@ func TestHandleGenericComment(t *testing.T) {
 							Name:  "repo",
 						},
 					},
+					Stack: tc.Stack,
 				},
 			}
 			g.IssueLabelsExisting = tc.IssueLabels

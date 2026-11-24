@@ -35,6 +35,11 @@ import (
 const (
 	pluginName            = "welcome"
 	defaultWelcomeMessage = "Welcome @{{.AuthorLogin}}! It looks like this is your first PR to {{.Org}}/{{.Repo}} 🎉"
+
+	// ~~~ hacked parts compared with upstream Prow project.
+	defaultIssueWelcomeMessage = "Welcome @{{.AuthorLogin}}! It looks like this is your first issue to {{.Org}}/{{.Repo}} 🎉"
+	firstTimeContributorLabel  = "first-time-contributor"
+	contributionLabel          = "contribution"
 )
 
 // PRInfo contains info used provided to the welcome message template
@@ -47,6 +52,9 @@ type PRInfo struct {
 
 func init() {
 	plugins.RegisterPullRequestHandler(pluginName, handlePullRequest, helpProvider)
+
+	// ~~~ hacked parts compared with upstream Prow project.
+	plugins.RegisterIssueHandler(pluginName, handleIssue, helpProvider)
 }
 
 func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
@@ -73,7 +81,7 @@ func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) 
 		logrus.WithError(err).Warnf("cannot generate comments for %s plugin", pluginName)
 	}
 	return &pluginhelp.PluginHelp{
-			Description: "The welcome plugin greets incoming PRs with a welcoming message.",
+			Description: "The welcome plugin greets incoming PRs and issues with a welcoming message, and adds labels to clarify the contribution.",
 			Config:      welcomeConfig,
 			Snippet:     yamlSnippet,
 		},
@@ -86,6 +94,9 @@ type githubClient interface {
 	IsCollaborator(org, repo, user string) (bool, error)
 	IsMember(org, user string) (bool, error)
 	BotUserChecker() (func(candidate string) bool, error)
+
+	// hacked parts compared with upstream Prow project.
+	AddLabel(org, repo string, number int, label string) error
 }
 
 type client struct {
@@ -129,6 +140,16 @@ func handlePR(c client, t plugins.Trigger, pre github.PullRequestEvent, welcomeT
 	if err != nil {
 		return fmt.Errorf("check if user %s is trusted: %w", user, err)
 	}
+
+	// ~~~ hacked parts compared with upstream Prow project.
+	if !trustedResponse.IsTrusted {
+		log.Debug("User is not trusted. Add contribution label on the PR")
+		err := c.GitHubClient.AddLabel(org, repo, pullRequestNumber, contributionLabel)
+		if err != nil {
+			return fmt.Errorf("add label to PR %d: %w", pullRequestNumber, err)
+		}
+	}
+
 	if !alwaysPost && trustedResponse.IsTrusted {
 		log.Debug("User is trusted. Skipping their welcome message")
 		return nil
@@ -141,8 +162,19 @@ func handlePR(c client, t plugins.Trigger, pre github.PullRequestEvent, welcomeT
 		return err
 	}
 
+	isFirstPR := len(issues) == 0 || len(issues) == 1 && issues[0].Number == pre.Number
+
+	// ~~~ hacked parts compared with upstream Prow project.
+	// if it's the first PR of the contributor, add first time contributor label on it.
+	if !trustedResponse.IsTrusted && isFirstPR {
+		log.Debug("Adding first-time-contributor label, it's the first PR in the repo")
+		if err := c.GitHubClient.AddLabel(org, repo, pullRequestNumber, firstTimeContributorLabel); err != nil {
+			return err
+		}
+	}
+
 	// if there are no results, or if configured to greet any PR - post the welcome comment
-	if alwaysPost || len(issues) == 0 || len(issues) == 1 && issues[0].Number == pre.Number {
+	if alwaysPost || isFirstPR {
 		// load the template, and run it over the PR info
 		parsedTemplate, err := template.New("welcome").Parse(welcomeTemplate)
 		if err != nil {
@@ -161,6 +193,95 @@ func handlePR(c client, t plugins.Trigger, pre github.PullRequestEvent, welcomeT
 
 		log.Debug("Posting a welcome message for pull request")
 		return c.GitHubClient.CreateComment(org, repo, pullRequestNumber, msgBuffer.String())
+	} else {
+		log.WithField("issues_count", len(issues)).Debug("Ignoring PR, as user already has previous contributions")
+	}
+
+	return nil
+}
+
+// ~~~ hacked parts compared with upstream Prow project.
+func handleIssue(pc plugins.Agent, issue github.IssueEvent) error {
+	t := pc.PluginConfig.TriggerFor(issue.Repo.Owner.Login, issue.Repo.Name)
+	c := getClient(pc)
+	options := optionsForRepo(pc.PluginConfig, issue.Repo.Owner.Login, issue.Repo.Name)
+	if options == nil {
+		return nil
+	}
+
+	// Only consider newly opened Issues
+	if issue.Action != github.IssueActionOpened {
+		return nil
+	}
+
+	org := issue.Repo.Owner.Login
+	repo := issue.Repo.Name
+	user := issue.Issue.User.Login
+	issueNumber := issue.Issue.Number
+
+	log := c.Logger.WithFields(logrus.Fields{"org": org, "repo": repo, "user": user, "number": issueNumber})
+
+	// ignore bots, we can't query their issues
+	if issue.Issue.User.Type != github.UserTypeUser {
+		log.Debug("Ignoring bot user, as querying their issues is not possible")
+		return nil
+	}
+
+	trustedResponse, err := trigger.TrustedUser(c.GitHubClient, t.OnlyOrgMembers, t.TrustedApps, t.TrustedOrg, user, org, repo)
+	if err != nil {
+		return fmt.Errorf("check if user %s is trusted: %w", user, err)
+	}
+
+	if !trustedResponse.IsTrusted {
+		log.Debug("User is not trusted. Add contribution label on the issue")
+		err := c.GitHubClient.AddLabel(org, repo, issueNumber, contributionLabel)
+		if err != nil {
+			return fmt.Errorf("add label to issue %d: %w", issueNumber, err)
+		}
+	}
+
+	if !options.AlwaysPost && trustedResponse.IsTrusted {
+		log.Debug("User is trusted. Skipping their welcome message")
+		return nil
+	}
+
+	// search for PRs from the author in this repo
+	query := fmt.Sprintf("is:issue repo:%s/%s author:%s", org, repo, user)
+	issues, err := c.GitHubClient.FindIssuesWithOrg(org, query, "", false)
+	if err != nil {
+		return err
+	}
+
+	isFirstIssue := len(issues) == 0 || len(issues) == 1 && issues[0].Number == issue.Issue.Number
+
+	// if it's the first issue of the contributor, add first time contributor label on it.
+	if !trustedResponse.IsTrusted && isFirstIssue {
+		log.Debug("Adding first-time-contributor label, it's the first issue in the repo")
+		if err := c.GitHubClient.AddLabel(org, repo, issueNumber, "first-time-contributor"); err != nil {
+			return err
+		}
+	}
+
+	// if there are no results, or if configured to greet any issue - post the welcome comment
+	if options.AlwaysPost || isFirstIssue {
+		// load the template, and run it over the PR info
+		parsedTemplate, err := template.New("welcome").Parse(defaultIssueWelcomeMessage)
+		if err != nil {
+			return err
+		}
+		var msgBuffer bytes.Buffer
+		err = parsedTemplate.Execute(&msgBuffer, PRInfo{
+			Org:         org,
+			Repo:        repo,
+			AuthorLogin: user,
+			AuthorName:  issue.Issue.User.Name,
+		})
+		if err != nil {
+			return err
+		}
+
+		log.Debug("Posting a welcome message for issue")
+		return c.GitHubClient.CreateComment(org, repo, issueNumber, msgBuffer.String())
 	} else {
 		log.WithField("issues_count", len(issues)).Debug("Ignoring PR, as user already has previous contributions")
 	}

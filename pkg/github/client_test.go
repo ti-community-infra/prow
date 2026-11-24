@@ -389,11 +389,15 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 		headSHA = "123abc"
 	)
 	var (
-		failedRun       = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "failure"}
-		successfulRun   = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "success"}
-		secondFailedRun = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "failure"}
-		cancelledRun    = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "cancelled"}
-		skippedRun      = WorkflowRun{HeadSha: headSHA, Status: "completed", Conclusion: "skipped"}
+		failedRun            = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "failure"}
+		successfulRun        = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "success"}
+		secondFailedRun      = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "failure"}
+		cancelledRun         = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "cancelled"}
+		skippedRun           = WorkflowRun{HeadSha: headSHA, Event: "pull_request", Status: "completed", Conclusion: "skipped"}
+		pullRequestTargetRun = WorkflowRun{HeadSha: headSHA, Event: "pull_request_target", Status: "completed", Conclusion: "failure"}
+		workflowCallRun      = WorkflowRun{HeadSha: headSHA, Event: "workflow_call", Status: "completed", Conclusion: "failure"}
+		pushFailedRun        = WorkflowRun{HeadSha: headSHA, Event: "push", Status: "completed", Conclusion: "failure"}
+		workflowDispatchRun  = WorkflowRun{HeadSha: headSHA, Event: "workflow_dispatch", Status: "completed", Conclusion: "failure"}
 	)
 	testCases := []struct {
 		name string
@@ -430,6 +434,27 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 			},
 			expectedRuns: []WorkflowRun{cancelledRun},
 		},
+		{
+			name: "supported non pull_request events are included",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pullRequestTargetRun, workflowCallRun},
+			},
+			expectedRuns: []WorkflowRun{pullRequestTargetRun, workflowCallRun},
+		},
+		{
+			name: "unsupported events are ignored",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pushFailedRun, workflowDispatchRun},
+			},
+			expectedRuns: nil,
+		},
+		{
+			name: "only supported events are returned",
+			queryResponse: WorkflowRuns{
+				WorkflowRuns: []WorkflowRun{pushFailedRun, failedRun, workflowDispatchRun, pullRequestTargetRun},
+			},
+			expectedRuns: []WorkflowRun{failedRun, pullRequestTargetRun},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -448,9 +473,10 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 				if query.Get("head_sha") != headSHA {
 					t.Errorf("Expected query parameter head_sha=%s, got %s", headSHA, query.Get("head_sha"))
 				}
-				expectedEvent := "pull_request OR pull_request_target OR workflow_call"
-				if query.Get("event") != "pull_request OR pull_request_target OR workflow_call" {
-					t.Errorf("Expected query parameter event=%q, got %q", expectedEvent, query.Get("event"))
+				// The GitHub API does not support filtering by multiple events,
+				// so the event filter must be applied client-side.
+				if query.Get("event") != "" {
+					t.Errorf("Did not expect query parameter event, got %q", query.Get("event"))
 				}
 				if query.Get("branch") != branch {
 					t.Errorf("Expected query parameter branch=%s, got %s", branch, query.Get("branch"))
@@ -479,7 +505,7 @@ func TestGetFailedActionRunsByHeadBranch(t *testing.T) {
 			for _, run := range runs {
 				found := false
 				for _, expectedRun := range tc.expectedRuns {
-					if run.Status == expectedRun.Status && run.Conclusion == expectedRun.Conclusion && run.HeadSha == expectedRun.HeadSha {
+					if run.Status == expectedRun.Status && run.Conclusion == expectedRun.Conclusion && run.HeadSha == expectedRun.HeadSha && run.Event == expectedRun.Event {
 						found = true
 					}
 				}
@@ -4503,6 +4529,357 @@ func TestAllowInDryRunOnlyForTokenAcquisition(t *testing.T) {
 			// Document what would happen if someone mistakenly used allowInDryRun=true
 			// (This part doesn't actually make the call, just documents the constraint)
 			t.Logf("IMPORTANT: %s must NOT use allowInDryRun=true because: %s", tc.name, tc.reason)
+		})
+	}
+}
+
+func TestApproveWorkflowRun(t *testing.T) {
+	testCases := []struct {
+		name          string
+		response      string
+		statusCode    int
+		org           string
+		repo          string
+		id            int
+		expectedError bool
+	}{
+		{
+			name:          "successful approval",
+			statusCode:    http.StatusCreated,
+			org:           "org",
+			repo:          "repo",
+			id:            123,
+			expectedError: false,
+		},
+		{
+			name:          "api error forbidden",
+			response:      `{"message": "Forbidden"}`,
+			statusCode:    http.StatusForbidden,
+			org:           "org",
+			repo:          "repo",
+			id:            123,
+			expectedError: true,
+		},
+		{
+			name:          "api error not found",
+			response:      `{"message": "Not Found"}`,
+			statusCode:    http.StatusNotFound,
+			org:           "org",
+			repo:          "repo",
+			id:            123,
+			expectedError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRT := func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodPost {
+					return nil, fmt.Errorf("expected POST request, got %s", req.Method)
+				}
+				expectedPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/approve", tc.org, tc.repo, tc.id)
+				if req.URL.Path != expectedPath {
+					return nil, fmt.Errorf("expected path %s, got %s", expectedPath, req.URL.Path)
+				}
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Body:       io.NopCloser(strings.NewReader(tc.response)),
+				}, nil
+			}
+			c := client{
+				logger: logrus.WithField("client", "github"),
+				delegate: &delegate{
+					client:        &http.Client{Transport: testRoundTripper{rt: fakeRT}},
+					bases:         []string{"http://localhost"},
+					time:          &standardTime{},
+					max404Retries: DefaultMax404Retries,
+					maxSleepTime:  DefaultMaxSleepTime,
+					initialDelay:  time.Millisecond, // Speed up retries for tests
+					maxRetries:    1,
+				},
+			}
+			err := c.ApproveWorkflowRun(tc.org, tc.repo, tc.id)
+			if tc.expectedError && err == nil {
+				t.Errorf("Expected an error, but got none")
+			}
+			if !tc.expectedError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+const stackedPRMergeUnsupportedBody = `{"message":"Merging stacked PRs via this endpoint is not supported. Use the asynchronous merge endpoint instead.","documentation_url":"https://docs.github.com/rest/pulls/pulls#merge-a-pull-request-asynchronously"}`
+
+type fakeHTTPResponse struct {
+	code int
+	body string
+}
+
+// mergeTestServer serves canned responses keyed by "METHOD path", consuming one
+// response per call and failing the test on unexpected requests.
+type mergeTestServer struct {
+	t         *testing.T
+	responses map[string][]fakeHTTPResponse
+	calls     map[string]int
+}
+
+func newMergeTestServer(t *testing.T, responses map[string][]fakeHTTPResponse) *mergeTestServer {
+	return &mergeTestServer{t: t, responses: responses, calls: make(map[string]int)}
+}
+
+func (s *mergeTestServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	key := r.Method + " " + r.URL.Path
+	queue, ok := s.responses[key]
+	if !ok {
+		s.t.Errorf("unexpected request %s", key)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+		return
+	}
+	idx := s.calls[key]
+	s.calls[key]++
+	if idx >= len(queue) {
+		s.t.Errorf("unexpected extra request %s", key)
+		http.Error(w, "too many requests", http.StatusInternalServerError)
+		return
+	}
+	resp := queue[idx]
+	w.WriteHeader(resp.code)
+	if _, err := io.WriteString(w, resp.body); err != nil {
+		s.t.Errorf("failed to write response body: %v", err)
+	}
+}
+
+func (s *mergeTestServer) callCount(method, path string) int {
+	return s.calls[method+" "+path]
+}
+
+func newMergeClient(t *testing.T, server *mergeTestServer, mode MergeMode) *client {
+	ts := httptest.NewTLSServer(server)
+	t.Cleanup(ts.Close)
+	c := getClient(ts.URL)
+	c.mergeMode = mode
+	c.max404Retries = 0
+	c.mergeAsyncPollInterval = time.Second
+	c.mergeAsyncTimeout = 3 * time.Second
+	return c
+}
+
+func errorTypeName(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+func TestMergeSynchronousPath(t *testing.T) {
+	const mergePath = "/repos/k8s/kuber/pulls/5/merge"
+	testCases := []struct {
+		name          string
+		mode          MergeMode
+		statusCode    int
+		body          string
+		expectedError string
+	}{
+		{
+			name:       "auto: successful merge",
+			mode:       MergeModeAuto,
+			statusCode: http.StatusOK,
+			body:       `{}`,
+		},
+		{
+			name:       "sync: successful merge",
+			mode:       MergeModeSync,
+			statusCode: http.StatusOK,
+			body:       `{}`,
+		},
+		{
+			name:          "auto: base branch modified",
+			mode:          MergeModeAuto,
+			statusCode:    http.StatusMethodNotAllowed,
+			body:          `{"message":"Base branch was modified. Review and try the merge again."}`,
+			expectedError: "github.UnmergablePRBaseChangedError",
+		},
+		{
+			name:          "auto: unauthorized to push",
+			mode:          MergeModeAuto,
+			statusCode:    http.StatusMethodNotAllowed,
+			body:          `{"message":"You're not authorized to push to this branch."}`,
+			expectedError: "github.UnauthorizedToPushError",
+		},
+		{
+			name:          "auto: merge commits forbidden",
+			mode:          MergeModeAuto,
+			statusCode:    http.StatusMethodNotAllowed,
+			body:          `{"message":"Merge commits are not allowed on this repository."}`,
+			expectedError: "github.MergeCommitsForbiddenError",
+		},
+		{
+			name:          "auto: other 405 is unmergable",
+			mode:          MergeModeAuto,
+			statusCode:    http.StatusMethodNotAllowed,
+			body:          `{"message":"Pull Request is not mergeable"}`,
+			expectedError: "github.UnmergablePRError",
+		},
+		{
+			name:          "auto: modified head",
+			mode:          MergeModeAuto,
+			statusCode:    http.StatusConflict,
+			body:          `{"message":"Head branch was modified. Review and try the merge again."}`,
+			expectedError: "github.ModifiedHeadError",
+		},
+		{
+			name:          "auto: unrelated 403 keeps the historical error",
+			mode:          MergeModeAuto,
+			statusCode:    http.StatusForbidden,
+			body:          `{"message":"Resource not accessible by integration"}`,
+			expectedError: "github.forbiddenError",
+		},
+		{
+			name:          "sync: stacked PR 403 keeps the historical error",
+			mode:          MergeModeSync,
+			statusCode:    http.StatusForbidden,
+			body:          stackedPRMergeUnsupportedBody,
+			expectedError: "github.forbiddenError",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newMergeTestServer(t, map[string][]fakeHTTPResponse{
+				http.MethodPut + " " + mergePath: {{code: tc.statusCode, body: tc.body}},
+			})
+			c := newMergeClient(t, server, tc.mode)
+			err := c.Merge("k8s", "kuber", 5, MergeDetails{})
+			if got := errorTypeName(err); got != tc.expectedError {
+				t.Errorf("expected error type %q, got %q (%v)", tc.expectedError, got, err)
+			}
+			if calls := server.callCount(http.MethodPut, "/repos/k8s/kuber/pulls/5/merge-async"); calls != 0 {
+				t.Errorf("expected no asynchronous merge request, got %d", calls)
+			}
+		})
+	}
+}
+
+func TestMergeAsyncForStackedPR(t *testing.T) {
+	const (
+		mergePath      = "/repos/k8s/kuber/pulls/5/merge"
+		mergeAsyncPath = "/repos/k8s/kuber/pulls/5/merge-async"
+		resultPath     = "/repos/k8s/kuber/pulls/5/merge-async/uuid-1"
+	)
+	testCases := []struct {
+		name          string
+		mode          MergeMode
+		asyncResponse fakeHTTPResponse
+		results       []fakeHTTPResponse
+		expectedError string
+	}{
+		{
+			name:          "accepted then merged",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusAccepted, body: `{"status":"pending","details":{"uuid":"uuid-1"}}`},
+			results: []fakeHTTPResponse{
+				{code: http.StatusOK, body: `{"status":"pending","details":{"uuid":"uuid-1"}}`},
+				{code: http.StatusOK, body: `{"status":"merged","details":{"uuid":"uuid-1","sha":"deadbeef"}}`},
+			},
+		},
+		{
+			name:          "async mode skips the synchronous endpoint",
+			mode:          MergeModeAsync,
+			asyncResponse: fakeHTTPResponse{code: http.StatusAccepted, body: `{"status":"pending","details":{"uuid":"uuid-1"}}`},
+			results: []fakeHTTPResponse{
+				{code: http.StatusOK, body: `{"status":"merged"}`},
+			},
+		},
+		{
+			name:          "already merged",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusOK, body: `{"status":"merged","details":{"sha":"deadbeef"}}`},
+		},
+		{
+			name:          "enqueued is treated as success",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusOK, body: `{"status":"enqueued","details":{"merge_action":"merge_queue"}}`},
+		},
+		{
+			name:          "existing request uuid is reused",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusConflict, body: `{"status":"pending","details":{"uuid":"uuid-1"}}`},
+			results: []fakeHTTPResponse{
+				{code: http.StatusOK, body: `{"status":"merged"}`},
+			},
+		},
+		{
+			name:          "failed maps to unmergable",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusAccepted, body: `{"status":"pending","details":{"uuid":"uuid-1"}}`},
+			results: []fakeHTTPResponse{
+				{code: http.StatusOK, body: `{"status":"failed","details":{"message":"merge conflict"}}`},
+			},
+			expectedError: "github.UnmergablePRError",
+		},
+		{
+			name:          "bad request maps to unmergable",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusBadRequest, body: `{"message":"Pull request is closed"}`},
+			expectedError: "github.UnmergablePRError",
+		},
+		{
+			name:          "missing uuid is an error",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusAccepted, body: `{"status":"pending"}`},
+			expectedError: "*errors.errorString",
+		},
+		{
+			name:          "expired result is an error",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusAccepted, body: `{"status":"pending","details":{"uuid":"uuid-1"}}`},
+			results: []fakeHTTPResponse{
+				{code: http.StatusNotFound, body: `{"message":"Not Found"}`},
+			},
+			expectedError: "*errors.errorString",
+		},
+		{
+			name:          "pending until the bounded timeout",
+			mode:          MergeModeAuto,
+			asyncResponse: fakeHTTPResponse{code: http.StatusAccepted, body: `{"status":"pending","details":{"uuid":"uuid-1"}}`},
+			results: []fakeHTTPResponse{
+				{code: http.StatusOK, body: `{"status":"pending"}`},
+				{code: http.StatusOK, body: `{"status":"pending"}`},
+				{code: http.StatusOK, body: `{"status":"pending"}`},
+				{code: http.StatusOK, body: `{"status":"pending"}`},
+			},
+			expectedError: "*errors.errorString",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := map[string][]fakeHTTPResponse{
+				http.MethodPut + " " + mergePath:      {{code: http.StatusForbidden, body: stackedPRMergeUnsupportedBody}},
+				http.MethodPut + " " + mergeAsyncPath: {tc.asyncResponse},
+			}
+			if len(tc.results) > 0 {
+				responses[http.MethodGet+" "+resultPath] = tc.results
+			}
+			server := newMergeTestServer(t, responses)
+			c := newMergeClient(t, server, tc.mode)
+			err := c.Merge("k8s", "kuber", 5, MergeDetails{})
+			if got := errorTypeName(err); got != tc.expectedError {
+				t.Errorf("expected error type %q, got %q (%v)", tc.expectedError, got, err)
+			}
+
+			syncCalls := server.callCount(http.MethodPut, mergePath)
+			if tc.mode == MergeModeAsync {
+				if syncCalls != 0 {
+					t.Errorf("expected no synchronous merge request in async mode, got %d", syncCalls)
+				}
+			} else if syncCalls != 1 {
+				t.Errorf("expected exactly one synchronous merge request, got %d", syncCalls)
+			}
+			if calls := server.callCount(http.MethodPut, mergeAsyncPath); calls != 1 {
+				t.Errorf("expected exactly one asynchronous merge request, got %d", calls)
+			}
 		})
 	}
 }

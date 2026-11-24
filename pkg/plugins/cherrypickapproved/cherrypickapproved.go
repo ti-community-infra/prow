@@ -173,19 +173,6 @@ func (h *handler) handle(log *logrus.Entry, gc plugins.PluginGitHubClient, e git
 		return nil
 	}
 
-	// Check the PR state to not have failed tests
-	combinedStatus, err := h.GetCombinedStatus(gc, org, repo, e.PullRequest.Head.SHA)
-	if err != nil {
-		return fmt.Errorf("get combined status: %w", err)
-	}
-	for _, status := range combinedStatus.Statuses {
-		state := status.State
-		if state == github.StatusError || state == github.StatusFailure {
-			log.Infof("Skipping PR %d because tests failed", prNumber)
-			return nil
-		}
-	}
-
 	// Validate the labels
 	issueLabels, err := h.GetIssueLabels(gc, org, repo, prNumber)
 	if err != nil {

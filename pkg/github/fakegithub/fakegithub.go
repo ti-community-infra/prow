@@ -1382,6 +1382,10 @@ func (f *FakeClient) GetFailedActionRunsByHeadBranch(org, repo, branchName, head
 	return []github.WorkflowRun{}, nil
 }
 
+func (f *FakeClient) ApproveWorkflowRun(org, repo string, id int) error {
+	return nil
+}
+
 func (f *FakeClient) TriggerGitHubWorkflow(org, repo string, id int) error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
