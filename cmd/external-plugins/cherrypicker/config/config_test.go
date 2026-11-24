@@ -329,6 +329,48 @@ cherry-pick:
 	}
 }
 
+func TestForkOwnerOverride(t *testing.T) {
+	cfg, err := Parse([]byte(`
+cherry-pick:
+  - repos:
+      - test-org
+    fork_owner: org-fork
+  - repos:
+      - test-org/central
+    fork_owner: ""
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defaults := testDefaults()
+	defaults.ForkOwner = "global-fork"
+
+	if got := cfg.Options("test-org", "repo", defaults).ForkOwner; got != "org-fork" {
+		t.Errorf("expected the organization override, got %q", got)
+	}
+	if got := cfg.Options("test-org", "central", defaults).ForkOwner; got != "" {
+		t.Errorf("expected the explicit empty override to disable the fork, got %q", got)
+	}
+	if got := cfg.Options("other-org", "repo", defaults).ForkOwner; got != "global-fork" {
+		t.Errorf("expected the flag default, got %q", got)
+	}
+}
+
+func TestValidateRejectsRepositoryAsForkOwner(t *testing.T) {
+	cfg, err := Parse([]byte(`
+cherry-pick:
+  - repos:
+      - test-org/repo
+    fork_owner: bot/repo
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected a validation error for a repository-valued fork_owner")
+	}
+}
+
 func TestAgentLoadAndReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "external_plugins_config.yaml")

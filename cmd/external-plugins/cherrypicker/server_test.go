@@ -383,13 +383,12 @@ func testCherryPickIC(clients localgit.Clients, t *testing.T) {
 			botUser:           botUser,
 			gc:                c,
 			pusher:            fakePusher{},
-			forkOwner:         "ci-robot",
 			installationToken: func(string) (string, error) { return "token", nil },
 			ghc:               ghc,
 			tokenGenerator:    getSecret,
 			log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-			defaults: cherryconfig.Defaults{UseProwAssignments: true},
+			defaults: cherryconfig.Defaults{ForkOwner: "ci-robot", UseProwAssignments: true},
 		}
 
 		if _, err := s.handleIssueComment(logrus.NewEntry(logrus.StandardLogger()), ic); err != nil {
@@ -458,10 +457,10 @@ func testCherryPickIC(clients localgit.Clients, t *testing.T) {
 		}
 
 		s := &Server{
+			defaults:          cherryconfig.Defaults{ForkOwner: "ci-robot"},
 			botUser:           botUser,
 			gc:                c,
 			pusher:            fakePusher{},
-			forkOwner:         "ci-robot",
 			installationToken: func(string) (string, error) { return "token", nil },
 			ghc:               ghc,
 			tokenGenerator:    getSecret,
@@ -622,13 +621,12 @@ func testCherryPickPR(clients localgit.Clients, t *testing.T) {
 		botUser:           botUser,
 		gc:                c,
 		pusher:            fakePusher{},
-		forkOwner:         "ci-robot",
 		installationToken: func(string) (string, error) { return "token", nil },
 		ghc:               ghc,
 		tokenGenerator:    getSecret,
 		log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-		defaults: cherryconfig.Defaults{},
+		defaults: cherryconfig.Defaults{ForkOwner: "ci-robot"},
 	}
 
 	if _, err := s.handlePullRequest(logrus.NewEntry(logrus.StandardLogger()), pr); err != nil {
@@ -759,12 +757,11 @@ func testCherryPickPRAfterMerge(clients localgit.Clients, t *testing.T) {
 		ghc:               ghc,
 		botUser:           &github.UserData{Login: "ci-robot", Email: "ci-robot@users.noreply.github.com"},
 		pusher:            fakePusher{},
-		forkOwner:         "ci-robot",
 		installationToken: func(string) (string, error) { return "token", nil },
 		tokenGenerator:    func() []byte { return []byte("sha=abcdefg") },
 		log:               logger.WithField("client", "cherrypicker"),
 
-		defaults: cherryconfig.Defaults{},
+		defaults: cherryconfig.Defaults{ForkOwner: "ci-robot"},
 	}
 
 	if _, err := s.handleIssueComment(logger, ic); err != nil {
@@ -851,13 +848,12 @@ func testCherryPickOfCherryPickPR(clients localgit.Clients, t *testing.T) {
 		botUser:           botUser,
 		gc:                c,
 		pusher:            fakePusher{},
-		forkOwner:         "ci-robot",
 		installationToken: func(string) (string, error) { return "token", nil },
 		ghc:               ghc,
 		tokenGenerator:    getSecret,
 		log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-		defaults: cherryconfig.Defaults{},
+		defaults: cherryconfig.Defaults{ForkOwner: "ci-robot"},
 	}
 
 	// Cherry pick master -> release-1.8
@@ -1039,13 +1035,13 @@ func testCherryPickPRWithLabels(clients localgit.Clients, t *testing.T) {
 						botUser:           botUser,
 						gc:                c,
 						pusher:            fakePusher{},
-						forkOwner:         "ci-robot",
 						installationToken: func(string) (string, error) { return "token", nil },
 						ghc:               ghc,
 						tokenGenerator:    getSecret,
 						log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
 						defaults: cherryconfig.Defaults{
+							ForkOwner:   "ci-robot",
 							Labels:      []string{"cla: yes"},
 							LabelPrefix: tc.labelPrefix,
 						},
@@ -1262,13 +1258,12 @@ func testCherryPickPRAssignments(clients localgit.Clients, t *testing.T) {
 			botUser:           botUser,
 			gc:                c,
 			pusher:            fakePusher{},
-			forkOwner:         "ci-robot",
 			installationToken: func(string) (string, error) { return "token", nil },
 			ghc:               ghc,
 			tokenGenerator:    getSecret,
 			log:               logrus.StandardLogger().WithField("client", "cherrypicker"),
 
-			defaults: cherryconfig.Defaults{UseProwAssignments: prowAssignments},
+			defaults: cherryconfig.Defaults{ForkOwner: "ci-robot", UseProwAssignments: prowAssignments},
 		}
 
 		if _, err := s.handleIssueComment(logrus.NewEntry(logrus.StandardLogger()), ic); err != nil {
@@ -1291,11 +1286,11 @@ func TestHandleLocks(t *testing.T) {
 	t.Parallel()
 	_, c := makeFakeRepoWithCommit(localgit.NewV2, t)
 	s := &Server{
-		ghc:     &threadUnsafeFGHC{fghc: &fghc{}},
-		botUser: &github.UserData{},
-		gc:      c,
+		defaults: cherryconfig.Defaults{ForkOwner: "bot-org"},
+		ghc:      &threadUnsafeFGHC{fghc: &fghc{}},
+		botUser:  &github.UserData{},
+		gc:       c,
 
-		forkOwner:         "bot-org",
 		installationToken: func(string) (string, error) { return "token", nil },
 	}
 

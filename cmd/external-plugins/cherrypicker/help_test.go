@@ -63,6 +63,7 @@ cherry-pick:
 		"label_prefix: <code>needs-cherry-pick-</code>",
 		"allow_all: <code>true</code>",
 		"on_conflict: <code>fail</code>",
+		"fork_owner: <code></code>",
 	} {
 		if !strings.Contains(config, want) {
 			t.Errorf("expected help config to contain %q, got:\n%s", want, config)

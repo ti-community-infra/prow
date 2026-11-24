@@ -236,7 +236,7 @@ func TestInviteCollaborator(t *testing.T) {
 
 	t.Run("pull request is not from the fork", func(t *testing.T) {
 		ghc := &fghc{pr: forkPR("base-org")}
-		s := &Server{ghc: ghc, forkOwner: "bot-org", githubURL: "https://github.com"}
+		s := &Server{ghc: ghc, defaults: cherryconfig.Defaults{ForkOwner: "bot-org"}, githubURL: "https://github.com"}
 		if err := s.inviteCollaborator(logger, inviteEvent("/cherry-pick-invite")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -250,7 +250,7 @@ func TestInviteCollaborator(t *testing.T) {
 			pr:            forkPR("bot-org"),
 			collaborators: []github.User{{Login: "wiseguy"}},
 		}
-		s := &Server{ghc: ghc, forkOwner: "bot-org", githubURL: "https://github.com"}
+		s := &Server{ghc: ghc, defaults: cherryconfig.Defaults{ForkOwner: "bot-org"}, githubURL: "https://github.com"}
 		if err := s.inviteCollaborator(logger, inviteEvent("/cherry-pick-invite")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -266,7 +266,7 @@ func TestInviteCollaborator(t *testing.T) {
 				{Invitee: &github.User{Login: "wiseguy"}},
 			},
 		}
-		s := &Server{ghc: ghc, forkOwner: "bot-org", githubURL: "https://github.com"}
+		s := &Server{ghc: ghc, defaults: cherryconfig.Defaults{ForkOwner: "bot-org"}, githubURL: "https://github.com"}
 		if err := s.inviteCollaborator(logger, inviteEvent("/cherry-pick-invite")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -280,7 +280,7 @@ func TestInviteCollaborator(t *testing.T) {
 
 	t.Run("not an org member", func(t *testing.T) {
 		ghc := &fghc{pr: forkPR("bot-org"), isMember: false}
-		s := &Server{ghc: ghc, forkOwner: "bot-org", githubURL: "https://github.com"}
+		s := &Server{ghc: ghc, defaults: cherryconfig.Defaults{ForkOwner: "bot-org"}, githubURL: "https://github.com"}
 		if err := s.inviteCollaborator(logger, inviteEvent("/cherry-pick-invite")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -295,7 +295,7 @@ func TestInviteCollaborator(t *testing.T) {
 			isMember:           true,
 			addCollaboratorErr: errors.New("administration permission required"),
 		}
-		s := &Server{ghc: ghc, forkOwner: "bot-org", githubURL: "https://github.com"}
+		s := &Server{ghc: ghc, defaults: cherryconfig.Defaults{ForkOwner: "bot-org"}, githubURL: "https://github.com"}
 		if err := s.inviteCollaborator(logger, inviteEvent("/cherry-pick-invite")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -306,7 +306,7 @@ func TestInviteCollaborator(t *testing.T) {
 
 	t.Run("invited", func(t *testing.T) {
 		ghc := &fghc{pr: forkPR("bot-org"), isMember: true}
-		s := &Server{ghc: ghc, forkOwner: "bot-org", githubURL: "https://github.com"}
+		s := &Server{ghc: ghc, defaults: cherryconfig.Defaults{ForkOwner: "bot-org"}, githubURL: "https://github.com"}
 		if err := s.inviteCollaborator(logger, inviteEvent("/cherry-pick-invite")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

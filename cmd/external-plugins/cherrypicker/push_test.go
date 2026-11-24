@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/sirupsen/logrus"
+	cherryconfig "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/config"
 	"sigs.k8s.io/prow/pkg/git/v2"
 )
 
@@ -66,7 +67,7 @@ func TestPushTargets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Server{
 				ghc:       &fghc{repoErrors: tc.repoErrors},
-				forkOwner: tc.forkOwner,
+				defaults:  cherryconfig.Defaults{ForkOwner: tc.forkOwner},
 				githubURL: "https://github.com",
 				log:       logrus.WithField("test", t.Name()),
 				installationToken: func(string) (string, error) {
@@ -92,10 +93,42 @@ func TestPushTargets(t *testing.T) {
 	}
 }
 
+func TestPushTargetsPerRepositoryForkOwner(t *testing.T) {
+	agent := newAgent(t, `
+cherry-pick:
+  - repos:
+      - base-org/central
+    fork_owner: ""
+  - repos:
+      - base-org/other-fork
+    fork_owner: other-fork
+`)
+	s := &Server{
+		ghc:         &fghc{},
+		configAgent: agent,
+		defaults:    cherryconfig.Defaults{ForkOwner: "bot-org"},
+		githubURL:   "https://github.com",
+		log:         logrus.WithField("test", t.Name()),
+		installationToken: func(string) (string, error) {
+			return "token", nil
+		},
+	}
+
+	if targets := s.pushTargets(s.log, "base-org", "repo"); len(targets) != 2 || targets[0].org != "bot-org" {
+		t.Fatalf("expected the flag fork by default, got %+v", targets)
+	}
+	if targets := s.pushTargets(s.log, "base-org", "central"); len(targets) != 1 || targets[0].org != "base-org" {
+		t.Fatalf("expected the repository override to push into the base repo, got %+v", targets)
+	}
+	if targets := s.pushTargets(s.log, "base-org", "other-fork"); len(targets) != 2 || targets[0].org != "other-fork" {
+		t.Fatalf("expected the repository fork override, got %+v", targets)
+	}
+}
+
 func TestPushTargetsWithoutTokenSource(t *testing.T) {
 	s := &Server{
 		ghc:       &fghc{},
-		forkOwner: "bot-org",
+		defaults:  cherryconfig.Defaults{ForkOwner: "bot-org"},
 		githubURL: "https://github.com",
 		log:       logrus.WithField("test", t.Name()),
 	}
