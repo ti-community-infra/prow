@@ -64,6 +64,7 @@ type Defaults struct {
 	AllowAll           bool
 	UseProwAssignments bool
 	Labels             []string
+	ForkOwner          string
 	OnConflict         OnConflict
 }
 
@@ -73,6 +74,7 @@ type Options struct {
 	AllowAll                           bool
 	UseProwAssignments                 bool
 	Labels                             []string
+	ForkOwner                          string
 	PickedLabelPrefix                  string
 	ExcludeLabels                      []string
 	OnConflict                         OnConflict
@@ -101,6 +103,9 @@ type RepoConfig struct {
 	UseProwAssignments *bool `json:"use_prow_assignments,omitempty"`
 	// Labels are added to every cherry-pick PR.
 	Labels []string `json:"labels,omitempty"`
+	// ForkOwner overrides the process-wide fork owner. Empty pushes the
+	// cherry-pick branch into the base repository.
+	ForkOwner *string `json:"fork_owner,omitempty"`
 	// PickedLabelPrefix is added to the cherry-pick PR as `<prefix><target>`;
 	// empty disables it.
 	PickedLabelPrefix *string `json:"picked_label_prefix,omitempty"`
@@ -177,6 +182,9 @@ func (c *Config) Validate() error {
 			}
 			seen[repo] = i
 		}
+		if entry.ForkOwner != nil && strings.Contains(*entry.ForkOwner, "/") {
+			return fmt.Errorf("entry %d: invalid fork_owner %q: must be a user or organization, not a repository", i, *entry.ForkOwner)
+		}
 		if entry.OnConflict != nil {
 			switch *entry.OnConflict {
 			case OnConflictIssue, OnConflictHold, OnConflictFail:
@@ -209,6 +217,7 @@ func (c *Config) Options(org, repo string, defaults Defaults) Options {
 		AllowAll:           defaults.AllowAll,
 		UseProwAssignments: defaults.UseProwAssignments,
 		Labels:             append([]string(nil), defaults.Labels...),
+		ForkOwner:          defaults.ForkOwner,
 		OnConflict:         defaults.OnConflict,
 	}
 	if c == nil {
@@ -247,6 +256,9 @@ func (c *RepoConfig) apply(out *Options) {
 	}
 	if c.Labels != nil {
 		out.Labels = append([]string(nil), c.Labels...)
+	}
+	if c.ForkOwner != nil {
+		out.ForkOwner = *c.ForkOwner
 	}
 	if c.PickedLabelPrefix != nil {
 		out.PickedLabelPrefix = *c.PickedLabelPrefix

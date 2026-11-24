@@ -65,6 +65,7 @@ func (o *options) defaults() cherryconfig.Defaults {
 		AllowAll:           o.allowAll,
 		UseProwAssignments: o.prowAssignments,
 		Labels:             o.labels.Strings(),
+		ForkOwner:          o.forkOwner,
 		OnConflict:         cherryconfig.OnConflict(o.onConflict),
 	}
 }
@@ -188,7 +189,6 @@ func main() {
 
 		defaults: defaults,
 
-		forkOwner:         o.forkOwner,
 		githubURL:         githubBaseURL(o.github.Host),
 		installationToken: o.github.InstallationTokenFor,
 

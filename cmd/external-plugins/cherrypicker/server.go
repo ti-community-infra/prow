@@ -114,6 +114,7 @@ func describeOptions(o cherryconfig.Options) string {
 		fmt.Sprintf("<li>allow_all: <code>%t</code></li>", o.AllowAll),
 		fmt.Sprintf("<li>use_prow_assignments: <code>%t</code></li>", o.UseProwAssignments),
 		fmt.Sprintf("<li>labels: <code>%s</code></li>", strings.Join(o.Labels, ", ")),
+		fmt.Sprintf("<li>fork_owner: <code>%s</code></li>", o.ForkOwner),
 		fmt.Sprintf("<li>picked_label_prefix: <code>%s</code></li>", o.PickedLabelPrefix),
 		fmt.Sprintf("<li>exclude_labels: <code>%s</code></li>", strings.Join(o.ExcludeLabels, ", ")),
 		fmt.Sprintf("<li>on_conflict: <code>%s</code></li>", o.OnConflict),
@@ -129,9 +130,6 @@ type Server struct {
 	botUser        *github.UserData
 	email          string
 
-	// forkOwner is the owner of the pre-created fork cherry-pick branches are
-	// pushed to. Empty means the branches are pushed into the base repository.
-	forkOwner string
 	// githubURL is the web URL of the GitHub instance, e.g. https://github.com.
 	githubURL string
 	// installationToken returns a token that can write to the given owner.
@@ -711,7 +709,7 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 			return fmt.Errorf("failed to get pullrequests for %s/%s: %w", org, repo, err)
 		}
 		for _, pr := range prs {
-			expectedHeads := sets.New(newBranch, fmt.Sprintf("%s:%s", s.forkOwner, newBranch))
+			expectedHeads := sets.New(newBranch, fmt.Sprintf("%s:%s", opts.ForkOwner, newBranch))
 			if expectedHeads.Has(pr.Head.Ref) {
 				logger.WithField("preexisting_cherrypick", pr.HTMLURL).Info("PR already has cherrypick")
 				resp := fmt.Sprintf("Looks like #%d has already been cherry picked in %s", num, pr.HTMLURL)
@@ -982,12 +980,13 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 	repo := ic.Repo.Name
 	num := ic.Issue.Number
 	user := ic.Comment.User.Login
+	forkOwner := s.options(org, repo).ForkOwner
 
 	comment := func(message string) error {
 		return s.ghc.CreateComment(org, repo, num, plugins.FormatICResponse(ic.Comment, message))
 	}
 
-	if s.forkOwner == "" {
+	if forkOwner == "" {
 		return comment(fmt.Sprintf("no invitation is needed: cherry-pick branches are created in `%s/%s`.", org, repo))
 	}
 
@@ -995,23 +994,23 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 	if err != nil {
 		return fmt.Errorf("failed to get pull request %s/%s#%d: %w", org, repo, num, err)
 	}
-	if pr.Head.Repo.Owner.Login != s.forkOwner {
-		return comment(fmt.Sprintf("no invitation is needed: this pull request was not created from the `%s` fork.", s.forkOwner))
+	if pr.Head.Repo.Owner.Login != forkOwner {
+		return comment(fmt.Sprintf("no invitation is needed: this pull request was not created from the `%s` fork.", forkOwner))
 	}
 
-	collaborators, err := s.ghc.ListCollaborators(s.forkOwner, repo)
+	collaborators, err := s.ghc.ListCollaborators(forkOwner, repo)
 	if err != nil {
-		return fmt.Errorf("failed to list collaborators of %s/%s: %w", s.forkOwner, repo, err)
+		return fmt.Errorf("failed to list collaborators of %s/%s: %w", forkOwner, repo, err)
 	}
 	for _, collaborator := range collaborators {
 		if collaborator.Login == user {
-			return comment(fmt.Sprintf("you are already a collaborator of `%s/%s`.", s.forkOwner, repo))
+			return comment(fmt.Sprintf("you are already a collaborator of `%s/%s`.", forkOwner, repo))
 		}
 	}
 
-	invitations, err := s.ghc.ListRepoInvitations(s.forkOwner, repo)
+	invitations, err := s.ghc.ListRepoInvitations(forkOwner, repo)
 	if err != nil {
-		return fmt.Errorf("failed to list invitations of %s/%s: %w", s.forkOwner, repo, err)
+		return fmt.Errorf("failed to list invitations of %s/%s: %w", forkOwner, repo, err)
 	}
 	for _, invitation := range invitations {
 		if invitation.Invitee != nil && invitation.Invitee.Login == user {
@@ -1028,14 +1027,14 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 		return comment(fmt.Sprintf("you are not a member of org `%s`, so you cannot be added to the fork.", org))
 	}
 
-	if err := s.ghc.AddCollaborator(s.forkOwner, repo, user, github.Write); err != nil {
+	if err := s.ghc.AddCollaborator(forkOwner, repo, user, github.Write); err != nil {
 		log.WithError(err).Warn("failed to add the collaborator")
-		return comment(fmt.Sprintf("failed to invite you as a collaborator of `%s/%s`: %v", s.forkOwner, repo, err))
+		return comment(fmt.Sprintf("failed to invite you as a collaborator of `%s/%s`: %v", forkOwner, repo, err))
 	}
 
 	return comment(fmt.Sprintf("Please accept the invitation, then you can push to the cherry-pick pull requests. "+
 		"Comment with `/cherry-pick-invite` if the invitation expired. %s/%s/%s/invitations",
-		s.githubURL, s.forkOwner, repo))
+		s.githubURL, forkOwner, repo))
 }
 
 // createIssue creates an issue on GitHub.
@@ -1050,11 +1049,12 @@ func (s *Server) createIssue(l logrus.FieldLogger, org, repo, title, body string
 
 func (s *Server) pushTargets(l logrus.FieldLogger, org, repo string) []pushTarget {
 	central := pushTarget{org: org, pusher: &centralPusher{}}
-	if s.forkOwner == "" || s.installationToken == nil {
+	forkOwner := s.options(org, repo).ForkOwner
+	if forkOwner == "" || s.installationToken == nil {
 		return []pushTarget{central}
 	}
 
-	if _, err := s.ghc.GetRepo(s.forkOwner, repo); err != nil {
+	if _, err := s.ghc.GetRepo(forkOwner, repo); err != nil {
 		l.WithError(err).WithFields(logrus.Fields{
 			github.OrgLogField:  org,
 			github.RepoLogField: repo,
@@ -1063,9 +1063,9 @@ func (s *Server) pushTargets(l logrus.FieldLogger, org, repo string) []pushTarge
 	}
 
 	fork := pushTarget{
-		org: s.forkOwner,
+		org: forkOwner,
 		pusher: &authenticatedPusher{
-			owner:     s.forkOwner,
+			owner:     forkOwner,
 			repo:      repo,
 			githubURL: s.githubURL,
 			token:     s.installationToken,
