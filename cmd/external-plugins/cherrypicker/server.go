@@ -988,7 +988,7 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 	}
 
 	if s.forkOwner == "" {
-		return comment(fmt.Sprintf("@%s no invitation is needed: cherry-pick branches are created in `%s/%s`.", user, org, repo))
+		return comment(fmt.Sprintf("no invitation is needed: cherry-pick branches are created in `%s/%s`.", org, repo))
 	}
 
 	pr, err := s.ghc.GetPullRequest(org, repo, num)
@@ -996,7 +996,7 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 		return fmt.Errorf("failed to get pull request %s/%s#%d: %w", org, repo, num, err)
 	}
 	if pr.Head.Repo.Owner.Login != s.forkOwner {
-		return comment(fmt.Sprintf("@%s no invitation is needed: this pull request was not created from the `%s` fork.", user, s.forkOwner))
+		return comment(fmt.Sprintf("no invitation is needed: this pull request was not created from the `%s` fork.", s.forkOwner))
 	}
 
 	collaborators, err := s.ghc.ListCollaborators(s.forkOwner, repo)
@@ -1005,7 +1005,7 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 	}
 	for _, collaborator := range collaborators {
 		if collaborator.Login == user {
-			return comment(fmt.Sprintf("@%s you are already a collaborator of `%s/%s`.", user, s.forkOwner, repo))
+			return comment(fmt.Sprintf("you are already a collaborator of `%s/%s`.", s.forkOwner, repo))
 		}
 	}
 
@@ -1025,17 +1025,17 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 		return err
 	}
 	if !member {
-		return comment(fmt.Sprintf("@%s you are not a member of org `%s`, so you cannot be added to the fork.", user, org))
+		return comment(fmt.Sprintf("you are not a member of org `%s`, so you cannot be added to the fork.", org))
 	}
 
 	if err := s.ghc.AddCollaborator(s.forkOwner, repo, user, github.Write); err != nil {
 		log.WithError(err).Warn("failed to add the collaborator")
-		return comment(fmt.Sprintf("@%s failed to invite you as a collaborator of `%s/%s`: %v", user, s.forkOwner, repo, err))
+		return comment(fmt.Sprintf("failed to invite you as a collaborator of `%s/%s`: %v", s.forkOwner, repo, err))
 	}
 
-	return comment(fmt.Sprintf("@%s Please accept the invitation, then you can push to the cherry-pick pull requests. "+
+	return comment(fmt.Sprintf("Please accept the invitation, then you can push to the cherry-pick pull requests. "+
 		"Comment with `/cherry-pick-invite` if the invitation expired. %s/%s/%s/invitations",
-		user, s.githubURL, s.forkOwner, repo))
+		s.githubURL, s.forkOwner, repo))
 }
 
 // createIssue creates an issue on GitHub.
