@@ -316,5 +316,8 @@ func TestInviteCollaborator(t *testing.T) {
 		if len(ghc.comments) != 1 || !strings.Contains(ghc.comments[0], "bot-org/repo/invitations") {
 			t.Fatalf("expected an invitation comment, got %v", ghc.comments)
 		}
+		if mentions := strings.Count(ghc.comments[0], "@wiseguy"); mentions != 1 {
+			t.Errorf("expected exactly one mention of the requester, got %d in %q", mentions, ghc.comments[0])
+		}
 	})
 }
