@@ -22,13 +22,22 @@ import (
 	"strings"
 )
 
-// CreateCherrypickBody creates the body of a cherrypick PR
-func CreateCherrypickBody(num int, requestor, note string, chainBranches []string, kindLabels []string) string {
+// CreateCherrypickBody creates the body of a cherrypick PR.
+//
+// The body of the source PR is copied so that issue references such as
+// "Issue Number: close #123" survive, which release tooling relies on to link
+// the cherry-pick to the same issue. The release note is appended only when the
+// copied body does not already contain a release-note block.
+func CreateCherrypickBody(num int, requestor, sourceBody, note string, chainBranches []string, kindLabels []string) string {
 	cherryPickBody := fmt.Sprintf("This is an automated cherry-pick of #%d", num)
 	if len(requestor) != 0 {
 		cherryPickBody = fmt.Sprintf("%s\n\n/assign %s", cherryPickBody, requestor)
 	}
-	if len(note) != 0 {
+	sourceBody = strings.TrimSpace(sourceBody)
+	if len(sourceBody) != 0 {
+		cherryPickBody = fmt.Sprintf("%s\n\n%s", cherryPickBody, sourceBody)
+	}
+	if len(note) != 0 && !strings.Contains(sourceBody, "```release-note") {
 		cherryPickBody = fmt.Sprintf("%s\n\n%s", cherryPickBody, note)
 	}
 	if len(chainBranches) != 0 {

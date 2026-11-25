@@ -373,7 +373,7 @@ func testCherryPickIC(clients localgit.Clients, t *testing.T) {
 			},
 		}
 		expectedTitle := "[stage] This is a fix for X"
-		expectedBody := fmt.Sprintf("This is an automated cherry-pick of #%d\n\n/assign wiseguy\n\n```release-note\nUpdate the magic number from 42 to 49\n```\n\n/kind bug\n/kind cleanup", iNumber)
+		expectedBody := fmt.Sprintf("This is an automated cherry-pick of #%d\n\n/assign wiseguy\n\n%s\n\n/kind bug\n/kind cleanup", iNumber, body)
 		expectedBase := "stage"
 		expectedHead := fmt.Sprintf(botUser.Login+":"+cherryPickBranchFmt, iNumber, expectedBase)
 		expectedLabels := []string{}
@@ -576,7 +576,7 @@ func testCherryPickPR(clients localgit.Clients, t *testing.T) {
 		prs: []github.PullRequest{
 			{
 				Title: "[release-1.5] This is a fix for Y",
-				Body:  fmt.Sprintf("This is an automated cherry-pick of #%d", prNumber),
+				Body:  fmt.Sprintf("This is an automated cherry-pick of #%d\n\nThis is a cherrypick.", prNumber),
 				Base: github.PullRequestBranch{
 					Ref: "release-1.5",
 				},
@@ -635,7 +635,7 @@ func testCherryPickPR(clients localgit.Clients, t *testing.T) {
 
 	expectedFn := func(branch string) string {
 		expectedTitle := fmt.Sprintf("[%s] This is a fix for Y", branch)
-		expectedBody := fmt.Sprintf("This is an automated cherry-pick of #%d", prNumber)
+		expectedBody := fmt.Sprintf("This is an automated cherry-pick of #%d\n\nThis is a cherrypick.", prNumber)
 		if branch == "release-1.3" {
 			expectedBody = fmt.Sprintf("%s\n\n/cherrypick release-1.2", expectedBody)
 		}
@@ -1408,6 +1408,40 @@ func TestHandlePullRequestLabelAdded_NonMemberRejected(t *testing.T) {
 
 	if !strings.Contains(ghc.comments[0], "only [foo]") {
 		t.Fatalf("expected org membership rejection, got %v", ghc.comments[0])
+	}
+}
+
+func TestBodyForCherryPick(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "keeps the issue reference of the source PR",
+			body: "### What problem does this PR solve?\n\nIssue Number: close #13018\n\n```release-note\nNone\n```",
+			want: "### What problem does this PR solve?\n\nIssue Number: close #13018\n\n```release-note\nNone\n```",
+		},
+		{
+			name: "drops cherry-pick commands so the merged PR cannot retrigger them",
+			body: "a fix\n/cherrypick release-1.5\n/cherry-pick release-1.4\n",
+			want: "a fix",
+		},
+		{
+			name: "leaves a body without commands alone",
+			body: "  a fix  ",
+			want: "a fix",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bodyForCherryPick(tc.body); got != tc.want {
+				t.Errorf("unexpected body:\nwant:\n%q\ngot:\n%q", tc.want, got)
+			}
+		})
 	}
 }
 
