@@ -80,7 +80,7 @@ type githubClient interface {
 func HelpProvider(agent *cherryconfig.Agent, defaults cherryconfig.Defaults) externalplugins.ExternalPluginHelpProvider {
 	return func(enabledRepos []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 		pluginHelp := &pluginhelp.PluginHelp{
-			Description: `The cherrypick plugin is used for cherrypicking PRs across branches. For every successful cherrypick invocation a new PR is opened against the target branch and assigned to the requester. If the parent PR contains a release note, it is copied to the cherrypick PR. Kind labels (e.g. kind/bug, kind/cleanup) from the original PR are copied into the cherry-pick PR description as /kind commands so the bot can re-apply them.`,
+			Description: `The cherrypick plugin is used for cherrypicking PRs across branches. For every successful cherrypick invocation a new PR is opened against the target branch and assigned to the requester. The body of the parent PR is copied to the cherrypick PR, so issue references and the release note survive. Kind labels (e.g. kind/bug, kind/cleanup) from the original PR are copied into the cherry-pick PR description as /kind commands so the bot can re-apply them.`,
 			Config:      map[string]string{},
 		}
 		if agent != nil && agent.Config() != nil {
@@ -782,9 +782,9 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	}
 	var cherryPickBody string
 	if opts.UseProwAssignments {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, releaseNoteFromParentPR(body), chainBranches, kindLabels)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, requester, bodyForCherryPick(body), releaseNoteFromParentPR(body), chainBranches, kindLabels)
 	} else {
-		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", releaseNoteFromParentPR(body), chainBranches, kindLabels)
+		cherryPickBody = cherrypicker.CreateCherrypickBody(num, "", bodyForCherryPick(body), releaseNoteFromParentPR(body), chainBranches, kindLabels)
 	}
 
 	head := fmt.Sprintf("%s:%s", pushOrg, newBranch)
@@ -1118,6 +1118,16 @@ func releaseNoteFromParentPR(body string) string {
 		return ""
 	}
 	return fmt.Sprintf("```release-note\n%s\n```", strings.TrimSpace(potentialMatch[1]))
+}
+
+// bodyForCherryPick returns the source PR body that is copied into the
+// cherry-pick PR. Issue references of the source PR survive this way, which
+// release tooling needs to associate the cherry-pick with the same issue.
+//
+// Cherry-pick commands are dropped: the plugin treats a PR body as a comment
+// when the PR merges, so a copied command would start another pick.
+func bodyForCherryPick(body string) string {
+	return strings.TrimSpace(cherryPickRe.ReplaceAllString(body, ""))
 }
 
 // cherryPickLabels returns the labels to apply to a new cherry-pick PR: the
