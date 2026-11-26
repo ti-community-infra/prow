@@ -523,6 +523,11 @@ owners:
     # control in the provided repos.
     skip_collaborators:
         - ""
+    # UseDefaultBranch is a list of org and org/repo strings specifying the repos
+    # whose OWNERS and OWNERS_ALIASES files should always be loaded from the
+    # repository's default branch instead of the pull request's base branch.
+    use_default_branch:
+        - ""
 # Plugins is a map of organizations (eg "o") or repositories
 # (eg "o/r") to lists of enabled plugin names.
 # If it is defined on both organization and repository levels, the list of enabled

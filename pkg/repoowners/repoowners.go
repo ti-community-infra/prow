@@ -79,6 +79,7 @@ type FullConfig struct {
 type githubClient interface {
 	ListCollaborators(org, repo string) ([]github.User, error)
 	GetRef(org, repo, ref string) (string, error)
+	GetRepo(owner, name string) (github.FullRepo, error)
 }
 
 func newCache() *cache {
@@ -167,6 +168,7 @@ type delegate struct {
 
 	mdYAMLEnabled     func(org, repo string) bool
 	skipCollaborators func(org, repo string) bool
+	useDefaultBranch  func(org, repo string) bool
 	ownersDirDenylist func() *prowConf.OwnersDirDenylist
 	filenames         ownersconfig.Resolver
 
@@ -283,9 +285,32 @@ func (r *RepoOwners) Filenames() ownersconfig.Filenames {
 	return r.filenames
 }
 
+// WithUseDefaultBranch configures whether LoadRepoOwners loads OWNERS and
+// OWNERS_ALIASES files from the repository's default branch instead of the
+// requested base branch.
+func (c *Client) WithUseDefaultBranch(useDefaultBranch func(org, repo string) bool) *Client {
+	c.useDefaultBranch = useDefaultBranch
+	return c
+}
+
 // LoadRepoOwners returns an up-to-date RepoOwners struct for the specified repo.
 // Note: The returned *RepoOwners should be treated as read only.
 func (c *Client) LoadRepoOwners(org, repo, base string) (RepoOwner, error) {
+	if c.useDefaultBranch != nil && c.useDefaultBranch(org, repo) {
+		fullRepo, err := c.ghc.GetRepo(org, repo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get default branch for %s/%s: %w", org, repo, err)
+		}
+		if fullRepo.DefaultBranch != "" && fullRepo.DefaultBranch != base {
+			c.logger.WithFields(logrus.Fields{
+				"org":            org,
+				"repo":           repo,
+				"requested_base": base,
+				"default_branch": fullRepo.DefaultBranch,
+			}).Debug("Overriding OWNERS base branch with repository default branch.")
+			base = fullRepo.DefaultBranch
+		}
+	}
 	log := c.logger.WithFields(logrus.Fields{"org": org, "repo": repo, "base": base})
 	cloneRef := fmt.Sprintf("%s/%s", org, repo)
 	fullName := fmt.Sprintf("%s:%s", cloneRef, base)

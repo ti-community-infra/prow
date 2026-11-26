@@ -3025,3 +3025,31 @@ func TestInvalidCommitMsgFor(t *testing.T) {
 		})
 	}
 }
+
+func TestUseDefaultBranchOwners(t *testing.T) {
+	cfg := Configuration{
+		Owners: Owners{
+			UseDefaultBranch: []string{
+				"pingcap",
+				"tikv/client-go",
+			},
+		},
+	}
+
+	tests := []struct {
+		org  string
+		repo string
+		want bool
+	}{
+		{org: "pingcap", repo: "tidb", want: true},
+		{org: "tikv", repo: "client-go", want: true},
+		{org: "tikv", repo: "tikv", want: false},
+		{org: "other", repo: "repo", want: false},
+	}
+
+	for _, tc := range tests {
+		if got := cfg.UseDefaultBranchOwners(tc.org, tc.repo); got != tc.want {
+			t.Errorf("UseDefaultBranchOwners(%q, %q) = %v, want %v", tc.org, tc.repo, got, tc.want)
+		}
+	}
+}

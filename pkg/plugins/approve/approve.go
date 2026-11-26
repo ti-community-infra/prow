@@ -200,7 +200,7 @@ func handleGenericComment(log *logrus.Entry, ghc githubClient, oc ownersClient, 
 		&state{
 			org:       ce.Repo.Owner.Login,
 			repo:      ce.Repo.Name,
-			branch:    pr.Base.Ref,
+			branch:    ownersBranch(config, ce.Repo, pr.Base.Ref),
 			number:    ce.Number,
 			body:      ce.IssueBody,
 			author:    ce.IssueAuthor.Login,
@@ -208,6 +208,13 @@ func handleGenericComment(log *logrus.Entry, ghc githubClient, oc ownersClient, 
 			htmlURL:   ce.IssueHTMLURL,
 		},
 	)
+}
+
+func ownersBranch(config *plugins.Configuration, repo github.Repo, baseBranch string) string {
+	if config.UseDefaultBranchOwners(repo.Owner.Login, repo.Name) && repo.DefaultBranch != "" {
+		return repo.DefaultBranch
+	}
+	return baseBranch
 }
 
 // handleReviewEvent should only handle reviews that have no approval command.
@@ -273,7 +280,7 @@ func handleReview(log *logrus.Entry, ghc githubClient, oc ownersClient, githubCo
 		&state{
 			org:       re.Repo.Owner.Login,
 			repo:      re.Repo.Name,
-			branch:    re.PullRequest.Base.Ref,
+			branch:    ownersBranch(config, re.Repo, re.PullRequest.Base.Ref),
 			number:    re.PullRequest.Number,
 			body:      re.PullRequest.Body,
 			author:    re.PullRequest.User.Login,
@@ -331,7 +338,7 @@ func handlePullRequest(log *logrus.Entry, ghc githubClient, oc ownersClient, git
 		&state{
 			org:       pre.Repo.Owner.Login,
 			repo:      pre.Repo.Name,
-			branch:    pre.PullRequest.Base.Ref,
+			branch:    ownersBranch(config, pre.Repo, pre.PullRequest.Base.Ref),
 			number:    pre.Number,
 			body:      pre.PullRequest.Body,
 			author:    pre.PullRequest.User.Login,
