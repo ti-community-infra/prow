@@ -320,4 +320,20 @@ func TestInviteCollaborator(t *testing.T) {
 			t.Errorf("expected exactly one mention of the requester, got %d in %q", mentions, ghc.comments[0])
 		}
 	})
+
+	t.Run("fork with a different repository name", func(t *testing.T) {
+		pr := forkPR("bot-org")
+		pr.Head.Repo.Name = "repo-1"
+		ghc := &fghc{pr: pr, isMember: true}
+		s := &Server{ghc: ghc, defaults: cherryconfig.Defaults{ForkOwner: "bot-org"}, githubURL: "https://github.com"}
+		if err := s.inviteCollaborator(logger, inviteEvent("/cherry-pick-invite")); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(ghc.addedCollaborators) != 1 || ghc.addedCollaborators[0] != "bot-org/repo-1:wiseguy:write" {
+			t.Fatalf("expected the invitation to target the actual fork, got %v", ghc.addedCollaborators)
+		}
+		if len(ghc.comments) != 1 || !strings.Contains(ghc.comments[0], "bot-org/repo-1/invitations") {
+			t.Fatalf("expected an invitation comment for the actual fork, got %v", ghc.comments)
+		}
+	})
 }

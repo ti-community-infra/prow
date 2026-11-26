@@ -59,6 +59,9 @@ type fghc struct {
 	addedCollaborators []string
 	addCollaboratorErr error
 	singleCommit       github.RepositoryCommit
+
+	createPRCalls  []bool
+	createPRErrors []error
 }
 
 func (f *fghc) AddLabel(org, repo string, number int, label string) error {
@@ -181,6 +184,14 @@ func (f *fghc) CreateIssue(org, repo, title, body string, milestone int, labels,
 func (f *fghc) CreatePullRequest(org, repo, title, body, head, base string, canModify bool) (int, error) {
 	f.Lock()
 	defer f.Unlock()
+	f.createPRCalls = append(f.createPRCalls, canModify)
+	if len(f.createPRErrors) > 0 {
+		err := f.createPRErrors[0]
+		f.createPRErrors = f.createPRErrors[1:]
+		if err != nil {
+			return 0, err
+		}
+	}
 	var num int
 	for _, pr := range f.prs {
 		if pr.Number > num {
@@ -399,6 +410,15 @@ func testCherryPickIC(clients localgit.Clients, t *testing.T) {
 			t.Errorf("Expected (%d):\n%s\nGot (%d):\n%+v\n", len(expected), expected, len(got), got)
 		}
 
+		hintFound := false
+		for _, comment := range ghc.comments {
+			if strings.Contains(comment, "/cherry-pick-invite") && strings.Contains(comment, "ci-robot/bar") {
+				hintFound = true
+			}
+		}
+		if !hintFound {
+			t.Errorf("expected the success comment to point at /cherry-pick-invite for the fork, got %v", ghc.comments)
+		}
 	})
 
 	t.Run("one branch fails, others proceed", func(t *testing.T) {

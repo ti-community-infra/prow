@@ -30,4 +30,10 @@ The bot uses its own fork to push patches that need to be cherry-picked and open
 PRs out of those patches. The fork is created automatically by the bot so there is
 no need to set it up manually.
 
+Cherry-pick pull requests are opened with "allow edits from maintainers" when
+GitHub accepts the request, so maintainers of the base repository can push to
+the cherry-pick branch without extra permissions. Anyone else who needs to push
+(for example to resolve conflicts) can comment `/cherry-pick-invite` on the
+cherry-pick pull request to be invited as a collaborator of the bot's fork.
+
 Required scopes for the oauth token that need to be used are `read:org` and `repo`.
