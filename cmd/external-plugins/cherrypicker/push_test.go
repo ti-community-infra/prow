@@ -18,11 +18,14 @@ package main
 
 import (
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sirupsen/logrus"
 	cherryconfig "sigs.k8s.io/prow/cmd/external-plugins/cherrypicker/config"
 	"sigs.k8s.io/prow/pkg/git/v2"
+	"sigs.k8s.io/prow/pkg/github"
 )
 
 type recordingPusher struct {
@@ -212,13 +215,99 @@ func TestCensorToken(t *testing.T) {
 	}
 }
 
-func TestMaintainerCanModify(t *testing.T) {
-	if !maintainerCanModify("base-org", "base-org") {
-		t.Error("expected same-repository heads to allow maintainer edits")
-	}
-	if maintainerCanModify("bot-owner", "base-org") {
-		t.Error("expected fork heads to skip maintainer edits")
-	}
+type forkCollabError struct{}
+
+func (forkCollabError) Error() string {
+	return `failed to create pull request against base-org/repo#main from head bot-org:branch: ` +
+		`status code 422 not one of [201], body: {"errors":[{"resource":"PullRequest","field":"fork_collab","code":"custom"}]}`
+}
+
+func (forkCollabError) Unwrap() error {
+	return github.NewUnprocessableEntity()
+}
+
+func TestCreatePullRequest(t *testing.T) {
+	logger := logrus.WithField("test", t.Name())
+
+	t.Run("requests maintainer edits first", func(t *testing.T) {
+		ghc := &fghc{}
+		s := &Server{ghc: ghc}
+
+		num, maintainerEdits, err := s.createPullRequest(logger, "base-org", "repo", "title", "body", "bot-org:branch", "main")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if num != 1 {
+			t.Errorf("expected pull request 1, got %d", num)
+		}
+		if !maintainerEdits {
+			t.Error("expected maintainer edits to be enabled")
+		}
+		if want := []bool{true}; !reflect.DeepEqual(ghc.createPRCalls, want) {
+			t.Errorf("expected canModify calls %v, got %v", want, ghc.createPRCalls)
+		}
+	})
+
+	t.Run("falls back when fork collaboration is rejected", func(t *testing.T) {
+		ghc := &fghc{createPRErrors: []error{forkCollabError{}}}
+		s := &Server{ghc: ghc}
+
+		num, maintainerEdits, err := s.createPullRequest(logger, "base-org", "repo", "title", "body", "bot-org:branch", "main")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if num != 1 {
+			t.Errorf("expected pull request 1, got %d", num)
+		}
+		if maintainerEdits {
+			t.Error("expected maintainer edits to be disabled after the fallback")
+		}
+		if want := []bool{true, false}; !reflect.DeepEqual(ghc.createPRCalls, want) {
+			t.Errorf("expected canModify calls %v, got %v", want, ghc.createPRCalls)
+		}
+	})
+
+	t.Run("returns other errors without retrying", func(t *testing.T) {
+		ghc := &fghc{createPRErrors: []error{errors.New("boom")}}
+		s := &Server{ghc: ghc}
+
+		if _, _, err := s.createPullRequest(logger, "base-org", "repo", "title", "body", "bot-org:branch", "main"); err == nil {
+			t.Fatal("expected an error")
+		}
+		if want := []bool{true}; !reflect.DeepEqual(ghc.createPRCalls, want) {
+			t.Errorf("expected canModify calls %v, got %v", want, ghc.createPRCalls)
+		}
+	})
+}
+
+func TestForkPushHint(t *testing.T) {
+	t.Run("empty for a branch in the base repository", func(t *testing.T) {
+		if got := forkPushHint("base-org", "base-org", "repo", 5, false); got != "" {
+			t.Errorf("expected no hint, got %q", got)
+		}
+		if got := forkPushHint("", "base-org", "repo", 5, false); got != "" {
+			t.Errorf("expected no hint, got %q", got)
+		}
+	})
+
+	t.Run("points to /cherry-pick-invite for a fork", func(t *testing.T) {
+		got := forkPushHint("bot-org", "base-org", "repo", 5, false)
+		for _, want := range []string{"/cherry-pick-invite", "#5", "bot-org/repo"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("expected %q in %q", want, got)
+			}
+		}
+		if strings.Contains(got, "edits from maintainers") {
+			t.Errorf("did not expect the maintainer edit sentence, got %q", got)
+		}
+	})
+
+	t.Run("mentions the maintainer edit permission when enabled", func(t *testing.T) {
+		got := forkPushHint("bot-org", "base-org", "repo", 5, true)
+		if !strings.Contains(got, "edits from maintainers are enabled") {
+			t.Errorf("expected the maintainer edit sentence, got %q", got)
+		}
+	})
 }
 
 func TestGitHubBaseURL(t *testing.T) {

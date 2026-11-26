@@ -713,6 +713,11 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 			if expectedHeads.Has(pr.Head.Ref) {
 				logger.WithField("preexisting_cherrypick", pr.HTMLURL).Info("PR already has cherrypick")
 				resp := fmt.Sprintf("Looks like #%d has already been cherry picked in %s", num, pr.HTMLURL)
+				headRepo := pr.Head.Repo.Name
+				if headRepo == "" {
+					headRepo = repo
+				}
+				resp += forkPushHint(pr.Head.Repo.Owner.Login, org, headRepo, pr.Number, false)
 				return s.createComment(logger, org, repo, num, comment, resp)
 			}
 		}
@@ -792,7 +797,7 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 		head = newBranch
 	}
 
-	createdNum, err := s.ghc.CreatePullRequest(org, repo, title, cherryPickBody, head, targetBranch, maintainerCanModify(pushOrg, org))
+	createdNum, maintainerEdits, err := s.createPullRequest(logger, org, repo, title, cherryPickBody, head, targetBranch)
 	if err != nil {
 		logger.WithError(err).Warn("failed to create new pull request")
 		resp := fmt.Sprintf("new pull request could not be created: %v", err)
@@ -800,6 +805,7 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	}
 	logger = logger.WithField("new_pull_request_number", createdNum)
 	resp := fmt.Sprintf("new pull request created: #%d", createdNum)
+	resp += forkPushHint(pushOrg, org, repo, createdNum, maintainerEdits)
 	logger.Info("new pull request created")
 	if err := s.createComment(logger, org, repo, num, comment, resp); err != nil {
 		return fmt.Errorf("failed to create comment: %w", err)
@@ -827,11 +833,57 @@ func (s *Server) handle(logger logrus.FieldLogger, requester string, comment *gi
 	if conflicts {
 		instructions := fmt.Sprintf("@%s This PR has conflicts, I have held it. "+
 			"Please resolve them or ask others to resolve them, then comment `/unhold` to remove the hold label.", requester)
+		instructions += forkPushHint(pushOrg, org, repo, createdNum, maintainerEdits)
 		if err := s.ghc.CreateComment(org, repo, createdNum, instructions); err != nil {
 			logger.WithError(err).Warn("failed to comment the conflict instructions")
 		}
 	}
 	return nil
+}
+
+// createPullRequest opens the cherry-pick pull request, preferring to let
+// maintainers of the base repository edit the head branch. GitHub rejects the
+// maintainer edit permission with a fork_collab validation error when the token
+// may not grant it, so fall back to a pull request without it instead of
+// failing the cherry-pick. The returned boolean reports whether maintainer
+// edits were enabled.
+func (s *Server) createPullRequest(logger logrus.FieldLogger, org, repo, title, body, head, base string) (int, bool, error) {
+	num, err := s.ghc.CreatePullRequest(org, repo, title, body, head, base, true)
+	if err == nil {
+		return num, true, nil
+	}
+	if !isForkCollabRejection(err) {
+		return 0, false, err
+	}
+
+	logger.WithError(err).Info("GitHub refused to let maintainers edit the cherry-pick branch, retrying without it.")
+	num, err = s.ghc.CreatePullRequest(org, repo, title, body, head, base, false)
+	return num, false, err
+}
+
+// isForkCollabRejection reports whether GitHub rejected a pull request because
+// the token is not allowed to grant fork collaboration (maintainer edits).
+func isForkCollabRejection(err error) bool {
+	if !github.IsUnprocessableEntity(err) {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "fork_collab") || strings.Contains(message, "maintainer_can_modify")
+}
+
+// forkPushHint explains how to get push access to a cherry-pick branch that
+// lives in a fork. It is empty when the branch lives in the base repository.
+func forkPushHint(pushOrg, baseOrg, repo string, prNum int, maintainerEdits bool) string {
+	if pushOrg == "" || pushOrg == baseOrg {
+		return ""
+	}
+
+	var hint strings.Builder
+	if maintainerEdits {
+		hint.WriteString(fmt.Sprintf("\n\nMaintainers of `%s/%s` can push to the cherry-pick branch because edits from maintainers are enabled.", baseOrg, repo))
+	}
+	hint.WriteString(fmt.Sprintf("\n\nIf you need to push to the cherry-pick branch, comment `/cherry-pick-invite` on #%d to be invited as a collaborator of the `%s/%s` fork.", prNum, pushOrg, repo))
+	return hint.String()
 }
 
 // commitConflicts commits the conflicted working tree, keeping the conflict
@@ -894,15 +946,6 @@ func (s *Server) cherryPickCommitMessage(org, repo string, num int, copyIssueNum
 		texts = append(texts, fmt.Sprintf("%s %s/%s#%d", number.AssociatePrefix, number.Org, number.Repo, number.Number))
 	}
 	return fmt.Sprintf("%s\n\n%s", message, strings.Join(texts, ", "))
-}
-
-// maintainerCanModify reports whether the maintainer edit permission can be
-// requested. GitHub rejects a pull request created from a fork when the request
-// asks for it, because the base repository cannot grant the fork owner
-// collaboration (fork_collab), so it is only requested for same-repository
-// heads.
-func maintainerCanModify(pushOrg, org string) bool {
-	return pushOrg == org
 }
 
 func (s *Server) applyToBranch(r git.RepoClient, org, repo, localPath string, num int) error {
@@ -998,19 +1041,27 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 		return comment(fmt.Sprintf("no invitation is needed: this pull request was not created from the `%s` fork.", forkOwner))
 	}
 
-	collaborators, err := s.ghc.ListCollaborators(forkOwner, repo)
+	// The fork may have a different repository name than the base repository
+	// (GitHub appends a suffix when the name is already taken), so invite the
+	// user to the repository the pull request actually came from.
+	forkRepo := pr.Head.Repo.Name
+	if forkRepo == "" {
+		forkRepo = repo
+	}
+
+	collaborators, err := s.ghc.ListCollaborators(forkOwner, forkRepo)
 	if err != nil {
-		return fmt.Errorf("failed to list collaborators of %s/%s: %w", forkOwner, repo, err)
+		return fmt.Errorf("failed to list collaborators of %s/%s: %w", forkOwner, forkRepo, err)
 	}
 	for _, collaborator := range collaborators {
 		if collaborator.Login == user {
-			return comment(fmt.Sprintf("you are already a collaborator of `%s/%s`.", forkOwner, repo))
+			return comment(fmt.Sprintf("you are already a collaborator of `%s/%s`.", forkOwner, forkRepo))
 		}
 	}
 
-	invitations, err := s.ghc.ListRepoInvitations(forkOwner, repo)
+	invitations, err := s.ghc.ListRepoInvitations(forkOwner, forkRepo)
 	if err != nil {
-		return fmt.Errorf("failed to list invitations of %s/%s: %w", forkOwner, repo, err)
+		return fmt.Errorf("failed to list invitations of %s/%s: %w", forkOwner, forkRepo, err)
 	}
 	for _, invitation := range invitations {
 		if invitation.Invitee != nil && invitation.Invitee.Login == user {
@@ -1027,14 +1078,14 @@ func (s *Server) inviteCollaborator(log logrus.FieldLogger, ic github.IssueComme
 		return comment(fmt.Sprintf("you are not a member of org `%s`, so you cannot be added to the fork.", org))
 	}
 
-	if err := s.ghc.AddCollaborator(forkOwner, repo, user, github.Write); err != nil {
+	if err := s.ghc.AddCollaborator(forkOwner, forkRepo, user, github.Write); err != nil {
 		log.WithError(err).Warn("failed to add the collaborator")
-		return comment(fmt.Sprintf("failed to invite you as a collaborator of `%s/%s`: %v", forkOwner, repo, err))
+		return comment(fmt.Sprintf("failed to invite you as a collaborator of `%s/%s`: %v", forkOwner, forkRepo, err))
 	}
 
 	return comment(fmt.Sprintf("Please accept the invitation, then you can push to the cherry-pick pull requests. "+
 		"Comment with `/cherry-pick-invite` if the invitation expired. %s/%s/%s/invitations",
-		s.githubURL, forkOwner, repo))
+		s.githubURL, forkOwner, forkRepo))
 }
 
 // createIssue creates an issue on GitHub.
