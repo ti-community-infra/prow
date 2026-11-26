@@ -221,7 +221,11 @@ func main() {
 	resolver := func(org, repo string) ownersconfig.Filenames {
 		return pluginAgent.Config().OwnersFilenames(org, repo)
 	}
-	ownersClient := repoowners.NewClient(gitClient, githubClient, mdYAMLEnabled, skipCollaborators, ownersDirDenylist, resolver)
+	useDefaultBranch := func(org, repo string) bool {
+		return pluginAgent.Config().UseDefaultBranchOwners(org, repo)
+	}
+	ownersClient := repoowners.NewClient(gitClient, githubClient, mdYAMLEnabled, skipCollaborators, ownersDirDenylist, resolver).
+		WithUseDefaultBranch(useDefaultBranch)
 
 	clientAgent := &plugins.ClientAgent{
 		GitHubClient:              githubClient,

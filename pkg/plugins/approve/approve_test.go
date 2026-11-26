@@ -2067,3 +2067,37 @@ func TestHelpProvider(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnersBranch(t *testing.T) {
+	cfg := &plugins.Configuration{
+		Owners: plugins.Owners{
+			UseDefaultBranch: []string{"org/repo"},
+		},
+	}
+	repo := github.Repo{
+		Owner:         github.User{Login: "org"},
+		Name:          "repo",
+		DefaultBranch: "master",
+	}
+
+	if got := ownersBranch(cfg, repo, "release-8.5"); got != "master" {
+		t.Errorf("ownersBranch() with UseDefaultBranch enabled = %q, want %q", got, "master")
+	}
+
+	otherRepo := github.Repo{
+		Owner:         github.User{Login: "org"},
+		Name:          "other",
+		DefaultBranch: "master",
+	}
+	if got := ownersBranch(cfg, otherRepo, "release-8.5"); got != "release-8.5" {
+		t.Errorf("ownersBranch() with UseDefaultBranch disabled = %q, want %q", got, "release-8.5")
+	}
+
+	noDefault := github.Repo{
+		Owner: github.User{Login: "org"},
+		Name:  "repo",
+	}
+	if got := ownersBranch(cfg, noDefault, "release-8.5"); got != "release-8.5" {
+		t.Errorf("ownersBranch() without DefaultBranch = %q, want %q", got, "release-8.5")
+	}
+}

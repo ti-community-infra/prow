@@ -128,6 +128,10 @@ type cacheOptions struct {
 type fakeGitHubClient struct {
 	Collaborators []string
 	ref           string
+	refs          map[string]string
+	defaultBranch string
+	getRepoErr    error
+	getRepoCalls  int
 }
 
 func (f *fakeGitHubClient) ListCollaborators(org, repo string) ([]github.User, error) {
@@ -139,7 +143,29 @@ func (f *fakeGitHubClient) ListCollaborators(org, repo string) ([]github.User, e
 }
 
 func (f *fakeGitHubClient) GetRef(org, repo, ref string) (string, error) {
+	if f.refs != nil {
+		if sha, ok := f.refs[ref]; ok {
+			return sha, nil
+		}
+	}
 	return f.ref, nil
+}
+
+func (f *fakeGitHubClient) GetRepo(owner, name string) (github.FullRepo, error) {
+	f.getRepoCalls++
+	if f.getRepoErr != nil {
+		return github.FullRepo{}, f.getRepoErr
+	}
+	branch := f.defaultBranch
+	if branch == "" {
+		branch = defaultBranch
+	}
+	return github.FullRepo{
+		Repo: github.Repo{
+			Name:          name,
+			DefaultBranch: branch,
+		},
+	}, nil
 }
 
 func getTestClient(
@@ -1643,4 +1669,119 @@ aliases:
 			}
 		})
 	}
+}
+
+func TestLoadRepoOwnersUseDefaultBranch(t *testing.T) {
+	localGit, gitClient, err := localgit.NewV2()
+	if err != nil {
+		t.Fatalf("failed to create localgit: %v", err)
+	}
+	defer func() {
+		if err := localGit.Clean(); err != nil {
+			t.Errorf("failed to clean localgit: %v", err)
+		}
+		if err := gitClient.Clean(); err != nil {
+			t.Errorf("failed to clean gitClient: %v", err)
+		}
+	}()
+
+	if localgit.DefaultBranch("") != defaultBranch {
+		localGit.InitialBranch = defaultBranch
+	}
+	if err := localGit.MakeFakeRepo("org", "repo"); err != nil {
+		t.Fatalf("cannot make fake repo: %v", err)
+	}
+	if err := localGit.AddCommit("org", "repo", map[string][]byte{
+		"OWNERS": []byte("approvers:\n- alice\n"),
+	}); err != nil {
+		t.Fatalf("cannot add default branch commit: %v", err)
+	}
+	defaultSHA, err := localGit.RevParse("org", "repo", "HEAD")
+	if err != nil {
+		t.Fatalf("cannot rev-parse default branch: %v", err)
+	}
+
+	if err := localGit.CheckoutNewBranch("org", "repo", "release-8.5"); err != nil {
+		t.Fatalf("cannot checkout release branch: %v", err)
+	}
+	if err := localGit.AddCommit("org", "repo", map[string][]byte{
+		"OWNERS": []byte("approvers:\n- bob\n"),
+	}); err != nil {
+		t.Fatalf("cannot add release branch commit: %v", err)
+	}
+	releaseSHA, err := localGit.RevParse("org", "repo", "HEAD")
+	if err != nil {
+		t.Fatalf("cannot rev-parse release branch: %v", err)
+	}
+	if err := localGit.Checkout("org", "repo", defaultBranch); err != nil {
+		t.Fatalf("cannot checkout default branch: %v", err)
+	}
+
+	newClient := func(ghc *fakeGitHubClient, useDefault bool) *Client {
+		c := &Client{
+			logger: logrus.WithField("client", "repoowners"),
+			ghc:    ghc,
+			delegate: &delegate{
+				git:               gitClient,
+				cache:             newCache(),
+				mdYAMLEnabled:     func(org, repo string) bool { return false },
+				skipCollaborators: func(org, repo string) bool { return true },
+				ownersDirDenylist: func() *prowConf.OwnersDirDenylist { return &prowConf.OwnersDirDenylist{} },
+				filenames:         ownersconfig.FakeResolver,
+			},
+		}
+		if useDefault {
+			c.WithUseDefaultBranch(func(org, repo string) bool { return org == "org" && repo == "repo" })
+		}
+		return c
+	}
+
+	t.Run("disabled uses PR base branch", func(t *testing.T) {
+		ghc := &fakeGitHubClient{
+			defaultBranch: defaultBranch,
+			refs: map[string]string{
+				"heads/" + defaultBranch: defaultSHA,
+				"heads/release-8.5":      releaseSHA,
+			},
+		}
+		ro, err := newClient(ghc, false).LoadRepoOwners("org", "repo", "release-8.5")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got, want := ro.TopLevelApprovers(), sets.New[string]("bob"); !got.Equal(want) {
+			t.Errorf("TopLevelApprovers() = %v, want %v", got, want)
+		}
+		if ghc.getRepoCalls != 0 {
+			t.Errorf("expected 0 GetRepo calls when disabled, got %d", ghc.getRepoCalls)
+		}
+	})
+
+	t.Run("enabled overrides PR base branch with default branch", func(t *testing.T) {
+		ghc := &fakeGitHubClient{
+			defaultBranch: defaultBranch,
+			refs: map[string]string{
+				"heads/" + defaultBranch: defaultSHA,
+				"heads/release-8.5":      releaseSHA,
+			},
+		}
+		ro, err := newClient(ghc, true).LoadRepoOwners("org", "repo", "release-8.5")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got, want := ro.TopLevelApprovers(), sets.New[string]("alice"); !got.Equal(want) {
+			t.Errorf("TopLevelApprovers() = %v, want %v", got, want)
+		}
+		if ghc.getRepoCalls != 1 {
+			t.Errorf("expected 1 GetRepo call, got %d", ghc.getRepoCalls)
+		}
+	})
+
+	t.Run("enabled returns error when GetRepo fails", func(t *testing.T) {
+		ghc := &fakeGitHubClient{
+			getRepoErr: fmt.Errorf("boom"),
+		}
+		if _, err := newClient(ghc, true).LoadRepoOwners("org", "repo", "release-8.5"); err == nil {
+			t.Fatalf("expected error when GetRepo fails, got nil")
+		}
+	})
 }

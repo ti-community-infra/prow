@@ -285,6 +285,11 @@ type Owners struct {
 	// Filenames allows configuring repos to use a separate set of filenames for
 	// any plugin that interacts with these files. Keys are in "org" or "org/repo" format.
 	Filenames map[string]ownersconfig.Filenames `json:"filenames,omitempty"`
+
+	// UseDefaultBranch is a list of org and org/repo strings specifying the repos
+	// whose OWNERS and OWNERS_ALIASES files should always be loaded from the
+	// repository's default branch instead of the pull request's base branch.
+	UseDefaultBranch []string `json:"use_default_branch,omitempty"`
 }
 
 // OwnersFilenames determines which filenames to use for OWNERS and OWNERS_ALIASES for a repo.
@@ -323,6 +328,19 @@ func (c *Configuration) MDYAMLEnabled(org, repo string) bool {
 func (c *Configuration) SkipCollaborators(org, repo string) bool {
 	full := fmt.Sprintf("%s/%s", org, repo)
 	for _, elem := range c.Owners.SkipCollaborators {
+		if elem == org || elem == full {
+			return true
+		}
+	}
+	return false
+}
+
+// UseDefaultBranchOwners returns a boolean denoting if OWNERS and OWNERS_ALIASES files
+// for the passed repo should always be loaded from the repository's default branch
+// instead of the pull request's base branch.
+func (c *Configuration) UseDefaultBranchOwners(org, repo string) bool {
+	full := fmt.Sprintf("%s/%s", org, repo)
+	for _, elem := range c.Owners.UseDefaultBranch {
 		if elem == org || elem == full {
 			return true
 		}
